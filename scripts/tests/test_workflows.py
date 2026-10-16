@@ -58,6 +58,32 @@ def test_workflow_rules(path):
             assert "secrets." not in st["run"]
 
 
+RELEASE_SECRETS = ("RENDER_DEPLOY_HOOK", "VERCEL_DEPLOY_HOOK", "RELEASE_TOKEN", "DEPLOY_STATUS_KEY", "API_BASE_URL",
+                   "APP_URL", "NTFY_TOPIC")
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_jobs_using_release_secrets_run_in_the_production_environment(path):
+    """S-55: those secrets are environment secrets of `production` (restricted to main); a job that reads one must
+    declare the environment or it would silently read nothing, and a repository-level copy would be reachable from any branch."""
+    for job_id, job in load(path)["jobs"].items():
+        uses = [n for n in RELEASE_SECRETS if any(f"secrets.{n}" in str(st) for st in job.get("steps", []))]
+        if uses:
+            assert job.get("environment") == "production", f"{job_id} uses {uses} without environment: production"
+
+
+def test_release_workflow_refuses_reruns_and_regates_before_deploying():
+    text = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "github.run_attempt" in text and "re-running a release is not allowed" in text
+    wf = load(REPO / ".github" / "workflows" / "release.yml")
+    deploy = wf["jobs"]["deploy-backend"]["steps"]
+    names = [s.get("name", "") for s in deploy]
+    gate_i = next(i for i, n in enumerate(names) if n.startswith("Re-run the gate"))
+    hook_i = next(i for i, n in enumerate(names) if n.startswith("Trigger the Render"))
+    assert gate_i < hook_i
+    assert "only the current tip of main" in text
+
+
 def test_release_workflow_is_manual_main_only_and_gated():
     wf = load(REPO / ".github" / "workflows" / "release.yml")
     assert set(wf["on"]) == {"workflow_dispatch"}

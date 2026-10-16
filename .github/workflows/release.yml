@@ -50,6 +50,9 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # S-55: every job that can read a release secret runs in the `production` environment, which is restricted to the
+    # main branch (deploy/release_secrets.md). A workflow on any other branch cannot read the secrets.
+    environment: production
     permissions:
       contents: read
       checks: read
@@ -66,13 +69,19 @@ jobs:
         id: resolve
         env:
           REF_INPUT: ${{ inputs.ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          # S-56: a re-run would reuse an old approval context; start a new run instead.
+          [ "$RUN_ATTEMPT" = "1" ] || { echo "::error::re-running a release is not allowed; start a new run"; exit 1; }
           case "$REF_INPUT" in
             ""|-*|*[!A-Za-z0-9._/-]*) echo "::error::ref has characters that are not allowed"; exit 1;;
           esac
           SHA="$(git rev-parse --verify --quiet "${REF_INPUT}^{commit}")" || { echo "::error::unknown ref"; exit 1; }
           git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::that commit is not on main"; exit 1; }
+          # S-64: only the tip of main is released until Render's deploy-hook `ref=` parameter has been verified on a real
+          # deploy (and the Vercel hook always builds the tip). Rollbacks go through Render's own rollback for now.
+          [ "$SHA" = "$(git rev-parse origin/main)" ] || { echo "::error::only the current tip of main can be released"; exit 1; }
           DAY="$(date -u +%Y.%m.%d)"
           N=$(( $(git tag --list "v${DAY}-*" | wc -l) + 1 ))
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
@@ -124,6 +133,7 @@ jobs:
     needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    environment: production
     permissions:
       contents: read
     steps:
@@ -158,11 +168,33 @@ jobs:
     environment: production
     permissions:
       contents: read
+      checks: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Re-run the gate right before deploying (S-56; the 30 minute wait can change things)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          REPO: ${{ github.repository }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          DEPLOY_STATUS_KEY: ${{ secrets.DEPLOY_STATUS_KEY }}
+          BOT_STOPPED_CONFIRMED: ${{ inputs.bot_stopped_confirmed }}
+        run: |
+          set -uo pipefail
+          [ "$(git rev-parse origin/main)" = "$SHA" ] || { echo "::error::main moved since approval; start a new release"; exit 1; }
+          CI_GREEN=false
+          if gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" > checks.json              && python3 scripts/release_gate.py ci --checks-file checks.json; then CI_GREEN=true; fi
+          python3 scripts/release_ctl.py status --out status.json || echo "status not available; the gate decides"
+          args=(gate --status-file status.json --ci-green "$CI_GREEN")
+          [ "$BOT_STOPPED_CONFIRMED" = "true" ] && args+=(--bot-stopped-confirmed)
+          SCHEMA="$(git show "${SHA}:control_api/version.py" 2>/dev/null | sed -n 's/^SCHEMA_VERSION[^=]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          [ -n "$SCHEMA" ] && args+=(--release-schema "$SCHEMA")
+          python3 scripts/release_gate.py "${args[@]}"
       - name: Trigger the Render deploy of exactly this commit
+        # S-64: `ref=` is unverified against a real Render deploy; the gate job already limits releases to the main tip.
         env:
           RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
           SHA: ${{ needs.gate.outputs.sha }}
@@ -234,6 +266,7 @@ jobs:
     needs: [gate, deploy-backend, deploy-frontend]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: production
     permissions:
       contents: write          # create the tag and the GitHub release
     steps:
@@ -269,6 +302,7 @@ jobs:
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: production
     permissions: {}
     steps:
       - name: Notify - release stopped
