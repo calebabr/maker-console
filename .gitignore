@@ -27,6 +27,7 @@ logs/
 **/logs/
 state/
 **/state.json
+!control_api/tests/fixtures/schema_v1/state.json
 MAKER_KILL_SWITCH
 ARB_KILL_SWITCH
 cache/

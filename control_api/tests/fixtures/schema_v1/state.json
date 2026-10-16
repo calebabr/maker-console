@@ -1,0 +1,12 @@
+[
+ {
+  "arb_desired": "stopped",
+  "arb_mode": "demo",
+  "desired": "stopped",
+  "mode": "demo",
+  "updated_by": "seed",
+  "updated_utc": {
+   "$date": "2026-10-16T22:59:45.600000+00:00"
+  }
+ }
+]
