@@ -30,6 +30,8 @@ NO_2FA = {
     ("POST", "/api/bot/run-once"): "only runs a pass when already started (desired=running)",
     ("POST", "/api/monitor/run"): "S-6: can only pause series, never add risk",
     ("POST", "/api/tick"): "cron-job.org, X-Tick-Token instead of a login",
+    ("POST", "/api/release/pending"): "release workflow, X-Release-Token instead of a login; only registers a pending release",
+    ("POST", "/api/release/pending/{release_id}/reject"): "can only prevent a deploy",
     ("POST", "/api/push/subscribe"): "UX 45: only lets this signed-in device receive alerts; no trading effect",
     ("DELETE", "/api/push/subscribe"): "UX 45: only stops notifications to a device",
     ("DELETE", "/api/push/subscriptions"): "S-33: only stops notifications to every device; defensive, no trading effect",
@@ -86,6 +88,7 @@ def _expected_2fa():
         ("PUT", "/api/cloud"), ("POST", "/api/cloud/pinger/sync"), ("PUT", "/api/arb"),
         ("POST", "/api/auth/logout-all"),
         ("PUT", "/api/alerts/settings"), ("POST", "/api/config/undo"),
+        ("POST", "/api/release/pending/{release_id}/approve"),
     }
 
 
@@ -108,7 +111,8 @@ async def test_every_mutating_route_rejects_a_wrong_2fa_code(env):
 
 
 async def test_every_api_route_requires_a_login_except_the_explicit_public_ones(env):
-    public = {("POST", "/api/auth/login"), ("POST", "/api/auth/2fa"), ("POST", "/api/tick")}
+    public = {("POST", "/api/auth/login"), ("POST", "/api/auth/2fa"), ("POST", "/api/tick"),
+              ("POST", "/api/release/pending"), ("GET", "/api/release/pending/{release_id}")}
     routes = _api_routes(env.app)
     assert len(routes) > len(public), "no routes found"
     for m, path in routes:
