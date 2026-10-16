@@ -7,6 +7,7 @@ import Header from './components/Header.jsx';
 import NavBar from './components/NavBar.jsx';
 import WakingBanner from './components/WakingBanner.jsx';
 import WhatsNew from './components/WhatsNew.jsx';
+import UpdateBanner from './components/UpdateBanner.jsx';
 import PageTitle from './components/PageTitle.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 import Login from './pages/Login.jsx';
@@ -33,6 +34,7 @@ function SignedIn() {
         <Header />
         <div className="shell-notices">
           <WakingBanner />
+          <UpdateBanner />
           <WhatsNew />
         </div>
         <main className="content">

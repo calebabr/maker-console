@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { IconLock } from '../components/Icons.jsx';
 import Card from '../components/Card.jsx';
+import LeaseCard from '../components/LeaseCard.jsx';
+import PendingReleaseCard from '../components/PendingReleaseCard.jsx';
 import HelpIcon from '../components/HelpIcon.jsx';
 import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
@@ -196,6 +198,8 @@ export default function Server() {
           Refresh
         </button>
       </div>
+      <PendingReleaseCard />
+      <LeaseCard />
       <StaleNotice staleAt={error ? staleAt : null} />
       <ErrorNotice error={error} onRetry={reload} />
       {loading && !data && <Loading />}

@@ -207,6 +207,38 @@ function reportText(summary) {
   return lines.join('\n');
 }
 
+function readScenario() {
+  try {
+    const raw = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('keel.mock') : '';
+    return new Set(String(raw || '').split(',').map((x) => x.trim()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
+// One pending release, requested 6 min ago with a 30 min window; an expired one lapsed 3 min ago.
+function seedRelease(sc) {
+  if (sc.has('release-none') || sc.has('release-off')) return null;
+  const expired = sc.has('release-expired');
+  const created = now() - (expired ? 33 : 6) * MIN;
+  return {
+    id: 'c0ffee00c0ffee00c0ffee00c0ffee00',
+    version: '2026.10.16-2',
+    commit: '9f3a1c7d2b8e4a6f0c5d7e1b3a9f2c4d6e8b0a1c',
+    summary: 'Release gate and lease handover; phone app shows server role. No settings changes.',
+    ci: 'passed (4 of 4 checks)',
+    status: 'pending',
+    created_at: created,
+    expires_at: created + 30 * MIN,
+  };
+}
+
+/** Test/dev helper: replace the scenario flags and rebuild the release/lease state. */
+export function setMockScenario(...names) {
+  S.scenario = new Set(names.flat());
+  S.release = seedRelease(S.scenario);
+}
+
 function initialState() {
   const summary = buildSummary();
   return {
@@ -224,6 +256,11 @@ function initialState() {
     cloud: { keepalive_minutes: 10, pinger_minutes: 5, pinger_enabled: true, silent_alert_minutes: 30 },
     pinger: { configured: true, job_id: 5813377, synced: true, last_sync_utc: iso(now() - 2 * 60 * MIN), error: null },
     keepalive: { last_ping_utc: iso(now() - 3 * MIN), ok: true, error: null },
+    // Release process (docs/RELEASE_CONTRACT.md section 3). Scenario names: standby, release-expired,
+    // release-none, release-off (404), old-app. Set via sessionStorage 'keel.mock' (comma list) or setMockScenario().
+    scenario: readScenario(),
+    lease: { holder: 'a3f9c2d41b7e4c0a9d6e5f8b12c34d56', generation: 14, expires_at: now() + 45 * 1000, instance: 'a3f9c2d41b7e4c0a9d6e5f8b12c34d56' },
+    release: seedRelease(readScenario()),
     audit: [],
     logs: [],
     lastCode: null,
@@ -359,6 +396,26 @@ function tickKeepalive() {
   if (n > 0) S.keepalive = { ...S.keepalive, last_ping_utc: iso(last + n * gap) };
 }
 
+// The leader renews every 20 s with a 60 s TTL, so the expiry always sits 40-60 s ahead (never frozen in the past).
+function leaseFields() {
+  const standby = S.scenario.has('standby');
+  const expires = now() + (60 - ((now() / 1000) % 20)) * 1000;
+  return {
+    role: standby ? 'standby' : 'leader',
+    lease_generation: S.lease.generation,
+    lease_expires_at: iso(expires),
+    lease_holder: standby ? 'e71b04aa5c2d49f08b3a6d7c91e0f245' : S.lease.holder,
+    instance_id: standby ? '5d2c8e90b1a74f36a0c9e4d8b7f61a23' : S.lease.instance,
+  };
+}
+
+function releaseView() {
+  const r = S.release;
+  if (!r) return null;
+  const status = r.status === 'pending' && r.expires_at <= now() ? 'expired' : r.status;
+  return { id: r.id, version: r.version, commit: r.commit, summary: r.summary, ci: r.ci, status, created_at: iso(r.created_at), expires_at: iso(r.expires_at), by: r.by || null, at: r.at ? iso(r.at) : null };
+}
+
 function status() {
   tickBot();
   const exposure = 37.6;
@@ -383,6 +440,11 @@ function status() {
     // UX contract section 5 additions (read-only).
     pnl_today: { maker: 1.4, arb: 0.35, you: -0.8, bot: 1.75, total: 0.95 },
     recent_passes: recentPasses(),
+    // Release handshake + lease (real field names from the API).
+    api_version: '2026.10.16-1',
+    min_app_version: S.scenario.has('old-app') ? '99.0.0' : '0.1.0',
+    schema_version: 1,
+    ...leaseFields(),
     last_run_at: iso(S.last_run),
     next_run_at: S.desired === 'running' && !S.kill_switch ? iso(nextDue) : null,
   };
@@ -486,7 +548,9 @@ async function route(method, url, headers, body) {
   const p = url.pathname;
   const q = url.searchParams;
 
-  if (method === 'GET' && p === '/healthz') return reply(200, { ok: true });
+  if (method === 'GET' && p === '/healthz') {
+    return reply(200, { ok: true, api_version: '2026.10.16-1', min_app_version: S.scenario.has('old-app') ? '99.0.0' : '0.1.0', schema_version: 1, role: leaseFields().role, lease_generation: S.lease.generation });
+  }
 
   if (method === 'POST' && p === '/api/auth/login') {
     if (!body || !body.username || !body.password) return reply(422, { detail: 'username and password required' });
@@ -705,6 +769,29 @@ async function route(method, url, headers, body) {
   if (method === 'GET' && p === '/api/audit') {
     const limit = Math.min(500, parseInt(q.get('limit') || '100', 10) || 100);
     return reply(200, { items: S.audit.slice(0, limit) });
+  }
+
+  if (p === '/api/release/pending' || p.startsWith('/api/release/pending/')) {
+    if (S.scenario.has('release-off')) return reply(404, { detail: 'Not Found' });
+    if (method === 'GET' && p === '/api/release/pending') {
+      const v = releaseView();
+      return reply(200, { release: v && v.status === 'pending' ? v : null });
+    }
+    const m = /^\/api\/release\/pending\/([0-9a-f]{32})\/(approve|reject)$/.exec(p);
+    if (method === 'POST' && m) {
+      if (m[2] === 'approve') {
+        const bad = check2fa(headers);
+        if (bad) return bad;
+      }
+      const v = releaseView();
+      if (!v || v.id !== m[1]) return reply(404, { detail: 'release_not_found' });
+      if (v.status !== 'pending') return reply(409, { detail: 'release_not_pending' });
+      S.release.status = m[2] === 'approve' ? 'approved' : 'rejected';
+      S.release.by = 'owner';
+      S.release.at = now();
+      audit(`release.${m[2]}`, true, { id: v.id, version: v.version });
+      return reply(200, { id: v.id, status: S.release.status });
+    }
   }
 
   if (method === 'GET' && p === '/api/cloud') return reply(200, cloudResponse());

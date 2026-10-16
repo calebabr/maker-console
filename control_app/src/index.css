@@ -258,6 +258,13 @@ a:hover { text-decoration: underline; }
 }
 .banner-waking { color: var(--warn); }
 .banner-offline { color: var(--muted); }
+.banner-update { color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
+.lease-role { margin: 0 0 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.lease-note { margin: 0 0 8px; font-size: 0.8125rem; }
+.stats dd.mono { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.release-summary { margin: 10px 0 0; font-size: 0.875rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.release-actions { display: flex; gap: 10px; margin-top: 12px; }
+.release-actions .btn { flex: 1; }
 .banner-db { color: var(--text); box-shadow: inset 3px 0 0 var(--danger); }
 
 .loading { display: flex; align-items: center; gap: 8px; color: var(--muted); padding: 12px 0; font-size: 0.875rem; }

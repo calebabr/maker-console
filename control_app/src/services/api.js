@@ -376,6 +376,11 @@ export const api = {
   putCloud: (patch, code) => request('PUT', '/api/cloud', { body: patch, code }),
   syncPinger: (code) => request('POST', '/api/cloud/pinger/sync', { code }),
 
+  // Release approval (docs/RELEASE_CONTRACT.md section 3). Never cached: a stale approval card would mislead.
+  getReleasePending: () => request('GET', '/api/release/pending', { cache: false }),
+  approveRelease: (id, code) => request('POST', `/api/release/pending/${enc(id)}/approve`, { code, cache: false }),
+  rejectRelease: (id) => request('POST', `/api/release/pending/${enc(id)}/reject`, { cache: false }),
+
   // Bracket arbitrage (DASHBOARD_PLAN.md "Strategies run by the app")
   getArb: () => request('GET', '/api/arb'),
   // patch: any of {enabled, live, confirm:"LIVE", ack_legging, arb_max_contracts, arb_min_profit, arb_series, arb_poll_seconds}
