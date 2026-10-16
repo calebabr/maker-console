@@ -4,6 +4,11 @@
 # Runs only on push / pull request (never on a schedule). Uses NO secrets: tests use fakes,
 # MemoryStore and mocks; RUNNER_ENABLED=false; Kalshi, Atlas, cron-job.org and ntfy are never called.
 # Third-party actions are pinned to full commit SHAs (tag in the trailing comment).
+# Job ids double as check names: scripts/release_gate.py requires python, frontend, e2e, commit-messages (here) plus
+# gitleaks and semgrep (their own workflows) to be green on the exact commit before a release; do not rename them.
+# C1 (Linux python job): reproduced the whole job on Linux (WSL Ubuntu, Python 3.12, hash-locked install, pip check, the
+# lock-agreement and stand-in steps, scripts + bot + API tests from a clean `git archive`): all green; the cp311 wheel
+# set resolves for linux x86_64. Diagnostics (-ra, --tb=short, pip list on failure) make a red run self-explanatory.
 name: tests
 
 on:
@@ -59,12 +64,19 @@ jobs:
           test ! -e control_api/data/cell_expectations.json
           python -c "import sys; sys.path.insert(0, 'kalshi_bot'); import maker_strategy; assert maker_strategy.IS_STANDIN is True; print('IS_STANDIN=True')"
       - name: Deploy script and push-gate tests
-        run: python -m pytest -q -p no:cacheprovider scripts/tests
+        run: python -m pytest -q -ra --tb=short -p no:cacheprovider scripts/tests
       - name: Bot tests (kalshi_bot)
         working-directory: kalshi_bot
-        run: python -m pytest -q -p no:cacheprovider tests
+        run: python -m pytest -q -ra --tb=short -p no:cacheprovider tests
       - name: Control API tests
-        run: python -m pytest -q -n auto -p no:cacheprovider control_api/tests   # full run incl. slow, parallel
+        run: python -m pytest -q -ra --tb=short -n auto -p no:cacheprovider control_api/tests   # full run incl. slow, parallel
+      - name: Environment (only when something above failed)
+        if: failure()
+        run: |
+          python --version
+          python -m pip list --format=freeze
+          git --version
+          uname -a
 
   frontend:
     runs-on: ubuntu-latest
@@ -121,3 +133,31 @@ jobs:
         env:
           CI: "true"
         run: npm run e2e
+
+  commit-messages:
+    # C7: every pushed / PR commit must be a Conventional Commit (same regex as .githooks/commit-msg).
+    # Generated dependabot[bot] commit subjects are skipped inside the script.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      BEFORE_SHA: ${{ github.event.before }}
+      AFTER_SHA: ${{ github.sha }}
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check commit subjects
+        run: |
+          set -euo pipefail
+          zeros="0000000000000000000000000000000000000000"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 scripts/commit_msg_check.py range "${PR_BASE_SHA}..${PR_HEAD_SHA}"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$BEFORE_SHA" != "$zeros" ] && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            python3 scripts/commit_msg_check.py range "${BEFORE_SHA}..${AFTER_SHA}"
+          else
+            python3 scripts/commit_msg_check.py commit "$AFTER_SHA"   # new branch, forced push or manual run: the tip only
+          fi

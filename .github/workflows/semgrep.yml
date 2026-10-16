@@ -1,0 +1,44 @@
+# Static analysis with semgrep OSS (Python, JavaScript/React, GitHub Actions, Dockerfile rule packs). Required check
+# (the release gate needs the job `semgrep` green on the release commit). Runs on push and pull request only; no secrets,
+# no login, metrics off. Findings are compared with the reviewed baseline .github/semgrep-baseline.json: a finding that
+# is not in the baseline fails the job. To triage a finding: fix it, or add an entry WITH a reason (see CONTRIBUTING.md).
+# The semgrep install is hash-locked (.github/semgrep/requirements.txt). The rule packs come from the semgrep registry
+# at run time, so a rule update can surface a new finding on an unchanged commit; triage it like any other.
+name: semgrep
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semgrep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/semgrep/requirements.txt
+      - name: Install semgrep (hash-locked, wheels only)
+        run: |
+          python -m pip install --require-hashes --only-binary :all: --no-deps -r .github/semgrep/requirements.txt
+      - name: Scan
+        run: |
+          semgrep scan --metrics=off --disable-version-check --quiet \
+            --config p/python --config p/javascript --config p/react --config p/github-actions --config p/dockerfile \
+            --json -o semgrep-report.json .
+      - name: Compare with the reviewed baseline
+        run: python3 scripts/semgrep_triage.py --report semgrep-report.json --baseline .github/semgrep-baseline.json

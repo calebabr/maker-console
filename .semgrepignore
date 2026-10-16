@@ -1,0 +1,15 @@
+# Files semgrep does not scan (also keeps the registry rules away from generated and vendored code).
+node_modules/
+dist/
+build/
+test-results/
+playwright-report/
+**/package-lock.json
+**/requirements*.txt
+*.min.js
+# Test code builds fake secrets, SQL-ish strings and shell calls on purpose; production code is what the scan is for.
+control_api/tests/
+kalshi_bot/tests/
+scripts/tests/
+control_app/src/test/
+control_app/e2e/

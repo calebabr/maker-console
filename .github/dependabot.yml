@@ -1,0 +1,39 @@
+# Dependency update PRs (contract C4). Monthly and grouped so the owner reviews one PR per ecosystem, not a stream.
+# Nothing auto-merges. Locked Python files carry hashes: after a bump, CI re-checks the hash-pinned install and that
+# requirements.txt and requirements-dev.txt still agree. The monthly review routine is in docs/ (docs agent).
+# Dependabot commit subjects can exceed 72 characters; the commit-message check skips dependabot[bot] commits,
+# and the owner edits the PR title to a Conventional Commit when squash-merging.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /control_api
+    schedule: {interval: monthly}
+    open-pull-requests-limit: 3
+    groups:
+      python-runtime: {patterns: ["*"]}
+    commit-message: {prefix: "chore(deploy)"}
+    labels: [dependencies, security-review]
+  - package-ecosystem: pip
+    directory: /.github/semgrep
+    schedule: {interval: monthly}
+    open-pull-requests-limit: 1
+    groups:
+      semgrep-ci: {patterns: ["*"]}
+    commit-message: {prefix: "chore(deploy)"}
+    labels: [dependencies]
+  - package-ecosystem: npm
+    directory: /control_app
+    schedule: {interval: monthly}
+    open-pull-requests-limit: 3
+    groups:
+      app-dependencies: {patterns: ["*"]}
+    commit-message: {prefix: "chore(app)"}
+    labels: [dependencies, security-review]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: monthly}
+    open-pull-requests-limit: 2
+    groups:
+      actions: {patterns: ["*"]}
+    commit-message: {prefix: "ci(deploy)"}
+    labels: [dependencies, security-review]

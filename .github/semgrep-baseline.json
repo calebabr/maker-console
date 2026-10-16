@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "findings": [
+    {
+      "rule": "python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure",
+      "path": "control_api/auth/deps.py",
+      "fingerprint": "1966e232fe3e",
+      "reason": "The log line prints a fixed message and the exception class name only; the word 'password'/'token'/'secret' is part of the message text, no credential value is logged."
+    },
+    {
+      "rule": "python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure",
+      "path": "control_api/auth/routes.py",
+      "fingerprint": "3f0b67693d70",
+      "reason": "The log line prints a fixed message and the exception class name only; the word 'password'/'token'/'secret' is part of the message text, no credential value is logged."
+    },
+    {
+      "rule": "python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure",
+      "path": "control_api/auth/routes.py",
+      "fingerprint": "da1c8e45b802",
+      "reason": "The log line prints a fixed message and the exception class name only; the word 'password'/'token'/'secret' is part of the message text, no credential value is logged."
+    },
+    {
+      "rule": "python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1",
+      "path": "control_api/db/schemas.py",
+      "fingerprint": "380c57ffa3ac",
+      "reason": "SHA-1 builds a short dedupe key for stored rows; it is not used for security (no signature, password or token)."
+    },
+    {
+      "rule": "python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1",
+      "path": "control_api/db/schemas.py",
+      "fingerprint": "2da4b485b4ca",
+      "reason": "SHA-1 builds a short dedupe key for stored rows; it is not used for security (no signature, password or token)."
+    },
+    {
+      "rule": "python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure",
+      "path": "control_api/runner.py",
+      "fingerprint": "020a3d0467d1",
+      "reason": "The log line prints a fixed message and the exception class name only; the word 'password'/'token'/'secret' is part of the message text, no credential value is logged."
+    }
+  ]
+}
