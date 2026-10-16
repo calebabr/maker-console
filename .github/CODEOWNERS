@@ -1,0 +1,31 @@
+# Every change under these paths is requested for review from the owner. GitHub Free cannot enforce this on a private
+# repo; on the public repo turn on "Require review from Code Owners" in the main-branch protection when it is available.
+# Paths match the security-review checklist in .github/pull_request_template.md.
+*                                    @calebabr
+
+# Strategy, orders, sizing (the stand-in here; the real strategy lives in the private repo)
+/kalshi_bot/                         @calebabr
+
+# Stop, auth, 2FA, secrets, security headers
+/control_api/auth/                   @calebabr
+/control_api/security.py             @calebabr
+/control_api/settings.py             @calebabr
+
+# Runner, lease, handover, release endpoints
+/control_api/runner.py               @calebabr
+/control_api/services/lease.py       @calebabr
+/control_api/services/handover.py    @calebabr
+/control_api/routes/release.py       @calebabr
+/control_api/routes/deploy_status.py @calebabr
+/control_api/version.py              @calebabr
+
+# Database schema and indexes
+/control_api/db/                     @calebabr
+
+# Deploy, release pipeline, hooks, CI
+/render.yaml                         @calebabr
+/Dockerfile                          @calebabr
+/deploy/                             @calebabr
+/scripts/                            @calebabr
+/.githooks/                          @calebabr
+/.github/                            @calebabr

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Rejects a commit whose subject is not a Conventional Commit (contract C7; same check runs in CI).
+# Also refuses agent attribution trailers. Fails closed when python is missing.
+set -u
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+py="$(command -v python3 2>/dev/null || true)"
+"$py" -c '' >/dev/null 2>&1 || py="$(command -v python || true)"
+if [ -z "$py" ]; then echo "commit-msg: python not found, refusing (fail closed)." >&2; exit 3; fi
+exec "$py" "$here/../scripts/commit_msg_check.py" file "$1"

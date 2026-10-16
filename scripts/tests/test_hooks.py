@@ -44,6 +44,7 @@ def repo(tmp_path, deny):
     r = tmp_path / "work"
     (r / "scripts").mkdir(parents=True)
     shutil.copytree(REPO / ".githooks", r / ".githooks")
+    (r / ".githooks" / "commit-msg").unlink()      # message format is covered by test_commit_msg.py; these tests use terse messages
     shutil.copy(REPO / "scripts" / "denylist_scan.py", r / "scripts")
     shutil.copy(REPO / "scripts" / "scan_tree.sh", r / "scripts")
     shutil.copy(REPO / "scripts" / "overlay_manifest.txt", r / "scripts")
