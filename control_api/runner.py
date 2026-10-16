@@ -62,6 +62,7 @@ FILL_ALERT_MAX_LINES = 3
 FENCE_MARGIN_S = 5.0                # a pass starts only if the lease outlives PASS_BUDGET_S + this margin
 SHUTDOWN_TAIL_S = 10.0              # after the order step: time for the pass's journal/heartbeat writes
 SHUTDOWN_STORE_TIMEOUT_S = 5.0
+CANCEL_TIMEOUT_S = 25.0             # same bound as Stop's own cancel
 # S-25: queue-position, fill-quality and fills-sync Kalshi reads run on their own small pool with a short client,
 # never on the default executor that Stop's cancel uses.
 TELEMETRY_WORKERS = 2
@@ -506,6 +507,8 @@ class Runner:
         mode, arb_mode = st.get("mode", "demo"), st.get("arb_mode", "demo")
         reason = None
         kept_live = False
+        prev_holder = (self._pre_acquire_lease or {}).get("holder")
+        took_over = bool(prev_holder) and prev_holder != self.instance_id    # another process held it before
         if mode == "live":
             token = ((self._pre_acquire_lease or {}).get("handover") or (post or {}).get("handover"))
             reason = await self._check_handover(token, st, desired)
@@ -515,6 +518,9 @@ class Runner:
         self._pre_acquire_lease = None
         self._live_downgraded = [n for n, m in (("maker", "demo" if kept_live else mode), ("arbitrage", arb_mode))
                                  if m == "live"]
+        # S-54: `seen` stays the updated_utc of OUR READ. Our own writes below change the doc, so the next sync
+        # (lease tick, or _pre_order_fence before the first pass) re-reads it and adopts a Stop that another instance
+        # wrote between our read and our write.
         seen = st.get("updated_utc")
         if self._live_downgraded:
             log.warning("live state in store not restored after restart: %s now demo", self._live_downgraded)
@@ -522,14 +528,12 @@ class Runner:
             if "arbitrage" in self._live_downgraded:
                 kw["arb_mode"] = "demo"
             try:
-                doc = await asyncio.wait_for(self.store.set_state(by="rehydrate", **kw), timeout=5)
-                seen = (doc or {}).get("updated_utc", seen)
+                await asyncio.wait_for(self.store.set_state(by="rehydrate", **kw), timeout=5)
             except Exception as e:  # noqa: BLE001   (memory says demo below; fail-safe either way)
                 log.error("demo mode not persisted at startup: %s", type(e).__name__)
         if st.get("arb_desired") == "running" and arb_desired == "stopped" and config_ok:
             try:
-                doc = await asyncio.wait_for(self.store.set_state(by="rehydrate", arb_desired="stopped"), timeout=5)
-                seen = (doc or {}).get("updated_utc", seen)
+                await asyncio.wait_for(self.store.set_state(by="rehydrate", arb_desired="stopped"), timeout=5)
             except Exception as e:  # noqa: BLE001
                 log.error("arb stopped not persisted at startup: %s", type(e).__name__)
         # a Stop that landed during the awaits above wins; no await from here to the fence opening
@@ -544,7 +548,24 @@ class Runner:
         self._leader_ready = True
         self._ready_mark = lease_mark
         log.warning("leader (generation %s): desired=%s mode=%s", self.lease.generation, self.desired, self.mode)
+        if self.desired == "stopped" and took_over:
+            # S-53 (b): the previous holder may have left orders resting after a Stop it never saw (SIGKILL, an
+            # overrun, or a Stop that landed elsewhere mid-pass). Best effort, in the background, stored mode.
+            # Only on a takeover from another process: a first-ever lease has no predecessor to clean up after.
+            stored_mode = st.get("mode") if st.get("mode") in ("demo", "live") else self.mode
+            self._spawn(self._best_effort_cancel(stored_mode, "leader started stopped"))
         await self._alert_resumed_state(st, kept_live=kept_live)
+
+    async def _best_effort_cancel(self, mode: str, why: str) -> int:
+        """Cancel resting mm- orders (the same call Stop makes; no fence: it only removes risk). Never raises."""
+        try:
+            n = await asyncio.wait_for(asyncio.to_thread(self._cancel_resting, mode), timeout=CANCEL_TIMEOUT_S)
+            if n:
+                log.warning("%s: cancelled %s resting mm- orders (%s)", why, n, mode)
+            return n
+        except Exception as e:  # noqa: BLE001
+            log.error("%s: cancel failed: %s", why, type(e).__name__)
+            return 0
 
     async def _check_handover(self, token: Any, st: dict, desired: str) -> str | None:
         """None if the signed handover lets us keep LIVE (consumes its nonce), else the refusal reason."""
@@ -626,7 +647,8 @@ class Runner:
     def shutdown_budget_s(self) -> float:
         """The whole graceful shutdown must end well inside Render's shutdown delay (120 s)."""
         delay = float(getattr(self.settings, "shutdown_delay_s", 120.0))
-        return max(5.0, min(delay - 30.0, self.pass_budget_s + SHUTDOWN_TAIL_S + 4 * SHUTDOWN_STORE_TIMEOUT_S))
+        return max(5.0, min(delay - 30.0, self.pass_budget_s + SHUTDOWN_TAIL_S + CANCEL_TIMEOUT_S
+                            + 5 * SHUTDOWN_STORE_TIMEOUT_S))
 
     async def shutdown(self) -> None:
         """R2 graceful shutdown (SIGTERM -> lifespan): stop scheduling, let a running order step finish (hard
@@ -668,6 +690,7 @@ class Runner:
             await asyncio.sleep(0.05)
         with contextlib.suppress(BaseException):          # 4) persist what the journal tail has not sent yet
             await asyncio.wait_for(self._sync_journal(), SHUTDOWN_STORE_TIMEOUT_S)
+        await self._shutdown_stop_checks()
         if self.lease.role != LEADER:
             return
         if overran:
@@ -680,6 +703,36 @@ class Runner:
         handover = await self._make_handover() if self._leader_ready else None
         ok = await self.lease.release(handover=handover)  # 5) hand over
         log.warning("lease released at shutdown (ok=%s, signed handover=%s)", ok, handover is not None)
+
+    async def _shutdown_stop_checks(self) -> None:
+        """S-53 (a): a Stop written to the store by ANOTHER instance (the new standby got the request) while this
+        one was shutting down mid-pass: the pass may have placed orders after that instance's cancel. Adopt it
+        (no token is then written) and cancel resting mm- orders once more. S-59: a Stop of ours whose store write
+        is still pending gets one last write before the lease goes; if that fails, alert. Never raises."""
+        if self._stop_pending:
+            try:
+                await asyncio.wait_for(self._write_stopped("stop-retry-at-shutdown"), SHUTDOWN_STORE_TIMEOUT_S)
+                self._stop_pending, self._stop_persisted = False, True
+            except Exception as e:  # noqa: BLE001
+                log.error("Stop not persisted before shutdown: %s", type(e).__name__)
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(self.alerter.send(
+                        "Stop not persisted across deploy", "A Stop on the old instance never reached the store. "
+                        "Press Stop again on the new instance.", priority="urgent"), 5)
+        if self.desired != "running":
+            return                                       # a local Stop already cancelled (and S-4 re-cancelled)
+        try:
+            st = await asyncio.wait_for(self.store.get_state(), SHUTDOWN_STORE_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            log.warning("shutdown state check failed: %s", type(e).__name__)
+            return
+        if not st or st.get("desired") != "stopped":
+            return
+        log.warning("shutdown: the store says stopped (by %s): cancelling resting mm- orders",
+                    str(st.get("updated_by") or "?")[:64])
+        self.desired = "stopped"                         # also means no handover token below
+        self.arb_desired, self.arb_mode = "stopped", "demo"
+        await self._best_effort_cancel(self.mode, "shutdown after a remote Stop")
 
     async def _make_handover(self) -> dict | None:
         """A2: a signed token only for a planned shutdown while the maker runs LIVE with no Stop pending. Never
