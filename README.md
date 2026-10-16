@@ -3,10 +3,6 @@
 A phone-first control system for running an automated Kalshi market-making bot 24/7 on free cloud tiers: a FastAPI
 control API with an in-process bot runner, and a React PWA to start, stop and supervise it from a phone.
 
-> **Not financial advice.** Trading event contracts can lose money. Use the Kalshi **demo** exchange first.
-
-> Placeholder README: the full public README is written by the docs pass of the repo split.
-
 ## What is in this repository
 
 ```
