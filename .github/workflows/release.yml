@@ -1,0 +1,282 @@
+# Manual, owner-approved release (docs/RELEASE_PROCESS.md, decision B2). Render auto-deploy is OFF; this workflow is the
+# only way a commit reaches production.
+#
+# Flow: gate (CI green on this exact commit + safety gate on the running server) -> register a pending release with the
+# API and wait for the owner to Approve it in the app with fresh 2FA (30 min, then the run fails and nothing deploys)
+# -> backend deploy hook -> verify -> frontend deploy hook -> verify -> ntfy "healthy" -> tag + release notes.
+#
+# Triggered only by hand (Actions -> release -> Run workflow, also from GitHub Mobile), only from main, by an account
+# with write access. Agents never run or approve it (they cannot pass 2FA).
+#
+# Security rules for this file (checked by scripts/tests/test_workflows.py):
+#   * top-level permissions are none; each job asks for the least it needs (read-only except the final tag job)
+#   * third-party actions pinned by full SHA; no pull_request_target; no schedule
+#   * secrets only through env: on the step that uses them, never interpolated into a script; inputs reach shell
+#     scripts only as environment variables; nothing secret is echoed
+#   * everything fails closed: anything other than "approved" / "healthy" stops the release
+#
+# Secrets to add (GitHub -> Settings -> Secrets and variables -> Actions); none exist until the owner deploys:
+#   API_BASE_URL          https origin of the Render service, no trailing slash
+#   APP_URL               https URL of the Vercel app (public)
+#   DEPLOY_STATUS_KEY     same value as DEPLOY_STATUS_KEY in Render
+#   RELEASE_TOKEN         same value as RELEASE_TOKEN in Render
+#   RENDER_DEPLOY_HOOK    Render deploy hook URL (service -> Settings -> Deploy Hook)
+#   VERCEL_DEPLOY_HOOK    Vercel deploy hook URL (project -> Settings -> Git -> Deploy Hooks, branch main)
+#   NTFY_TOPIC            the ntfy topic used for alerts
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA or tag to release (must be on main)"
+        required: true
+        type: string
+      bot_stopped_confirmed:
+        description: "I stopped the bot in the app (only needed when the running server cannot report its status)"
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # Only the copy of this workflow on main may run with secrets.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      prev_generation: ${{ steps.status.outputs.prev_generation }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve the commit and the version
+        id: resolve
+        env:
+          REF_INPUT: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          case "$REF_INPUT" in
+            ""|-*|*[!A-Za-z0-9._/-]*) echo "::error::ref has characters that are not allowed"; exit 1;;
+          esac
+          SHA="$(git rev-parse --verify --quiet "${REF_INPUT}^{commit}")" || { echo "::error::unknown ref"; exit 1; }
+          git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::that commit is not on main"; exit 1; }
+          DAY="$(date -u +%Y.%m.%d)"
+          N=$(( $(git tag --list "v${DAY}-*" | wc -l) + 1 ))
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "version=${DAY}-${N}" >> "$GITHUB_OUTPUT"
+          echo "Releasing $SHA as v${DAY}-${N}"
+      - name: CI must be green on this exact commit
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" > checks.json \
+             && python3 scripts/release_gate.py ci --checks-file checks.json; then
+            echo "green=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "green=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Read the running server's deploy status
+        id: status
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          DEPLOY_STATUS_KEY: ${{ secrets.DEPLOY_STATUS_KEY }}
+        run: |
+          set -uo pipefail
+          python3 scripts/release_ctl.py status --out status.json || echo "status not available; the gate decides"
+          if [ -s status.json ]; then
+            GEN="$(python3 -c "import json; print(json.load(open('status.json')).get('generation', ''))" 2>/dev/null || true)"
+            case "$GEN" in (*[!0-9]*) GEN="";; esac
+            echo "prev_generation=$GEN" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Safety gate
+        env:
+          CI_GREEN: ${{ steps.ci.outputs.green }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          BOT_STOPPED_CONFIRMED: ${{ inputs.bot_stopped_confirmed }}
+        run: |
+          set -uo pipefail
+          args=(gate --status-file status.json --ci-green "$CI_GREEN")
+          [ "$BOT_STOPPED_CONFIRMED" = "true" ] && args+=(--bot-stopped-confirmed)
+          # The release's own data schema version, read from the commit being released (skipped when absent).
+          SCHEMA="$(git show "${SHA}:control_api/version.py" 2>/dev/null | sed -n 's/^SCHEMA_VERSION[^=]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          [ -n "$SCHEMA" ] && args+=(--release-schema "$SCHEMA")
+          python3 scripts/release_gate.py "${args[@]}"
+
+  approve:
+    # The owner approves in Keel (Server page) with fresh 2FA. The run waits at most 30 minutes.
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Register the pending release
+        id: register
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/changelog.py --to "$SHA" --version "v${VERSION}" --max-chars 2800 > notes.md
+          ID="$(python3 scripts/release_ctl.py register --version "$VERSION" --commit "$SHA" --summary-file notes.md --ci "green: python, frontend, e2e, gitleaks, semgrep, commit-messages")"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Registered pending release v${VERSION}. Open Keel -> Server -> Pending release and approve with 2FA."
+      - name: Wait for approval (30 minutes, then fail)
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_ID: ${{ steps.register.outputs.id }}
+        run: python3 scripts/release_ctl.py poll --id "$RELEASE_ID" --timeout 1800 --interval 20
+
+  deploy-backend:
+    needs: [gate, approve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Trigger the Render deploy of exactly this commit
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          case "$RENDER_DEPLOY_HOOK" in
+            https://api.render.com/deploy/*) ;;
+            *) echo "::error::RENDER_DEPLOY_HOOK is not a Render deploy hook URL"; exit 1;;
+          esac
+          case "$RENDER_DEPLOY_HOOK" in *\?*) SEP="&";; *) SEP="?";; esac
+          curl --fail --silent --show-error --max-time 30 --proto '=https' -o /dev/null -X POST "${RENDER_DEPLOY_HOOK}${SEP}ref=${SHA}"
+          echo "Render deploy requested."
+      - name: Verify - new version live, new leader holds the lease, healthy
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          DEPLOY_STATUS_KEY: ${{ secrets.DEPLOY_STATUS_KEY }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          PREV_GENERATION: ${{ needs.gate.outputs.prev_generation }}
+        run: |
+          set -euo pipefail
+          args=(verify-backend --version "$VERSION" --commit "$SHA" --timeout 900)
+          [ -n "$PREV_GENERATION" ] && args+=(--prev-generation "$PREV_GENERATION")
+          python3 scripts/release_ctl.py "${args[@]}"
+
+  deploy-frontend:
+    needs: [gate, deploy-backend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: read
+    outputs:
+      deployed: ${{ steps.hook.outputs.deployed }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Trigger the Vercel deploy
+        id: hook
+        env:
+          VERCEL_DEPLOY_HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # A Vercel deploy hook builds the tip of its configured branch (main). If main moved since this release was
+          # approved, the app would not be the approved commit: skip the frontend rather than deploy something else.
+          # The old app keeps working (version handshake); re-run the release on the new tip to ship it.
+          if [ "$(git rev-parse origin/main)" != "$SHA" ]; then
+            echo "::warning::main moved past the released commit; frontend NOT deployed. Re-run the release on the new tip."
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$VERCEL_DEPLOY_HOOK" in
+            https://api.vercel.com/*) ;;
+            *) echo "::error::VERCEL_DEPLOY_HOOK is not a Vercel deploy hook URL"; exit 1;;
+          esac
+          curl --fail --silent --show-error --max-time 30 --proto '=https' -o /dev/null -X POST "$VERCEL_DEPLOY_HOOK"
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+          echo "Vercel deploy requested."
+      - name: Verify the app is serving
+        if: ${{ steps.hook.outputs.deployed == 'true' }}
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+        run: python3 scripts/release_ctl.py verify-frontend --url "$APP_URL" --timeout 420
+
+  finalize:
+    needs: [gate, deploy-backend, deploy-frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write          # create the tag and the GitHub release
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Notify - release healthy
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          FRONTEND: ${{ needs.deploy-frontend.outputs.deployed }}
+        run: |
+          set -uo pipefail
+          [ -n "$NTFY_TOPIC" ] || { echo "::warning::NTFY_TOPIC is not set; no notification sent"; exit 0; }
+          MSG="Release v${VERSION} healthy. Backend verified; new leader holds the lease."
+          [ "$FRONTEND" = "true" ] || MSG="${MSG} Frontend NOT deployed (main moved on): re-run the release."
+          curl --fail --silent --show-error --max-time 15 --proto '=https' -H "Title: Keel release" -d "$MSG" "https://ntfy.sh/${NTFY_TOPIC}" -o /dev/null \
+            || echo "::warning::ntfy notification failed"
+      - name: Tag the release and publish the notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/changelog.py --to "$SHA" --version "v${VERSION}" > notes.md
+          gh release create "v${VERSION}" --target "$SHA" --title "v${VERSION}" --notes-file notes.md
+
+  alert-failure:
+    # Any failed or cancelled stage: tell the owner. The bot is never touched by this workflow (Stop and the lease decide).
+    needs: [gate, approve, deploy-backend, deploy-frontend, finalize]
+    if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Notify - release stopped
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$NTFY_TOPIC" ] || { echo "::warning::NTFY_TOPIC is not set; no notification sent"; exit 0; }
+          curl --fail --silent --show-error --max-time 15 --proto '=https' -H "Title: Keel release STOPPED" -H "Priority: high" \
+            -d "A release stopped or was refused. Nothing further was deployed. Details: ${RUN_URL}" "https://ntfy.sh/${NTFY_TOPIC}" -o /dev/null \
+            || echo "::warning::ntfy notification failed"

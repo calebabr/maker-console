@@ -20,14 +20,19 @@ services:
     plan: free
     region: virginia            # US East; put the Atlas M0 cluster in AWS us-east-1 too
     branch: main
-    autoDeployTrigger: commit   # replaces the deprecated `autoDeploy: true`
+    # Auto-deploy is OFF (release process, decision B2): production changes only through the owner-approved `release`
+    # workflow (.github/workflows/release.yml), which calls this service's deploy hook with the approved commit.
+    autoDeployTrigger: "off"
+    # The old instance gets this long after SIGTERM to finish its pass, write the signed handover and release the lease
+    # (pass budget 25 s, shutdown work well inside 120 s) before Render kills it. Max allowed is 300.
+    maxShutdownDelaySeconds: 120
     # scripts/render_build.sh: hash-pinned pip install (pip refuses any file whose sha256 is not in
     # requirements.txt), then the optional private-strategy overlay (only when PRIVATE_REPO_TOKEN is set; without
     # it the build succeeds as a demo-only build and live mode is refused), then prints IS_STANDIN=True/False.
     buildCommand: "bash scripts/render_build.sh"
-    startCommand: uvicorn control_api.main:app --host 0.0.0.0 --port $PORT --workers 1
+    startCommand: uvicorn control_api.main:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-graceful-shutdown 60
     healthCheckPath: /healthz
-    # Don't redeploy (and restart the runner mid-pass) for docs-only commits.
+    # Only matters if auto-deploy is ever switched back on: don't redeploy for docs-only commits.
     buildFilter:
       paths:
         - control_api/**
@@ -65,6 +70,18 @@ services:
         sync: false           # optional; leave EMPTY on Render (falls back to RENDER_EXTERNAL_URL)
       - key: PRIVATE_REPO_REF
         value: main           # branch, tag or commit of the private repo that the build overlays
+
+      # ---- release / handover (names only; the owner enters the values in the dashboard) ----
+      - key: APP_VERSION
+        sync: false           # optional label shown as api_version (e.g. 2026.10.16-1); leave empty if the API reports the commit
+      - key: HANDOVER_HMAC_KEY
+        sync: false           # >= 32 random bytes (python -c "import secrets; print(secrets.token_urlsafe(48))"); signs the
+                              # live-mode handover token; empty = handover disabled, every restart drops to demo
+      - key: DEPLOY_STATUS_KEY
+        sync: false           # read-only key for GET /api/deploy/status; the same value is the GitHub secret DEPLOY_STATUS_KEY
+      - key: RELEASE_TOKEN
+        sync: false           # lets the release workflow register/poll a pending release; the same value is the GitHub secret
+                              # RELEASE_TOKEN. Unset = the release endpoints answer 404
 
       # ---- secrets (owner enters in the dashboard; never in git) ----
       - key: PRIVATE_REPO_TOKEN
