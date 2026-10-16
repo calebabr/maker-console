@@ -1,0 +1,20 @@
+[
+ {
+  "cronjob_job_id": 5551234,
+  "keepalive_minutes": 10,
+  "pinger_enabled": true,
+  "pinger_minutes": 5,
+  "pinger_sync": {
+   "error": null,
+   "ok": true,
+   "ts": {
+    "$date": "2026-10-01T09:00:00+00:00"
+   }
+  },
+  "silent_alert_minutes": 30,
+  "updated_by": "seed",
+  "updated_utc": {
+   "$date": "2026-10-16T22:59:45.600000+00:00"
+  }
+ }
+]

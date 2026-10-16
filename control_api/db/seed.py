@@ -217,6 +217,7 @@ async def seed(store: Store, *, now: datetime | None = None, rng_seed: int = 7) 
     # fill quality and executed arb sets. Separate RNG, so the sections above are unchanged.
     for k, v in (await _seed_analytics(store, now, cfg, rng_seed)).items():
         counts[k] = counts.get(k, 0) + v
+    await store.set_schema_version(S.SCHEMA_VERSION)
     return counts
 
 

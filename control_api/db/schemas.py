@@ -33,9 +33,21 @@ ARB_OPPORTUNITIES = "arb_opportunities"
 QUOTE_EPISODES = "quote_episodes"
 ALERT_HISTORY = "alert_history"
 PUSH_SUBSCRIPTIONS = "push_subscriptions"
+# Release process (Sprint 1): leader lease, signed-handover replay guard, schema marker, pending releases.
+RUNNER_LEASE = "runner_lease"
+HANDOVER_NONCES = "handover_nonces"
+META = "meta"
+RELEASES = "releases"
+LEASE_ID = "leader"                       # the single runner_lease doc
+META_SCHEMA_ID = "schema"                 # the single meta doc holding the data schema version
+SCHEMA_VERSION = 1                        # everything that existed before the release process; changes are additive only
+HANDOVER_NONCE_TTL_SECONDS = 3600         # a consumed nonce is remembered for 1 h (tokens expire far sooner)
+RELEASE_RETENTION_SECONDS = 30 * 24 * 3600
+PENDING_RELEASE_TTL_SECONDS = 30 * 60     # a pending release can be approved for 30 minutes
+RELEASE_DECISIONS = ("approved", "rejected")
 COLLECTIONS = (STATE, CLOUD_SETTINGS, CONFIG_VERSIONS, HEARTBEATS, JOURNAL_ROWS, ACCOUNT_SNAPSHOTS,
                FILLS, MONITOR_SUMMARIES, AUDIT_LOG, USERS, REVOKED_TOKENS, SETTLEMENTS, ARB_OPPORTUNITIES,
-               QUOTE_EPISODES, ALERT_HISTORY, PUSH_SUBSCRIPTIONS)
+               QUOTE_EPISODES, ALERT_HISTORY, PUSH_SUBSCRIPTIONS, RUNNER_LEASE, HANDOVER_NONCES, META, RELEASES)
 
 # Alert history (UX sprint item 37): one small doc per alert the system sent (ntfy and/or web push).
 # No secrets (title/body are redacted before they get here); body capped at ALERT_BODY_MAX chars.
@@ -363,6 +375,16 @@ ARB_OPPORTUNITY_DOC = {"ts": "datetime (first seen)", "last_seen": "datetime", "
                        "cost": "float $", "sum_best": "float", "legs": "[[ticker, side, limit, n]]",
                        "executed": "log-only | FILLED {...} | PARTIAL {...} | ERROR ...", "mode": "demo|live?",
                        "sig": "sha1 hex"}
+
+
+RUNNER_LEASE_DOC = {"_id": "leader", "holder": "str (instance id)", "version": "str (build)",
+                    "generation": "int (fencing token)", "expires_at": "datetime", "acquired_at": "datetime",
+                    "handover": "dict|None (signed token envelope)"}
+HANDOVER_NONCE_DOC = {"nonce": "str (unique)", "ts": "datetime (TTL 1 h)"}
+META_SCHEMA_DOC = {"_id": "schema", "version": "int", "updated_utc": "datetime"}
+RELEASE_DOC = {"id": "uuid hex (unique)", "version": "str", "commit": "str", "summary": "str|dict", "ci": "str|dict",
+               "status": "pending|approved|rejected", "created_at": "datetime (TTL 30 d)", "expires_at": "datetime",
+               "by": "str? (decider)", "at": "datetime? (decision time)"}
 
 
 def retention_cutoff(now: datetime | None = None) -> datetime:

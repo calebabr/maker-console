@@ -1,0 +1,107 @@
+[
+ {
+  "after": {
+   "cells": [
+    [
+     0.35,
+     0.5,
+     3,
+     9,
+     "yes"
+    ],
+    [
+     0.5,
+     0.62,
+     9,
+     30,
+     "no"
+    ]
+   ],
+   "max_open_frac": 0.2,
+   "max_order": 5,
+   "poll_minutes": 10,
+   "run_budget": 10,
+   "series": [
+    "KXDEMOA",
+    "KXDEMOB",
+    "KXDEMOC",
+    "KXDEMOD",
+    "KXDEMOE",
+    "KXDEMOF"
+   ]
+  },
+  "before": {
+   "cells": [
+    [
+     0.35,
+     0.5,
+     3,
+     9,
+     "yes"
+    ],
+    [
+     0.5,
+     0.62,
+     9,
+     30,
+     "no"
+    ]
+   ],
+   "max_open_frac": 0.2,
+   "max_order": 5,
+   "poll_minutes": 10,
+   "run_budget": 30,
+   "series": [
+    "KXDEMOA",
+    "KXDEMOB",
+    "KXDEMOC",
+    "KXDEMOD",
+    "KXDEMOE",
+    "KXDEMOF"
+   ]
+  },
+  "by": "owner",
+  "ts": {
+   "$date": "2026-10-16T22:59:45.600000+00:00"
+  },
+  "version": 2
+ },
+ {
+  "after": {
+   "cells": [
+    [
+     0.35,
+     0.5,
+     3,
+     9,
+     "yes"
+    ],
+    [
+     0.5,
+     0.62,
+     9,
+     30,
+     "no"
+    ]
+   ],
+   "max_open_frac": 0.2,
+   "max_order": 5,
+   "poll_minutes": 10,
+   "run_budget": 30,
+   "series": [
+    "KXDEMOA",
+    "KXDEMOB",
+    "KXDEMOC",
+    "KXDEMOD",
+    "KXDEMOE",
+    "KXDEMOF"
+   ]
+  },
+  "before": null,
+  "by": "seed",
+  "ts": {
+   "$date": "2026-10-16T22:59:45.600000+00:00"
+  },
+  "version": 1
+ }
+]

@@ -39,6 +39,10 @@ Database name: `kalshi_control` (`MONGODB_DB`). The URI comes only from `setting
 | `audit_log` | `{ts, user, action, ok, details, ip, ua}` | `ts` desc (no TTL) |
 | `users` | `{username, password_hash, totp_secret_enc, failed_logins, locked_until, last_totp_step}` | unique `username` |
 | `revoked_tokens` | `{jti, exp}` | unique `jti`; TTL on `exp` (`expireAfterSeconds=0`). `is_revoked` also checks `exp > now`, because the TTL monitor runs only about once a minute. |
+| `runner_lease` | Single doc `_id:"leader"`: `holder, version, generation, expires_at, acquired_at, handover`. Changed only by filtered `find_one_and_update` (renew if holder matches; take over if expired with `$inc generation`) or a unique-`_id` insert, never read-modify-write. `generation` rises only when the holder changes or the lease is created. | none |
+| `handover_nonces` | `{nonce, ts}`: a consumed signed-handover nonce (replay guard). `consume_handover` is one insert. | unique `nonce`; TTL 1 h on `ts` |
+| `meta` | Single doc `_id:"schema"`: `version` (int, `SCHEMA_VERSION = 1`), `updated_utc`. | none |
+| `releases` | `{id, version, commit, summary, ci, status pending\|approved\|rejected, created_at, expires_at (+30 min), by?, at?}`. `resolve_pending_release` is one filtered `find_one_and_update` (pending and unexpired only). | unique `id`; TTL 30 d on `created_at` |
 
 `row_hash(row)` is the sha1 of the 9 CSV fields: each value is passed through `str()`, a missing field becomes `''`, and the values are joined with `\x1f` in CSV column order. A row read twice from the CSV always hashes the same, so `add_journal_rows` is idempotent and returns only the count of new rows. `upsert_fills` returns the count of **new** fills; fills that already exist are updated in place.
 

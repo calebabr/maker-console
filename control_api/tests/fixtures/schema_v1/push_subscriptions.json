@@ -1,0 +1,12 @@
+[
+ {
+  "auth": "FIXTURE_AUTH",
+  "created_utc": {
+   "$date": "2026-10-16T22:59:45.635000+00:00"
+  },
+  "endpoint": "https://push.example.test/fixture",
+  "p256dh": "FIXTURE_P256DH",
+  "sub_id": "963ce2404d558e3aa0461ce69d4b25dc8d984d107a0a6566a7f284c29928cbd8",
+  "ua": "fixture"
+ }
+]

@@ -1,0 +1,15 @@
+[
+ {
+  "body": "1 contract",
+  "channels": [
+   "ntfy"
+  ],
+  "id": "b8d9d4e3a3cb48c0892d56389836845b",
+  "priority": "default",
+  "title": "Filled",
+  "ts": {
+   "$date": "2026-10-01T12:00:00+00:00"
+  },
+  "type": "fill"
+ }
+]

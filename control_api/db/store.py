@@ -13,6 +13,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import copy
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 
@@ -185,6 +186,54 @@ class Store(abc.ABC):
         """Delete every subscription (logout-all, owner 'clear all'). Returns how many were removed."""
         raise NotImplementedError
 
+    # ---- release process: leader lease, handover replay guard, schema version, pending releases.
+    # Not abstract (older test fakes keep working); MemoryStore and MongoStore implement all of them.
+    async def acquire_lease(self, holder: str, version: str, ttl_s: float, *, now: datetime | None = None) -> dict:
+        """Atomic. Succeeds when there is no lease, it has expired, or `holder` already owns it (a renew).
+        Returns {"acquired", "generation", "holder", "expires_at"}; on failure these describe the current
+        holder. `generation` only increases when the holder changes or the lease is created."""
+        raise NotImplementedError
+
+    async def renew_lease(self, holder: str, generation: int, ttl_s: float, *, now: datetime | None = None) -> bool:
+        """True only if holder AND generation still match (the lease was not taken by someone else)."""
+        raise NotImplementedError
+
+    async def release_lease(self, holder: str, generation: int, *, handover: dict | None = None,
+                            now: datetime | None = None) -> bool:
+        """Expire the lease now if holder+generation match; stores `handover` (None clears) on the doc."""
+        raise NotImplementedError
+
+    async def get_lease(self, *, now: datetime | None = None) -> dict | None:
+        """{holder, version, generation, expires_at, handover} or None if never created."""
+        raise NotImplementedError
+
+    async def consume_handover(self, nonce: str, *, now: datetime | None = None) -> bool:
+        """Atomic single use: True the first time a nonce is consumed, False on replay."""
+        raise NotImplementedError
+
+    async def get_schema_version(self) -> int | None:
+        raise NotImplementedError
+
+    async def set_schema_version(self, version: int) -> None:
+        raise NotImplementedError
+
+    async def save_pending_release(self, doc: dict) -> dict:
+        """doc {version, commit, summary, ci} -> doc + {id, status "pending", created_at, expires_at (+30 min)}."""
+        raise NotImplementedError
+
+    async def get_pending_release(self, release_id: str) -> dict | None:
+        raise NotImplementedError
+
+    async def latest_pending_release(self, *, now: datetime | None = None) -> dict | None:
+        """Newest release that is still "pending" and not expired, else None."""
+        raise NotImplementedError
+
+    async def resolve_pending_release(self, release_id: str, decision: str, by: str, *,
+                                      now: datetime | None = None) -> dict | None:
+        """decision in {"approved","rejected"}; only from "pending" and not expired, else None.
+        Records `by` and `at` and sets status. Raises ValueError on an invalid decision."""
+        raise NotImplementedError
+
     # ---- monitor
     @abc.abstractmethod
     async def add_monitor_summary(self, doc: dict) -> None: ...
@@ -281,6 +330,36 @@ def _project(docs: list[dict], fields: Iterable[str] | None) -> list[dict]:
     return [{k: v for k, v in d.items() if k in keep} for d in docs]
 
 
+def _lease_out(doc: dict | None) -> dict | None:
+    """Stored lease doc -> {holder, version, generation, expires_at, handover}."""
+    if doc is None:
+        return None
+    return {"holder": doc.get("holder"), "version": doc.get("version"), "generation": int(doc.get("generation") or 0),
+            "expires_at": doc.get("expires_at"), "handover": copy.deepcopy(doc.get("handover"))}
+
+
+def _lease_ttl(ttl_s: float) -> timedelta:
+    ttl = float(ttl_s)
+    if not ttl > 0:
+        raise ValueError("ttl_s must be > 0")
+    return timedelta(seconds=ttl)
+
+
+def _check_decision(decision: str) -> None:
+    if decision not in S.RELEASE_DECISIONS:
+        raise ValueError(f"decision must be one of {S.RELEASE_DECISIONS}")
+
+
+def _new_release(doc: dict, now: datetime) -> dict:
+    S.check_no_secrets(doc)
+    out = S.strip_id(S.normalize(doc))
+    out.pop("id", None)
+    out.pop("status", None)
+    out.update({"id": uuid.uuid4().hex, "status": "pending", "created_at": now,
+                "expires_at": now + timedelta(seconds=S.PENDING_RELEASE_TTL_SECONDS)})
+    return out
+
+
 def _newest(docs: list[dict], key: str = "ts") -> list[dict]:
     return sorted(docs, key=lambda d: d[key], reverse=True)
 
@@ -306,6 +385,10 @@ class MemoryStore(Store):
         self._episodes: dict[str, dict] = {}         # order_id -> doc
         self._alerts: list[dict] = []
         self._push: dict[str, dict] = {}             # sub_id -> doc
+        self._lease: dict | None = None              # the single runner_lease doc
+        self._nonces: dict[str, datetime] = {}       # consumed handover nonce -> ts
+        self._schema_version: int | None = None
+        self._releases: dict[str, dict] = {}         # id -> doc
         self._seq = 0                               # insertion order tiebreak for equal ts
 
     @staticmethod
@@ -584,6 +667,98 @@ class MemoryStore(Store):
             n = len(self._push)
             self._push.clear()
             return n
+
+    # ---- release process
+    async def acquire_lease(self, holder: str, version: str, ttl_s: float, *, now: datetime | None = None) -> dict:
+        holder = str(holder)
+        ttl = _lease_ttl(ttl_s)
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        async with self._lock:
+            cur = self._lease
+            if cur is None:
+                cur = self._lease = {"holder": holder, "version": str(version), "generation": 1,
+                                     "expires_at": t + ttl, "acquired_at": t, "handover": None}
+                acquired = True
+            elif cur["holder"] == holder:                         # already ours: a renew, same generation
+                cur.update({"version": str(version), "expires_at": t + ttl})
+                acquired = True
+            elif cur["expires_at"] <= t:                          # expired: take over with a higher generation
+                cur.update({"holder": holder, "version": str(version), "generation": cur["generation"] + 1,
+                            "expires_at": t + ttl, "acquired_at": t})
+                acquired = True
+            else:
+                acquired = False
+            return {"acquired": acquired, "generation": cur["generation"], "holder": cur["holder"],
+                    "expires_at": cur["expires_at"]}
+
+    async def renew_lease(self, holder: str, generation: int, ttl_s: float, *, now: datetime | None = None) -> bool:
+        ttl = _lease_ttl(ttl_s)
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        async with self._lock:
+            cur = self._lease
+            if cur is None or cur["holder"] != str(holder) or cur["generation"] != int(generation):
+                return False
+            cur["expires_at"] = t + ttl
+            return True
+
+    async def release_lease(self, holder: str, generation: int, *, handover: dict | None = None,
+                            now: datetime | None = None) -> bool:
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        async with self._lock:
+            cur = self._lease
+            if cur is None or cur["holder"] != str(holder) or cur["generation"] != int(generation):
+                return False
+            cur["expires_at"] = t
+            cur["handover"] = S.normalize(handover) if handover is not None else None
+            return True
+
+    async def get_lease(self, *, now: datetime | None = None) -> dict | None:
+        return _lease_out(self._lease)
+
+    async def consume_handover(self, nonce: str, *, now: datetime | None = None) -> bool:
+        if not isinstance(nonce, str) or not nonce:
+            return False
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        async with self._lock:
+            lo = t - timedelta(seconds=S.HANDOVER_NONCE_TTL_SECONDS)      # Atlas TTL equivalent
+            for k in [k for k, ts in self._nonces.items() if ts <= lo]:
+                del self._nonces[k]
+            if nonce in self._nonces:
+                return False
+            self._nonces[nonce] = t
+            return True
+
+    async def get_schema_version(self) -> int | None:
+        return self._schema_version
+
+    async def set_schema_version(self, version: int) -> None:
+        self._schema_version = int(version)
+
+    async def save_pending_release(self, doc: dict) -> dict:
+        d = _new_release(doc, S.utcnow())
+        async with self._lock:
+            self._releases[d["id"]] = self._stamp(d)
+        return self._clean(d)
+
+    async def get_pending_release(self, release_id: str) -> dict | None:
+        d = self._releases.get(str(release_id))
+        return None if d is None else self._clean(d)
+
+    async def latest_pending_release(self, *, now: datetime | None = None) -> dict | None:
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        docs = [d for d in self._releases.values() if d["status"] == "pending" and d["expires_at"] > t]
+        return self._clean(self._newest_seq(docs, "created_at")[0]) if docs else None
+
+    async def resolve_pending_release(self, release_id: str, decision: str, by: str, *,
+                                      now: datetime | None = None) -> dict | None:
+        _check_decision(decision)
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        async with self._lock:
+            d = self._releases.get(str(release_id))
+            if d is None or d["status"] != "pending" or d["expires_at"] <= t:
+                return None
+            d.update({"status": decision, "by": str(by), "at": t})
+            return self._clean(d)
 
     # ---- monitor
     async def add_monitor_summary(self, doc: dict) -> None:

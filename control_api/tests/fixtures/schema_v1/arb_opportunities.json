@@ -1,0 +1,77 @@
+[
+ {
+  "contracts": 29.0,
+  "cost": 102.95,
+  "event": "KXDEMOC-26SEP30",
+  "executed": "log-only",
+  "kind": "NO",
+  "last_seen": {
+   "$date": "2026-09-30T17:19:00+00:00"
+  },
+  "legs": [
+   [
+    "KXDEMOC-26SEP30-B60.5",
+    "ask",
+    0.33,
+    29.0
+   ],
+   [
+    "KXDEMOC-26SEP30-B62.5",
+    "ask",
+    0.38,
+    29.0
+   ],
+   [
+    "KXDEMOC-26SEP30-B64.5",
+    "ask",
+    0.31,
+    29.0
+   ],
+   [
+    "KXDEMOC-26SEP30-B66.5",
+    "ask",
+    0.35,
+    29.0
+   ],
+   [
+    "KXDEMOC-26SEP30-B68.5",
+    "ask",
+    0.18,
+    29.0
+   ]
+  ],
+  "mode": "demo",
+  "profit": 2.1918,
+  "seen_count": 1,
+  "sig": "c7d60563dfd4e6be326177e65b4e93ab4e9f2d72",
+  "sum_best": 1.55,
+  "ts": {
+   "$date": "2026-09-30T17:19:00+00:00"
+  }
+ },
+ {
+  "contracts": 5.0,
+  "cost": 2.25,
+  "event": "KXDEMOB-26SEP30",
+  "executed": "FILLED {\"legs\": 1}",
+  "kind": "NO",
+  "last_seen": {
+   "$date": "2026-09-30T17:00:00+00:00"
+  },
+  "legs": [
+   [
+    "KXDEMOB-26SEP30-B76.5-T3",
+    "ask",
+    0.55,
+    5.0
+   ]
+  ],
+  "mode": "demo",
+  "profit": 0.1791,
+  "seen_count": 1,
+  "sig": "28e1664de88bc26cdd5d2d0edf1c9a6c9d05c2fd",
+  "ts": {
+   "$date": "2026-09-30T17:00:00+00:00"
+  }
+ }
+]

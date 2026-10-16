@@ -12,7 +12,8 @@ from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, ReturnDocument, Upd
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from . import schemas as S
-from .store import Store, _state_out, _validate_state
+from .store import (Store, _check_decision, _lease_out, _lease_ttl, _new_release, _state_out,
+                    _validate_state)
 
 NO_ID = {"_id": 0}
 
@@ -97,6 +98,13 @@ class MongoStore(Store):
         await self._c(S.USERS).create_index([("username", ASCENDING)], unique=True, name="username_unique")
         await self._c(S.REVOKED_TOKENS).create_index([("jti", ASCENDING)], unique=True, name="jti_unique")
         await self._c(S.REVOKED_TOKENS).create_index([("exp", ASCENDING)], expireAfterSeconds=0, name="exp_ttl")
+        # release process (single-doc runner_lease and meta need no index beyond _id)
+        await self._c(S.HANDOVER_NONCES).create_index([("nonce", ASCENDING)], unique=True, name="nonce_unique")
+        await self._c(S.HANDOVER_NONCES).create_index([("ts", ASCENDING)],
+                                                      expireAfterSeconds=S.HANDOVER_NONCE_TTL_SECONDS, name="ts_ttl")
+        await self._c(S.RELEASES).create_index([("id", ASCENDING)], unique=True, name="id_unique")
+        await self._c(S.RELEASES).create_index([("created_at", ASCENDING)],
+                                               expireAfterSeconds=S.RELEASE_RETENTION_SECONDS, name="created_ttl")
 
     async def close(self) -> None:
         await self._client.close()
@@ -382,6 +390,103 @@ class MongoStore(Store):
     async def clear_push_subscriptions(self) -> int:
         res = await self._c(S.PUSH_SUBSCRIPTIONS).delete_many({})
         return int(res.deleted_count)
+
+    # ---- release process. Every lease change is ONE filtered find_one_and_update (or one unique insert):
+    # never read-modify-write, so two instances can never both win.
+    async def acquire_lease(self, holder: str, version: str, ttl_s: float, *, now: datetime | None = None) -> dict:
+        holder = str(holder)
+        ttl = _lease_ttl(ttl_s)
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        coll = self._c(S.RUNNER_LEASE)
+        key = {"_id": S.LEASE_ID}
+        fields = {"version": str(version), "expires_at": t + ttl}
+        for _ in range(3):                                   # a race can only be lost to a state change; re-evaluate
+            # 1. already ours (expired or not): a renew, generation unchanged
+            doc = await coll.find_one_and_update(
+                {**key, "holder": holder}, {"$set": fields}, return_document=ReturnDocument.AFTER)
+            # 2. held by someone else but expired: take over with generation + 1
+            if doc is None:
+                doc = await coll.find_one_and_update(
+                    {**key, "holder": {"$ne": holder}, "expires_at": {"$lte": t}},
+                    {"$set": {**fields, "holder": holder, "acquired_at": t}, "$inc": {"generation": 1}},
+                    return_document=ReturnDocument.AFTER)
+            # 3. no lease yet: the unique _id makes exactly one creator win
+            if doc is None:
+                try:
+                    doc = {**key, "holder": holder, **fields, "generation": 1, "acquired_at": t, "handover": None}
+                    await coll.insert_one(dict(doc))
+                except DuplicateKeyError:
+                    doc = None
+            if doc is not None:
+                return {"acquired": True, "generation": int(doc.get("generation") or 0), "holder": holder,
+                        "expires_at": doc["expires_at"]}
+            cur = await coll.find_one(key, NO_ID)
+            if cur is not None and cur.get("holder") != holder and cur.get("expires_at") > t:
+                return {"acquired": False, "generation": int(cur.get("generation") or 0),
+                        "holder": cur.get("holder"), "expires_at": cur.get("expires_at")}
+        cur = await coll.find_one(key, NO_ID) or {}
+        return {"acquired": False, "generation": int(cur.get("generation") or 0), "holder": cur.get("holder"),
+                "expires_at": cur.get("expires_at")}
+
+    async def renew_lease(self, holder: str, generation: int, ttl_s: float, *, now: datetime | None = None) -> bool:
+        ttl = _lease_ttl(ttl_s)
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        doc = await self._c(S.RUNNER_LEASE).find_one_and_update(
+            {"_id": S.LEASE_ID, "holder": str(holder), "generation": int(generation)},
+            {"$set": {"expires_at": t + ttl}}, projection={"_id": 1})
+        return doc is not None
+
+    async def release_lease(self, holder: str, generation: int, *, handover: dict | None = None,
+                            now: datetime | None = None) -> bool:
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        doc = await self._c(S.RUNNER_LEASE).find_one_and_update(
+            {"_id": S.LEASE_ID, "holder": str(holder), "generation": int(generation)},
+            {"$set": {"expires_at": t, "handover": S.normalize(handover) if handover is not None else None}},
+            projection={"_id": 1})
+        return doc is not None
+
+    async def get_lease(self, *, now: datetime | None = None) -> dict | None:
+        return _lease_out(await self._c(S.RUNNER_LEASE).find_one({"_id": S.LEASE_ID}, NO_ID))
+
+    async def consume_handover(self, nonce: str, *, now: datetime | None = None) -> bool:
+        if not isinstance(nonce, str) or not nonce:
+            return False
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        try:                                                 # unique index on nonce: exactly one insert wins
+            await self._c(S.HANDOVER_NONCES).insert_one({"nonce": nonce, "ts": t})
+        except DuplicateKeyError:
+            return False
+        return True
+
+    async def get_schema_version(self) -> int | None:
+        doc = await self._c(S.META).find_one({"_id": S.META_SCHEMA_ID}, NO_ID)
+        return None if doc is None or doc.get("version") is None else int(doc["version"])
+
+    async def set_schema_version(self, version: int) -> None:
+        await self._c(S.META).update_one({"_id": S.META_SCHEMA_ID},
+                                         {"$set": {"version": int(version), "updated_utc": S.utcnow()}}, upsert=True)
+
+    async def save_pending_release(self, doc: dict) -> dict:
+        d = _new_release(doc, S.utcnow())
+        await self._c(S.RELEASES).insert_one(dict(d))
+        return d
+
+    async def get_pending_release(self, release_id: str) -> dict | None:
+        return await self._c(S.RELEASES).find_one({"id": str(release_id)}, NO_ID)
+
+    async def latest_pending_release(self, *, now: datetime | None = None) -> dict | None:
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        return await self._c(S.RELEASES).find_one(
+            {"status": "pending", "expires_at": {"$gt": t}}, NO_ID, sort=[("created_at", DESCENDING), ("_id", DESCENDING)])
+
+    async def resolve_pending_release(self, release_id: str, decision: str, by: str, *,
+                                      now: datetime | None = None) -> dict | None:
+        _check_decision(decision)
+        t = S.norm_dt(now) if now is not None else S.utcnow()
+        return await self._c(S.RELEASES).find_one_and_update(
+            {"id": str(release_id), "status": "pending", "expires_at": {"$gt": t}},
+            {"$set": {"status": decision, "by": str(by), "at": t}}, projection=NO_ID,
+            return_document=ReturnDocument.AFTER)
 
     # ---- monitor
     async def add_monitor_summary(self, doc: dict) -> None:

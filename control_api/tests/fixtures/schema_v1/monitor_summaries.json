@@ -1,0 +1,92 @@
+[
+ {
+  "actions": {
+   "collateral_return": "not yet",
+   "need_more": [
+    "KXDEMOE"
+   ],
+   "pause": []
+  },
+  "expected_roi": null,
+  "fill_rate": 0.3327,
+  "filled_dollars": 612.3,
+  "generated_utc": "2026-09-29T07:00:00+00:00",
+  "last_account": {
+   "cash": 214.1,
+   "exposure": 71.25,
+   "headroom": 35.92,
+   "utc": "2026-09-29T07:00:00+00:00"
+  },
+  "note": "",
+  "overall": {
+   "ci_high": 0.0327,
+   "ci_low": -0.0041,
+   "cost": 612.3,
+   "events": 51,
+   "fills": 96,
+   "pnl": 8.73,
+   "roi": 0.0143
+  },
+  "per_series": {
+   "KXDEMOA": {
+    "ci_high": 0.0387,
+    "ci_low": -0.0213,
+    "cost": 75.0,
+    "events": 5,
+    "fills": 10,
+    "pnl": 0.65,
+    "roi": 0.0143
+   },
+   "KXDEMOB": {
+    "ci_high": 0.0681,
+    "ci_low": 0.0081,
+    "cost": 105.0,
+    "events": 7,
+    "fills": 14,
+    "pnl": 4.0,
+    "roi": 0.0381
+   },
+   "KXDEMOC": {
+    "ci_high": 0.0704,
+    "ci_low": 0.0104,
+    "cost": 45.0,
+    "events": 3,
+    "fills": 6,
+    "pnl": 1.82,
+    "roi": 0.0404
+   },
+   "KXDEMOD": {
+    "ci_high": 0.0246,
+    "ci_low": -0.0354,
+    "cost": 187.5,
+    "events": 12,
+    "fills": 25,
+    "pnl": -1.02,
+    "roi": -0.0054
+   },
+   "KXDEMOE": {
+    "ci_high": 0.1045,
+    "ci_low": 0.0445,
+    "cost": 112.5,
+    "events": 7,
+    "fills": 15,
+    "pnl": 8.38,
+    "roi": 0.0745
+   },
+   "KXDEMOF": {
+    "ci_high": 0.0032,
+    "ci_low": -0.0568,
+    "cost": 82.5,
+    "events": 5,
+    "fills": 11,
+    "pnl": -2.21,
+    "roi": -0.0268
+   }
+  },
+  "quoted_dollars": 1840.55,
+  "ts": {
+   "$date": "2026-09-29T07:00:00+00:00"
+  },
+  "window_days": 30
+ }
+]

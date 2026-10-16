@@ -1,0 +1,22 @@
+[
+ {
+  "desired": "running",
+  "duration_s": 36.7,
+  "mode": "demo",
+  "ok": true,
+  "quotes": 22,
+  "ts": {
+   "$date": "2026-10-01T12:00:00+00:00"
+  }
+ },
+ {
+  "desired": "running",
+  "duration_s": 38.4,
+  "mode": "demo",
+  "ok": true,
+  "quotes": 20,
+  "ts": {
+   "$date": "2026-10-01T11:50:00+00:00"
+  }
+ }
+]

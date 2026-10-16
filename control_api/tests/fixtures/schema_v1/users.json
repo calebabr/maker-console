@@ -1,0 +1,9 @@
+[
+ {
+  "failed_logins": 0,
+  "last_totp_step": 12345,
+  "password_hash": "FIXTURE_HASH",
+  "totp_secret_enc": "FIXTURE_TOKEN",
+  "username": "owner"
+ }
+]
