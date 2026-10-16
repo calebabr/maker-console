@@ -22,6 +22,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
     from .auth.middleware import install_security
     from .auth.routes import router as auth_router
     from .db import get_store
+    from . import version as ver
     from .routes import alerts, analytics, arb, bot, cloud, config, data, ux
     from .runner import Runner
     from .services import keepalive as ka
@@ -43,6 +44,8 @@ def create_app(settings: Settings | None = None, store: Any = None,
         try:
             yield
         finally:
+            # R2: on SIGTERM uvicorn runs this; the runner finishes its order step, persists, hands over and
+            # releases the lease well inside Render's 120 s shutdown delay. Never raises.
             await runner.shutdown()
             with contextlib.suppress(Exception):
                 await store.close()
@@ -66,7 +69,8 @@ def create_app(settings: Settings | None = None, store: Any = None,
 
     @app.get("/healthz")
     async def healthz() -> dict:
-        return {"ok": True}
+        # unchanged {"ok": true} plus the R4 version handshake and the lease role (no store read, no secrets)
+        return {"ok": True, **ver.handshake(), "role": runner.role(), "lease_generation": runner.lease.generation}
 
     app.include_router(auth_router)
     for mod in (bot, config, data, cloud, arb, analytics, ux, alerts):

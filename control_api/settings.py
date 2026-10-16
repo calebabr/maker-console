@@ -42,6 +42,29 @@ def _bool(v: str | None, default: bool) -> bool:
     return v.lower() in ("1", "true", "yes", "on")
 
 
+def _num(v: str | None, default: float, lo: float, hi: float) -> float:
+    try:
+        x = float(v) if v is not None else default
+    except ValueError:
+        x = default
+    if x != x:                     # NaN
+        x = default
+    return max(lo, min(hi, x))
+
+
+def release_timing_from(g) -> dict:
+    """Lease / handover timing from env (LEASE_TTL_S, LEASE_RENEW_S, PASS_BUDGET_S, SHUTDOWN_DELAY_S,
+    HANDOVER_MAX_AGE_S), clamped so a bad value can never make the lease unsafe: renew <= ttl/3 (two missed renews
+    still leave the lease alive) and the pass budget < ttl/2 (a pass that starts on a fresh renew ends before the
+    lease could expire)."""
+    ttl = _num(g("LEASE_TTL_S"), 60.0, 15.0, 600.0)
+    return {"lease_ttl_s": ttl,
+            "lease_renew_s": _num(g("LEASE_RENEW_S"), 20.0, 1.0, ttl / 3),
+            "pass_budget_s": _num(g("PASS_BUDGET_S"), 25.0, 1.0, ttl / 2 - 1),
+            "shutdown_delay_s": _num(g("SHUTDOWN_DELAY_S"), 120.0, 30.0, 300.0),
+            "handover_max_age_s": _num(g("HANDOVER_MAX_AGE_S"), 300.0, 30.0, 900.0)}
+
+
 @dataclass
 class Settings:
     store: str = "memory"
@@ -67,6 +90,15 @@ class Settings:
     # Web push (UX item 45). The VAPID private key is a secret: env only, never logged, stored or returned.
     vapid_private_key: str | None = None
     vapid_subject: str | None = None
+    # Release process (docs/RELEASE_CONTRACT.md section 2). Secrets: env only, never logged, stored or returned.
+    lease_ttl_s: float = 60.0
+    lease_renew_s: float = 20.0
+    pass_budget_s: float = 25.0
+    shutdown_delay_s: float = 120.0          # Render's maxShutdownDelaySeconds (render.yaml); informational here
+    handover_max_age_s: float = 300.0
+    handover_hmac_key: str | None = None     # < 32 bytes or missing: signed handover disabled (always demo)
+    deploy_status_key: str | None = None     # GET /api/deploy/status; unset -> 401
+    release_token: str | None = None         # /api/release/pending*; unset -> 404 (feature invisible)
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "Settings":
@@ -108,7 +140,11 @@ class Settings:
             cronjob_api_key=g("CRONJOB_API_KEY"),
             vapid_private_key=g("VAPID_PRIVATE_KEY"),
             vapid_subject=g("VAPID_SUBJECT"),
+            handover_hmac_key=g("HANDOVER_HMAC_KEY"),
+            deploy_status_key=g("DEPLOY_STATUS_KEY"),
+            release_token=g("RELEASE_TOKEN"),
         )
+        kw.update(release_timing_from(g))
         kw["prod_keys_present"], kw["live_confirm_ok"] = live_gates_from(env if env is not None else os.environ)
         if jwt:
             kw["jwt_secret"] = jwt

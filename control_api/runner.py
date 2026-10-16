@@ -33,6 +33,9 @@ from .services import strategies as strat
 from .services.alerts import Alerter
 from .services.webpush import PushService
 from .services.logbuffer import install as install_logbuffer
+from . import version as ver
+from .services import handover as hosvc
+from .services.lease import LEADER, LeaseManager, hostname, new_instance_id
 
 log = logging.getLogger("control_api.runner")
 
@@ -55,6 +58,15 @@ SOURCE_BACKFILL_BUDGET_S = 60
 PNL_TODAY_TTL_S = 60                # /status today P&L cache
 RECENT_PASSES = 12
 FILL_ALERT_MAX_LINES = 3
+# release process (docs/RELEASE_CONTRACT.md section 2): lease, fencing, graceful handover
+FENCE_MARGIN_S = 5.0                # a pass starts only if the lease outlives PASS_BUDGET_S + this margin
+SHUTDOWN_TAIL_S = 10.0              # after the order step: time for the pass's journal/heartbeat writes
+SHUTDOWN_STORE_TIMEOUT_S = 5.0
+# S-25: queue-position, fill-quality and fills-sync Kalshi reads run on their own small pool with a short client,
+# never on the default executor that Stop's cancel uses.
+TELEMETRY_WORKERS = 2
+TELEMETRY_CLIENT_TIMEOUT_S = 10.0
+TELEMETRY_CLIENT_MAX_RETRIES = 1
 _ENV_KEYS = ("KALSHI_ENV", "MAKER_LIVE", "KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY", "KALSHI_PRIVATE_KEY_PATH",
              "KALSHI_LIVE_CONFIRM", "KALSHI_BASE_URL", "ARB_LIVE")   # the runner never uses env ARB_LIVE
 _ENV_LOCK = threading.Lock()      # os.environ is process-global: one pass/monitor/factory at a time
@@ -162,6 +174,34 @@ def closetime_public_factory(env: str):
                         timeout=ctsvc.CLIENT_TIMEOUT_S)
 
 
+def telemetry_kalshi_factory(mode: str):
+    """S-25: authenticated client for read-only telemetry (fills sync, order lookups, queue-position account
+    reads): one retry and a short timeout, so an abandoned worker on the telemetry pool ends quickly."""
+    kid, pk = mode_keys(mode)
+    if not (kid and pk):
+        return None
+    botfiles.ensure_bot_path()
+    from config import BASE_URLS
+    from kalshi_client import KalshiClient
+    from cryptography.hazmat.primitives import serialization
+    key = serialization.load_pem_private_key(pk.replace("\\n", "\n").encode(), password=None)
+    return KalshiClient(BASE_URLS["prod" if mode == "live" else "demo"], key_id=kid, private_key=key,
+                        max_retries=TELEMETRY_CLIENT_MAX_RETRIES, timeout=TELEMETRY_CLIENT_TIMEOUT_S)
+
+
+def telemetry_public_factory(env: str):
+    """S-25: unauthenticated short client for fill-quality trades and queue-position books."""
+    botfiles.ensure_bot_path()
+    from config import BASE_URLS
+    from kalshi_client import KalshiClient
+    return KalshiClient(BASE_URLS["prod" if env == "live" else "demo"], max_retries=TELEMETRY_CLIENT_MAX_RETRIES,
+                        timeout=TELEMETRY_CLIENT_TIMEOUT_S)
+
+
+class FenceBlocked(RuntimeError):
+    """The lease is not confirmed (standby, expired, lost or unknown): nothing may be sent to Kalshi."""
+
+
 class StopInProgress(RuntimeError):
     """A Stop is running, or landed while a Start/arb-enable was in flight: Stop wins and the start is refused."""
 
@@ -239,6 +279,27 @@ class Runner:
         self._pnl_today: tuple[float, str, dict | None] | None = None    # (monotonic t, env, value)
         self.push = PushService(settings, store)
         self._daily_sent: str | None = None          # local date of the last daily summary
+        # S-25: telemetry Kalshi reads on their own pool (threads start on first use; shut down in shutdown())
+        self._tel_executor = ThreadPoolExecutor(max_workers=TELEMETRY_WORKERS, thread_name_prefix="telemetry")
+        # ---- release process: single-leader lease + fencing (R1), graceful handover (R2/R3), schema (R4)
+        g = lambda n, d: getattr(settings, n, d)  # noqa: E731   (tests may pass a minimal settings object)
+        self.instance_id = new_instance_id()
+        self.pass_budget_s = float(g("pass_budget_s", 25.0))
+        self.handover_max_age_s = float(g("handover_max_age_s", 300.0))
+        self.lease = LeaseManager(store, instance_id=self.instance_id, version=ver.API_VERSION,
+                                  ttl_s=float(g("lease_ttl_s", 60.0)), renew_s=float(g("lease_renew_s", 20.0)))
+        self._leader_ready = False        # leader AND the leadership rules (S-3/S-21/handover) have been applied
+        self._ready_mark: tuple | None = None   # (generation, transitions) the rules were applied for
+        self._schema_ok: bool | None = None     # None unknown (re-checked), False: stored schema is newer
+        self._schema_alerted = False
+        self._shutting_down = False
+        self._strategy_running = False    # the order step (maker_strategy.main in its thread) is executing
+        self._state_seen_utc: Any = None  # updated_utc of the stored state last applied (remote-Stop detection)
+        self._start_epoch = 0             # bumped by every local Start (state sync ignores reads that raced it)
+        self._stop_persisted = False      # a Stop in THIS process reached the store
+        self._pre_acquire_lease: dict | None = None   # lease doc read just before acquiring (handover token)
+        self.handover_result: dict | None = None      # {"kept_live": bool, "reason": str, "utc": str}
+        self.fence_blocked = 0
         if isinstance(self.alerter, Alerter):
             self.alerter.on_alert = self._on_alert
 
@@ -302,6 +363,248 @@ class Runner:
     def live_block_reason(self) -> str | None:
         return live_block_reason(self.settings)
 
+    # ---- release process: lease + fencing (R1)
+    def _fence_ok(self, *, min_remaining_s: float = 0.0) -> bool:
+        """May this instance send orders right now? Leader, leadership rules applied, schema not newer than ours,
+        and the lease renewed within the TTL (local monotonic clock) with `min_remaining_s` to spare. Pure local
+        reads: safe from worker threads. Stop and the persisted stop never call this."""
+        return (self._leader_ready and self._schema_ok is True and self.lease.role == LEADER
+                and self.lease.fence_ok(min_remaining_s=min_remaining_s))
+
+    def role(self) -> str:
+        return "leader" if self._leader_ready and self.lease.role == LEADER else "standby"
+
+    def lease_status(self) -> dict:
+        snap = self.lease.snapshot()
+        snap["role"] = self.role()
+        return snap
+
+    async def _journal_fence_blocked(self, what: str) -> None:
+        """Record a refused order step (journal row in the store; never the CSV the strategy writes). Never raises."""
+        self.fence_blocked += 1
+        log.warning("fence_blocked: %s (role=%s, generation=%s)", what, self.lease.role, self.lease.generation)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.store.add_journal_rows([{
+                "utc": utcnow().isoformat(), "event": "fence_blocked", "ticker": "", "side": "", "price": "",
+                "count": "", "cost": "", "cell": "", "note": f"{what}; instance {self.instance_id[:8]}"}]), 5)
+
+    async def _check_schema(self) -> None:
+        """R4: a stored schema version newer than ours -> standby forever (alert once); older/missing -> ours.
+        A store error leaves it unknown (no trading) and it is re-checked on the next lease tick."""
+        try:
+            stored = await asyncio.wait_for(self.store.get_schema_version(), 5)
+            if stored is not None and int(stored) > ver.SCHEMA_VERSION:
+                self._schema_ok = False
+                if not self._schema_alerted:
+                    self._schema_alerted = True
+                    msg = (f"Stored data schema {int(stored)} is newer than this release's {ver.SCHEMA_VERSION}: "
+                           "this instance stays standby (no trading). Deploy the newer release.")
+                    log.error(msg)
+                    with contextlib.suppress(Exception):
+                        await self.alerter.send("Bot standby: newer data schema", msg, priority="urgent")
+                return
+            if stored is None or int(stored) < ver.SCHEMA_VERSION:
+                await asyncio.wait_for(self.store.set_schema_version(ver.SCHEMA_VERSION), 5)
+            self._schema_ok = True
+        except Exception as e:  # noqa: BLE001
+            self._schema_ok = None if self._schema_ok is not False else False
+            log.warning("schema version check failed: %s", type(e).__name__)
+
+    async def _lease_tick(self, *, rehydrate_state: dict | None = None, config_ok: bool = True,
+                          stop_gen: int | None = None, stop_persisted: bool | None = None) -> None:
+        """One lease iteration: (re)check the schema, renew or acquire, apply the leadership rules on a new
+        leadership, adopt remote Stops as leader, mirror the store as standby. Never raises."""
+        try:
+            if self._shutting_down or not self.settings.runner_enabled:
+                return
+            if self._schema_ok is not True:
+                await self._check_schema()
+                if self._schema_ok is not True:
+                    self._leader_ready = False
+                    return
+            if self.lease.role != LEADER:
+                try:
+                    self._pre_acquire_lease = await self.lease.read()
+                except Exception:  # noqa: BLE001
+                    self._pre_acquire_lease = None
+            was_ready = self._leader_ready
+            leader = await self.lease.step()
+            mark = (self.lease.generation, self.lease.transitions)
+            if leader and (not self._leader_ready or self._ready_mark != mark):
+                self._leader_ready = False
+                await self._become_leader(st=rehydrate_state, config_ok=config_ok,
+                                          reload_config=rehydrate_state is None, stop_gen=stop_gen,
+                                          stop_persisted=stop_persisted)
+            elif not leader and was_ready:
+                self._leader_ready = False
+                log.warning("now standby: maker passes, arbitrage and non-Stop cancels are fenced off")
+                with contextlib.suppress(Exception):
+                    self._spawn(self.alerter.send("Bot is standby", "This instance lost the trading lease; "
+                                                  "another instance (or nobody) trades now.", priority="high"))
+            if self._leader_ready:
+                if rehydrate_state is None:
+                    await self._sync_state_from_store()
+            elif rehydrate_state is None:
+                await self._mirror_state()
+        except Exception as e:  # noqa: BLE001
+            log.error("lease tick failed: %s", type(e).__name__)
+
+    async def _lease_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.lease.renew_s)
+            await self._lease_tick()
+
+    def _apply_local_stop_rules(self, desired: str, arb_desired: str, *, gen: int,
+                                persisted_before: bool) -> tuple[str, str]:
+        """Stop beats the lease: a Stop in this process (now or during our awaits), a pending Stop write, or a kill
+        switch on disk keeps the bot stopped (S-3). Exception: our OWN Stop reached the store and the store now
+        says running, so a later Start (2FA, on any instance) superseded it; the stale local file is removed. That
+        exception needs the Stop to have been persisted BEFORE the state was read (`persisted_before`), else the
+        read may simply predate the Stop's write."""
+        if gen != self._stop_gen or self._stopping or self._stop_pending:
+            return "stopped", "stopped"
+        if desired == "running" and self.kill_switch():
+            if persisted_before and self._stop_persisted:
+                with contextlib.suppress(OSError):
+                    self.kill_path.unlink()
+            else:
+                log.warning("store says running but the kill switch is present: staying stopped")
+                self._stop_pending = True
+                self._ensure_stop_retry("rehydrate")
+                desired = "stopped"
+        if arb_desired == "running" and self.arb_kill_switch():
+            arb_desired = "stopped"
+        return desired, arb_desired
+
+    async def _become_leader(self, *, st: dict | None = None, config_ok: bool = True,
+                             reload_config: bool = True, stop_gen: int | None = None,
+                             stop_persisted: bool | None = None) -> None:
+        """Apply the restart rules once per new leadership, then open the fence. Re-reads the store (the state may
+        have changed while we were standby), reloads the config, keeps LIVE only with a valid signed handover (A2),
+        otherwise drops LIVE to demo (S-21). On a store error the fence stays shut and the next tick retries."""
+        # the Stop generation from BEFORE the state was read: a Stop after that read always wins below
+        gen = self._stop_gen if st is None or stop_gen is None else stop_gen
+        persisted_before = self._stop_persisted if st is None or stop_persisted is None else stop_persisted
+        lease_mark = (self.lease.generation, self.lease.transitions)
+        try:
+            if st is None:
+                st = await asyncio.wait_for(self.store.get_state(), 5)
+            try:
+                post = await self.lease.read()
+            except Exception:  # noqa: BLE001
+                post = None
+        except Exception as e:  # noqa: BLE001
+            log.error("leadership: state read failed: %s (fence stays shut)", type(e).__name__)
+            return
+        st = dict(st or schemas.DEFAULT_STATE)
+        if reload_config:
+            config_ok = await self._load_config()
+        desired = st.get("desired", "stopped") if config_ok else "stopped"
+        arb_desired = st.get("arb_desired", "stopped") if config_ok else "stopped"
+        desired, arb_desired = self._apply_local_stop_rules(desired, arb_desired, gen=gen,
+                                                            persisted_before=persisted_before)
+        mode, arb_mode = st.get("mode", "demo"), st.get("arb_mode", "demo")
+        reason = None
+        kept_live = False
+        if mode == "live":
+            token = ((self._pre_acquire_lease or {}).get("handover") or (post or {}).get("handover"))
+            reason = await self._check_handover(token, st, desired)
+            kept_live = reason is None
+            self.handover_result = {"kept_live": kept_live, "reason": reason or "valid", "utc": iso(utcnow())}
+            log.warning("signed handover: %s", "LIVE kept" if kept_live else f"refused ({reason}): demo")
+        self._pre_acquire_lease = None
+        self._live_downgraded = [n for n, m in (("maker", "demo" if kept_live else mode), ("arbitrage", arb_mode))
+                                 if m == "live"]
+        seen = st.get("updated_utc")
+        if self._live_downgraded:
+            log.warning("live state in store not restored after restart: %s now demo", self._live_downgraded)
+            kw = {"mode": "demo"} if "maker" in self._live_downgraded else {}
+            if "arbitrage" in self._live_downgraded:
+                kw["arb_mode"] = "demo"
+            try:
+                doc = await asyncio.wait_for(self.store.set_state(by="rehydrate", **kw), timeout=5)
+                seen = (doc or {}).get("updated_utc", seen)
+            except Exception as e:  # noqa: BLE001   (memory says demo below; fail-safe either way)
+                log.error("demo mode not persisted at startup: %s", type(e).__name__)
+        if st.get("arb_desired") == "running" and arb_desired == "stopped" and config_ok:
+            try:
+                doc = await asyncio.wait_for(self.store.set_state(by="rehydrate", arb_desired="stopped"), timeout=5)
+                seen = (doc or {}).get("updated_utc", seen)
+            except Exception as e:  # noqa: BLE001
+                log.error("arb stopped not persisted at startup: %s", type(e).__name__)
+        # a Stop that landed during the awaits above wins; no await from here to the fence opening
+        desired, arb_desired = self._apply_local_stop_rules(desired, arb_desired, gen=gen,
+                                                            persisted_before=persisted_before)
+        if (self.lease.generation, self.lease.transitions) != lease_mark or self.lease.role != LEADER:
+            return                                    # lost the lease meanwhile: next tick starts again
+        self.desired, self.arb_desired = desired, arb_desired
+        self.mode = "live" if kept_live else "demo"
+        self.arb_mode = "demo"
+        self._state_seen_utc = seen
+        self._leader_ready = True
+        self._ready_mark = lease_mark
+        log.warning("leader (generation %s): desired=%s mode=%s", self.lease.generation, self.desired, self.mode)
+        await self._alert_resumed_state(st, kept_live=kept_live)
+
+    async def _check_handover(self, token: Any, st: dict, desired: str) -> str | None:
+        """None if the signed handover lets us keep LIVE (consumes its nonce), else the refusal reason."""
+        if not token:
+            return "no_token"
+        reason = hosvc.verify(hosvc.key_bytes(self.settings), token,
+                              config_hash=hosvc.config_hash(botfiles.public_config(self.config)),
+                              stop_seq=hosvc.state_fingerprint(st), now=utcnow(), max_age_s=self.handover_max_age_s)
+        if reason:
+            return reason
+        if desired != "running" or self._stop_gen != 0 or self._stop_pending or self.kill_switch():
+            return "stop_since"
+        if not self.live_allowed():
+            return self.live_block_reason() or "live_not_allowed"
+        if not all(mode_keys("live")):
+            return "no_prod_keys"
+        try:
+            fresh = await asyncio.wait_for(self.store.consume_handover(str(token.get("nonce"))), 5)
+        except Exception as e:  # noqa: BLE001
+            return f"consume_failed:{type(e).__name__}"
+        return None if fresh is True else "replayed"
+
+    async def _sync_state_from_store(self) -> None:
+        """Leader: adopt a Stop written to the store by another instance (a standby got the Stop request). Only a
+        state doc that CHANGED since we last applied it counts. Never raises."""
+        gen, ep = self._stop_gen, self._start_epoch
+        try:
+            st = await asyncio.wait_for(self.store.get_state(), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("state sync failed: %s", type(e).__name__)
+            return
+        if not st or gen != self._stop_gen or ep != self._start_epoch or self._stopping:
+            return
+        u = st.get("updated_utc")
+        if u == self._state_seen_utc:
+            return
+        self._state_seen_utc = u
+        if st.get("desired") == "stopped" and self.desired == "running":
+            log.warning("persisted Stop found in the store (by %s): stopping here too",
+                        str(st.get("updated_by") or "?")[:64])
+            await self.stop(by="persisted-stop")
+        elif st.get("arb_desired") == "stopped" and self.arb_desired == "running":
+            self.arb_desired, self.arb_mode = "stopped", "demo"
+
+    async def _mirror_state(self) -> None:
+        """Standby: show what the store says (never trades). Local Stops still win. Never raises."""
+        gen, ep, persisted = self._stop_gen, self._start_epoch, self._stop_persisted
+        try:
+            st = await asyncio.wait_for(self.store.get_state(), 5)
+        except Exception:  # noqa: BLE001
+            return
+        if not st or gen != self._stop_gen or ep != self._start_epoch or self._stopping:
+            return
+        desired, arb_desired = st.get("desired", "stopped"), st.get("arb_desired", "stopped")
+        if self._stop_pending or (self.kill_switch() and not (persisted and self._stop_persisted)):
+            desired = "stopped"
+        self.desired, self.arb_desired = desired, arb_desired
+        self.mode, self.arb_mode = st.get("mode", "demo"), st.get("arb_mode", "demo")
+        self._state_seen_utc = st.get("updated_utc")
+
     # ---- lifecycle
     async def start(self) -> None:
         await self.rehydrate()
@@ -315,18 +618,94 @@ class Runner:
             self._tasks = [asyncio.create_task(self._timer_loop(), name="runner-timer"),
                            asyncio.create_task(self._watchdog_loop(), name="runner-watchdog"),
                            asyncio.create_task(keepalive_loop(self), name="runner-keepalive"),
-                           asyncio.create_task(self._arb_loop(), name="runner-arb")]
+                           asyncio.create_task(self._arb_loop(), name="runner-arb"),
+                           asyncio.create_task(self._lease_loop(), name="runner-lease")]
             self._spawn(self.run_source_backfill())     # read-only relabel of older fills; budgeted, never raises
+        log.info("runner started: instance %s on %s, role %s", self.instance_id[:8], hostname(), self.role())
+
+    def shutdown_budget_s(self) -> float:
+        """The whole graceful shutdown must end well inside Render's shutdown delay (120 s)."""
+        delay = float(getattr(self.settings, "shutdown_delay_s", 120.0))
+        return max(5.0, min(delay - 30.0, self.pass_budget_s + SHUTDOWN_TAIL_S + 4 * SHUTDOWN_STORE_TIMEOUT_S))
 
     async def shutdown(self) -> None:
-        with contextlib.suppress(Exception):
-            self._ct_executor.shutdown(wait=False, cancel_futures=True)
+        """R2 graceful shutdown (SIGTERM -> lifespan): stop scheduling, let a running order step finish (hard
+        PASS_BUDGET_S), persist, then hand over and release the lease if still leader. Never raises. A pass that
+        overran its budget keeps the lease (it expires after the TTL), so no other instance trades beside it."""
+        self._shutting_down = True
+        try:
+            await asyncio.wait_for(self._graceful_handover(), timeout=self.shutdown_budget_s())
+        except BaseException as e:  # noqa: BLE001   (incl. the budget timeout and cancellation)
+            log.error("graceful shutdown incomplete: %s", type(e).__name__)
+            if self.lease.role == LEADER and not self._strategy_running and not self.arb_running_scan:
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(self.lease.release(handover=None), SHUTDOWN_STORE_TIMEOUT_S)
+        self._leader_ready = False
+        for ex in (self._ct_executor, self._tel_executor):
+            with contextlib.suppress(Exception):
+                ex.shutdown(wait=False, cancel_futures=True)
         for t in self._tasks + list(self._bg) + ([self._state_retry] if self._state_retry else []):
             t.cancel()
         for t in self._tasks:
             with contextlib.suppress(BaseException):
                 await t
         self._tasks = []
+
+    async def _graceful_handover(self) -> None:
+        for t in self._tasks:                            # 1) no new passes, scans, renews or pings
+            t.cancel()
+        for t in self._tasks:
+            with contextlib.suppress(BaseException):
+                await t
+        self._tasks = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.pass_budget_s       # 2) the order step / arb set finishes (never cut)
+        while (self._strategy_running or self.arb_running_scan) and loop.time() < deadline:
+            await asyncio.sleep(0.05)
+        overran = self._strategy_running or self.arb_running_scan
+        tail = loop.time() + SHUTDOWN_TAIL_S              # 3) the pass's own journal/heartbeat writes
+        while self._pass_lock.locked() and not overran and loop.time() < tail:
+            await asyncio.sleep(0.05)
+        with contextlib.suppress(BaseException):          # 4) persist what the journal tail has not sent yet
+            await asyncio.wait_for(self._sync_journal(), SHUTDOWN_STORE_TIMEOUT_S)
+        if self.lease.role != LEADER:
+            return
+        if overran:
+            msg = (f"a pass overran the {self.pass_budget_s:.0f} s budget at shutdown: the lease is NOT released "
+                   f"(it expires in {self.lease.ttl_s:.0f} s), so no other instance trades beside it")
+            log.error(msg)
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(self.alerter.send("Shutdown: pass overran", msg, priority="high"), 5)
+            return
+        handover = await self._make_handover() if self._leader_ready else None
+        ok = await self.lease.release(handover=handover)  # 5) hand over
+        log.warning("lease released at shutdown (ok=%s, signed handover=%s)", ok, handover is not None)
+
+    async def _make_handover(self) -> dict | None:
+        """A2: a signed token only for a planned shutdown while the maker runs LIVE with no Stop pending. Never
+        logged. None (the new leader drops to demo) in every other case."""
+        try:
+            key = hosvc.key_bytes(self.settings)
+            if key is None or self.mode != "live" or self.desired != "running":
+                return None
+            if self.kill_switch() or self._stop_pending or self._stopping:
+                return None
+            gen = self._stop_gen
+            st = await asyncio.wait_for(self.store.get_state(), SHUTDOWN_STORE_TIMEOUT_S)
+            if not st or st.get("desired") != "running" or st.get("mode") != "live":
+                return None
+            fp = hosvc.state_fingerprint(st)
+            if fp is None:
+                return None
+            token = hosvc.make_token(key, from_instance=self.instance_id, mode="live", desired="running",
+                                     config_hash=hosvc.config_hash(botfiles.public_config(self.config)),
+                                     stop_seq=fp, now=utcnow())
+            if gen != self._stop_gen or self._stopping or self.desired != "running":
+                return None                              # a Stop landed meanwhile: Stop wins
+            return token
+        except Exception as e:  # noqa: BLE001
+            log.error("handover token not written: %s", type(e).__name__)
+            return None
 
     def _spawn(self, coro) -> asyncio.Task:
         t = asyncio.create_task(coro)
@@ -336,6 +715,8 @@ class Runner:
 
     async def rehydrate(self) -> None:
         """State, config, journal and cloud settings from the store. On failure: stay stopped and alert."""
+        self._leader_ready = False          # fence shut until the leadership rules run again on the fresh state
+        gen0, persisted0 = self._stop_gen, self._stop_persisted
         try:
             await self.store.ensure_indexes()
             st = await self.store.get_state()
@@ -364,46 +745,12 @@ class Runner:
             self.desired = "stopped"
             self._stop_pending = True
             self._ensure_stop_retry("rehydrate")
-        # S-21 (owner decision): LIVE is never restored from the store. Maker and arb come back in demo (desired
-        # running/stopped kept as stored); the owner re-arms LIVE from the phone (fresh 2FA + typed LIVE).
-        self._live_downgraded = [n for n, m in (("maker", self.mode), ("arbitrage", self.arb_mode)) if m == "live"]
-        if self._live_downgraded:
-            self.mode, self.arb_mode = "demo", "demo"
-            log.warning("live state in store not restored after restart: %s now demo", self._live_downgraded)
-            kw = {"mode": "demo"} if "maker" in self._live_downgraded else {}
-            if "arbitrage" in self._live_downgraded:
-                kw["arb_mode"] = "demo"
-            try:
-                await asyncio.wait_for(self.store.set_state(by="rehydrate", **kw), timeout=5)
-            except Exception as e:  # noqa: BLE001   (memory already says demo; fail-safe either way)
-                log.error("demo mode not persisted at startup: %s", type(e).__name__)
-        if self.arb_desired == "running" and self.arb_kill_switch():
-            # same fail-safe for arbitrage: a Stop (or a legging kill) is on disk, so arb stays off
-            log.warning("store says arb running but the arb kill switch is present: arb stays off")
-            self.arb_desired = "stopped"
-            try:
-                await asyncio.wait_for(self.store.set_state(by="rehydrate", arb_desired="stopped"), timeout=5)
-            except Exception as e:  # noqa: BLE001
-                log.error("arb stopped not persisted at startup: %s", type(e).__name__)
-        try:
-            cfg = await self.store.get_config()
-            if cfg is None:
-                cfg = self._safe_local_config()
-                await self.store.save_config(cfg, before=None, by="seed")
-            else:
-                try:
-                    # S-12: store contents are not trusted; same checks as PUT /api/config + API ceilings
-                    cfg = botfiles.validate_stored(cfg, self.settings)
-                except ValueError as ve:
-                    msgs = ve.args[0] if ve.args and isinstance(ve.args[0], list) else [str(ve)]
-                    await self._invalid_config_stop("stored config failed validation", msgs)
-                    cfg = self._safe_local_config()
-                else:
-                    botfiles.write_config_file(self.config_path, cfg)
-            self.config = botfiles.public_config(cfg)
-        except Exception as e:  # noqa: BLE001
-            log.error("config rehydrate failed: %s", type(e).__name__)
-            self.config = self._safe_local_config()
+        # S-21 (owner decision): LIVE is never restored from the store, and the arb kill-switch rule: both are applied
+        # (and persisted) only when this instance becomes LEADER (_become_leader), because a standby must not write
+        # the state the running leader trades on. Until then a standby mirrors the store and never trades.
+        self._state_seen_utc = st.get("updated_utc")
+        await self._check_schema()                   # R4: newer stored schema -> standby (alerted)
+        config_ok = await self._load_config()
         try:
             rows = await self.store.list_journal(since=utcnow() - timedelta(days=JOURNAL_REHYDRATE_DAYS),
                                                  limit=200000)
@@ -428,13 +775,56 @@ class Runner:
                 self.last_monitor_utc = ms["ts"]
         except Exception:  # noqa: BLE001
             pass
-        await self._alert_resumed_state(st)
-        await self.refresh_fill_quality()
-        await self.refresh_queue_stats()
+        # S-27: the two cache refreshes run in the background, so the API and Stop come up without waiting on them
+        self._spawn(self._refresh_caches())
+        # R1: every instance starts as standby; try for the lease now (and every LEASE_RENEW_S in the lease loop)
+        await self._lease_tick(rehydrate_state=st, config_ok=config_ok, stop_gen=gen0, stop_persisted=persisted0)
+        if self.role() != "leader":
+            log.warning("standby: not trading (lease held elsewhere, store unconfirmed or schema newer)")
 
-    async def _alert_resumed_state(self, st: dict) -> None:
+    async def _refresh_caches(self) -> None:
+        """S-27: fill-quality and queue-stats aggregates after startup (each bounded, never raises)."""
+        with contextlib.suppress(Exception):
+            await self.refresh_fill_quality()
+        with contextlib.suppress(Exception):
+            await self.refresh_queue_stats()
+
+    async def _load_config(self) -> bool:
+        """Config from the store (seeded from the file if empty), validated (S-12) and written to the bot file.
+        False only when the stored config failed validation (the bot then stays stopped)."""
+        ok = True
+        try:
+            cfg = await self.store.get_config()
+            if cfg is None:
+                cfg = self._safe_local_config()
+                await self.store.save_config(cfg, before=None, by="seed")
+            else:
+                try:
+                    # S-12: store contents are not trusted; same checks as PUT /api/config + API ceilings
+                    cfg = botfiles.validate_stored(cfg, self.settings)
+                except ValueError as ve:
+                    msgs = ve.args[0] if ve.args and isinstance(ve.args[0], list) else [str(ve)]
+                    await self._invalid_config_stop("stored config failed validation", msgs)
+                    cfg = self._safe_local_config()
+                    ok = False
+                else:
+                    botfiles.write_config_file(self.config_path, cfg)
+            self.config = botfiles.public_config(cfg)
+        except Exception as e:  # noqa: BLE001
+            log.error("config rehydrate failed: %s", type(e).__name__)
+            self.config = self._safe_local_config()
+        return ok
+
+    async def _alert_resumed_state(self, st: dict, *, kept_live: bool = False) -> None:
         """S-21: anything that resumes trading or live from the store (no 2FA at restart) is announced loudly."""
         parts = []
+        if kept_live and self.desired == "running":
+            msg = ("LIVE kept across a planned deploy: the signed handover from the previous instance was valid "
+                   "(same config, no Stop since, under 5 minutes old). Stop works as always.")
+            log.warning(msg)
+            with contextlib.suppress(Exception):
+                await self.alerter.send("LIVE continued after deploy", msg, priority="urgent")
+            return
         if self.desired == "running":
             parts.append(f"maker running ({self.mode})")
         if self.arb_desired == "running":
@@ -494,6 +884,10 @@ class Runner:
             return "pass_running"
         if self.mode == "live" and not self.live_allowed():
             return "live_not_allowed"
+        if self._shutting_down:
+            return "shutting_down"
+        if not self._fence_ok(min_remaining_s=self.pass_budget_s + FENCE_MARGIN_S):
+            return "standby"                     # R1: only the lease holder trades
         return None
 
     async def tick(self, reason: str = "tick") -> dict:
@@ -556,8 +950,29 @@ class Runner:
     def _run_strategy_sync(self, mode: str) -> tuple[int, str]:
         buf = io.StringIO()
         with kalshi_env(mode), contextlib.redirect_stdout(buf):
+            # R1 fence, re-checked in the worker thread right before the strategy can send anything (the env lock
+            # above may have been waited on): the lease must outlive the whole pass budget
+            if not self._fence_ok(min_remaining_s=self.pass_budget_s):
+                raise FenceBlocked("lease not confirmed before the order step")
             rc = self.ms.main()
         return rc, buf.getvalue()
+
+    def _run_order_step(self, mode: str) -> tuple[int, str]:
+        """The order step in its worker thread, with the R1 fence checked first."""
+        if not self._fence_ok(min_remaining_s=self.pass_budget_s):
+            raise FenceBlocked("lease not confirmed before the order step")
+        return self._run_strategy_sync(mode)
+
+    async def _pre_order_fence(self) -> bool:
+        """Before a pass: renew the lease (fresh TTL for the whole pass), adopt a Stop persisted by another
+        instance, then check the fence with the pass budget to spare. False = send nothing."""
+        if not self._leader_ready:
+            return False
+        if not await self.lease.renew():           # fail safe: an unconfirmed lease (store error too) = no orders
+            return False
+        if self._leader_ready:
+            await self._sync_state_from_store()
+        return self._fence_ok(min_remaining_s=self.pass_budget_s + FENCE_MARGIN_S)
 
     async def _pass(self, reason: str) -> None:
         async with self._pass_lock:
@@ -577,11 +992,28 @@ class Runner:
                     raise RuntimeError("runner disabled (RUNNER_ENABLED=false)")
                 if self.kill_switch() or self.desired != "running" or self._stop_pending:
                     raise RuntimeError("stopped before pass")
+                if self._shutting_down or not await self._pre_order_fence():
+                    raise FenceBlocked("lease not confirmed")
+                if self.kill_switch() or self.desired != "running" or self._stop_pending:
+                    raise RuntimeError("stopped before pass")      # a persisted Stop adopted just above
                 strategy_ran = True
-                rc, out = await asyncio.to_thread(self._run_strategy_sync, mode)
+                self._strategy_running = True
+                t0 = time.monotonic()
+                try:
+                    rc, out = await asyncio.to_thread(self._run_order_step, mode)
+                finally:
+                    self._strategy_running = False
+                took = time.monotonic() - t0
+                if took > self.pass_budget_s:
+                    log.warning("order step took %.1f s (budget %.0f s)", took, self.pass_budget_s)
                 self.logs.add(out)
                 if rc:
                     raise RuntimeError(f"maker_strategy exited {rc}")
+            except FenceBlocked as e:
+                strategy_ran = False
+                await self._journal_fence_blocked(str(e))
+                self.running_pass = False
+                return                                   # standby: no heartbeat, no pass error alert
             except Exception as e:  # noqa: BLE001
                 ok, err = False, f"{type(e).__name__}: {e}"
                 log.error("pass failed: %s", err)
@@ -641,8 +1073,8 @@ class Runner:
 
     # ---- fills + P&L (read-only Kalshi calls)
     def _fetch_fills_sync(self, mode: str, since: datetime) -> tuple[list[dict], list[dict]]:
-        """Fills and settlements since `since`. The client is built directly (no env lock)."""
-        client = self.kalshi_factory(mode)
+        """Fills and settlements since `since`. The client is built directly (no env lock); S-25 short client."""
+        client = self._tel_kalshi(mode)
         if client is None:
             return [], []
         min_ts = int(since.timestamp())
@@ -671,7 +1103,7 @@ class Runner:
             else now - timedelta(days=FILLS_FIRST_DAYS)
         try:
             fills, settlements = await asyncio.wait_for(
-                asyncio.to_thread(self._fetch_fills_sync, mode, since), timeout=60)
+                self._run_tel(self._fetch_fills_sync, mode, since), timeout=60)
             for f in fills:
                 f.setdefault("env", mode)                 # demo and live P&L never mix
             fills = [f for f in fills if isinstance(f, dict) and (f.get("fill_id") or f.get("trade_id"))]
@@ -718,7 +1150,7 @@ class Runner:
     def _lookup_orders_sync(self, mode: str, oids: list[str]) -> list[dict]:
         """GET /portfolio/orders/{id} (read-only) for order ids no local evidence explains: their client_order_id
         prefix settles bot vs manual. Ids are validated before they go into the path."""
-        client = self.kalshi_factory(mode)
+        client = self._tel_kalshi(mode)
         req = getattr(client, "request", None)
         if client is None or not callable(req):
             return []
@@ -756,7 +1188,7 @@ class Runner:
             oids = strat.unresolved(weak, idx, ORDER_LOOKUPS_PER_SYNC)
             if oids:
                 try:
-                    idx.add_orders(await asyncio.wait_for(asyncio.to_thread(self._lookup_orders_sync, mode, oids),
+                    idx.add_orders(await asyncio.wait_for(self._run_tel(self._lookup_orders_sync, mode, oids),
                                                           20))
                 except Exception as e:  # noqa: BLE001
                     log.warning("fill sources: order lookups failed: %s", type(e).__name__)
@@ -809,7 +1241,7 @@ class Runner:
                 oids = strat.unresolved(group, idx, ORDER_LOOKUPS_PER_SYNC)
                 if oids and env in ("demo", "live"):
                     try:
-                        found = await asyncio.wait_for(asyncio.to_thread(self._lookup_orders_sync, env, oids), 20)
+                        found = await asyncio.wait_for(self._run_tel(self._lookup_orders_sync, env, oids), 20)
                         idx.add_orders(found)
                         res["lookups"] += len(oids)
                     except Exception as e:  # noqa: BLE001
@@ -1014,9 +1446,9 @@ class Runner:
                 env = f.get("env") or self.mode
 
                 def _get(env=env, ticker=ticker, ts=ts):
-                    return fq.fetch_trades(self.public_factory(env), ticker, ts, ts + fq.WINDOW)
+                    return fq.fetch_trades(self._tel_public(env), ticker, ts, ts + fq.WINDOW)
                 try:
-                    trades = await asyncio.wait_for(asyncio.to_thread(_get), timeout=30)
+                    trades = await asyncio.wait_for(self._run_tel(_get), timeout=30)
                 except Exception as e:  # noqa: BLE001
                     log.warning("fill-quality trades fetch failed: %s", type(e).__name__)
                     continue
@@ -1049,7 +1481,9 @@ class Runner:
         """S-23: compute the aggregate once and cache it (overall + per series). None if the store read fails."""
         try:
             fills = await asyncio.wait_for(
-                self.store.list_fills(since=utcnow() - timedelta(days=days), limit=100000), timeout=5)
+                self.store.list_fills(since=utcnow() - timedelta(days=days), limit=100000,
+                                      fields=("fill_id", "ticker", "market_ticker", "is_taker", "env", "source",
+                                              "strategy", fq.FIELD)), timeout=5)     # S-26 projection
         except Exception as e:  # noqa: BLE001
             log.warning("fill-quality aggregate failed: %s", type(e).__name__)
             self.fill_quality_cache = None          # store down: serve null rather than a silently stale value
@@ -1150,8 +1584,8 @@ class Runner:
             fills_since = max(min(e["ts"] for e in eps), now - timedelta(days=qp.FILLS_MAX_DAYS))
 
             def _account():
-                return qp.collect_account(self.kalshi_factory(mode), tickers, fills_since)
-            acct = await asyncio.wait_for(asyncio.to_thread(_account), timeout=30)
+                return qp.collect_account(self._tel_kalshi(mode), tickers, fills_since)
+            acct = await asyncio.wait_for(self._run_tel(_account), timeout=30)
             res["calls"] += acct["calls"]
             store_fills = None
             if acct["fills"] is None:
@@ -1162,9 +1596,9 @@ class Runner:
             books, trade_specs = qp.plan_public(eps, new_ids)
 
             def _public():
-                return qp.collect_public(self.public_factory(mode), books, trade_specs)
+                return qp.collect_public(self._tel_public(mode), books, trade_specs)
             if books or trade_specs:
-                pub = await asyncio.wait_for(asyncio.to_thread(_public), timeout=60)
+                pub = await asyncio.wait_for(self._run_tel(_public), timeout=60)
             else:
                 pub = {"books": {}, "trades": {}, "calls": 0, "errors": []}
             res["calls"] += pub["calls"]
@@ -1195,8 +1629,9 @@ class Runner:
             fills_by_id: dict = {}
             wanted = {str(e["fill_ids"][0]) for e in eps if e.get("fill_ids")}
             if wanted:
-                fills = await asyncio.wait_for(self.store.list_fills(since=now - timedelta(days=days + 1),
-                                                                     limit=100000), timeout=5)
+                fills = await asyncio.wait_for(self.store.list_fills(       # S-26: projection + only linked fills
+                    since=now - timedelta(days=days + 1), limit=100000, fields=("fill_id", fq.FIELD),
+                    fill_ids=sorted(wanted)), timeout=5)
                 fills_by_id = {str(f.get("fill_id")): {fq.FIELD: f.get(fq.FIELD)} for f in fills
                                if str(f.get("fill_id")) in wanted}
                 del fills
@@ -1258,6 +1693,19 @@ class Runner:
                     e[ctsvc.FIELD] = c
         except Exception as e:  # noqa: BLE001
             log.warning("close-time lookup for new episodes failed: %s", type(e).__name__)
+
+    def _tel_kalshi(self, mode: str):
+        """S-25: telemetry client: the injected factory if one was given (tests), else the short one."""
+        f = self.kalshi_factory
+        return telemetry_kalshi_factory(mode) if f is default_kalshi_factory else f(mode)
+
+    def _tel_public(self, env: str):
+        f = self.public_factory
+        return telemetry_public_factory(env) if f is default_public_factory else f(env)
+
+    def _run_tel(self, fn, *args):
+        """S-25: run a blocking telemetry read on the dedicated pool (never the default executor Stop uses)."""
+        return asyncio.get_running_loop().run_in_executor(self._tel_executor, functools.partial(fn, *args))
 
     def _ct_factory(self, env: str):
         """Close-time client: the injected public factory if one was given (tests), else the no-retry, 5 s client."""
@@ -1367,6 +1815,10 @@ class Runner:
             return "kill_switch"
         if self.arb_lock.locked():
             return "scan_running"
+        if self._shutting_down:
+            return "shutting_down"
+        if not self._fence_ok():
+            return "standby"                     # R1: only the lease holder scans (and executes)
         return None
 
     async def _arb_loop(self) -> None:
@@ -1385,7 +1837,8 @@ class Runner:
         """Re-checked right before every arb execution (a Stop may land mid-scan)."""
         return (self.settings.runner_enabled and self.arb_desired == "running" and self.arb_mode == "live"
                 and gen == self._stop_gen
-                and not self._stopping and self.live_allowed() and not self.arb_kill_switch())
+                and not self._stopping and self.live_allowed() and not self.arb_kill_switch()
+                and not self._shutting_down and self._fence_ok(min_remaining_s=FENCE_MARGIN_S))   # R1 fence
 
     def _arb_execute_sync(self, scanner: Any, op: Any, gen: int) -> str:
         if not self._arb_live_ok(gen):
@@ -1566,6 +2019,7 @@ class Runner:
                 await asyncio.wait_for(self._write_stopped(by), timeout=5)
                 if self.desired == "stopped":
                     self._stop_pending = False
+                    self._stop_persisted = True
             except Exception as e:  # noqa: BLE001
                 errors.append(f"store: {type(e).__name__} (retrying in background)")
                 self._ensure_stop_retry(by)
@@ -1626,6 +2080,7 @@ class Runner:
             try:
                 await asyncio.wait_for(self._write_stopped(by), timeout=10)
                 self._stop_pending = False
+                self._stop_persisted = True
                 log.warning("Stop persisted to store after retry")
                 return
             except Exception:  # noqa: BLE001
@@ -1654,6 +2109,8 @@ class Runner:
                 await asyncio.wait_for(self._write_stopped("stop-wins"), timeout=5)
             raise StopInProgress("stopped_during_start")
         # from here to the return there is no await, so a Stop cannot interleave
+        self._start_epoch += 1
+        self._stop_persisted = False       # the store now says running: a later kill file is a real Stop again
         if self._state_retry is not None and not self._state_retry.done():
             self._state_retry.cancel()     # the store now says running; a late stopped-retry must not override
         self._stop_pending = False
@@ -1730,4 +2187,6 @@ class Runner:
                 "kill_switch": self.kill_switch(), "desired": self.desired, "mode": self.mode,
                 "live_allowed": self.live_allowed(), "live_block_reason": self.live_block_reason(),
                 "arb": {"state": self.arb_state(), "last_scan_utc": iso(self.arb_last_scan_utc)},
-                "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error}}
+                "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error},
+                # R4 version handshake + R1 lease (additive fields)
+                **ver.handshake(), **self.lease_status(), "instance_id": self.instance_id}
