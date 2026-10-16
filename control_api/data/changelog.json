@@ -1,0 +1,14 @@
+[
+  {
+    "version": "0.9.0",
+    "date": "2026-10-15",
+    "items": [
+      "New name and logo: Keel.",
+      "Overview shows today's P&L, the last 12 runs and what changed since your last visit.",
+      "Your own Kalshi trades are labelled \"You\" and kept out of the bot's results.",
+      "Alert history and alert settings (daily summary, every fill or only problems, quiet hours).",
+      "Notifications on your iPhone Home Screen app (Chrome, Add to Home Screen).",
+      "Settings show what changed and offer Undo Last Change."
+    ]
+  }
+]

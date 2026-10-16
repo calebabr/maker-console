@@ -1,0 +1,39 @@
+# /etc/caddy/Caddyfile — HTTPS in front of the control API (optional VM path).
+# Replace api.example.com with your domain (an A record pointing at the VM's IP). Caddy gets and
+# renews the Let's Encrypt certificate automatically (ports 80 and 443 must be open).
+# No domain? A free one like <name>.duckdns.org works.
+
+api.example.com {
+	encode zstd gzip
+
+	# Everything goes to uvicorn on localhost. CORS is handled by the API itself (ALLOWED_ORIGIN).
+	reverse_proxy 127.0.0.1:8000 {
+		# A pass can take ~1 min, but /api/tick returns immediately; keep generous timeouts anyway.
+		transport http {
+			read_timeout 120s
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/kalshi-control.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		# Never log Authorization / X-2FA-Code / X-Tick-Token headers.
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>X-2fa-Code delete
+				request>headers>X-Tick-Token delete
+			}
+		}
+	}
+}

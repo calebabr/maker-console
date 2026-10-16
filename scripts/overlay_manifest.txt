@@ -1,0 +1,25 @@
+# Private files that scripts/overlay_private.py copies over the public stand-in.
+# Format: <kind> <path relative to the private checkout = path in this tree>
+#   required  must exist in the private checkout, else the overlay fails and nothing is marked installed
+#   optional  copied when present (e.g. the private benchmark file)
+#   tests     copied only with --with-tests (a trailing / means the whole directory)
+#   skiptest  a file under a tests directory that is NOT copied (it imports modules this overlay does not bring)
+# Only paths under kalshi_bot/ and control_api/data/ are accepted. Never list secrets here: keys stay in env vars.
+
+required kalshi_bot/maker_strategy.py
+required kalshi_bot/maker_monitor.py
+required kalshi_bot/maker_config.json
+required kalshi_bot/arb_scanner.py
+required kalshi_bot/config.py
+required kalshi_bot/kalshi_client.py
+required kalshi_bot/markets.py
+# Only what the control API and the maker runtime import (verified against the private kalshi_bot: maker_strategy,
+# maker_monitor, arb_scanner -> markets.taker_fee, config, kalshi_client). The old taker-bot modules (bot, data, gate,
+# journal, recalibrate, risk, strategy_*) are NOT overlaid: nothing here imports them.
+optional control_api/data/cell_expectations.json
+tests    kalshi_bot/tests/
+# These three private tests cover the old taker-bot modules (gate, journal, data) that are not overlaid, so they
+# cannot import here. They run in the private repo only (77/77 there).
+skiptest kalshi_bot/tests/test_bot_risk_gate.py
+skiptest kalshi_bot/tests/test_sizing.py
+skiptest kalshi_bot/tests/test_strategies.py

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Refuses a commit whose staged diff (added lines) or file names match the private denylist.
+# Denylist: env MAKER_DENYLIST or ../tools/.denylist.txt (missing = refuse). Enable: scripts/install_hooks.sh
+set -u
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$here/_run.sh" guard || exit $?
+"$here/_run.sh" staged || exit $?
+# gitleaks (secrets) when installed; skipped with a message otherwise (CI runs it regardless).
+if command -v gitleaks >/dev/null 2>&1; then
+  cfg=(); [ -f "$here/../.gitleaks.toml" ] && cfg=(-c "$here/../.gitleaks.toml")
+  gitleaks git --staged --redact --no-banner "${cfg[@]}" 2>/dev/null \
+    || gitleaks protect --staged --redact "${cfg[@]}" || exit 1
+else
+  echo "pre-commit: gitleaks not installed, skipping the local secret scan (CI still runs it; pre-push refuses without it)." >&2
+  echo "  Install: winget install gitleaks.gitleaks | brew install gitleaks | https://github.com/gitleaks/gitleaks/releases" >&2
+fi

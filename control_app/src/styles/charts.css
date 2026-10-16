@@ -1,0 +1,76 @@
+/* Chart axes (ChartFrame). Kept out of index.css so concurrent edits don't collide.
+   Instrument-panel language: hairline grid, muted 11 px tabular tick labels, one accent. */
+
+.chart { margin-top: 12px; min-width: 0; }
+.chart-ytitle,
+.chart-xtitle {
+  font-size: 0.6875rem;
+  line-height: 1.3;
+  color: var(--muted);
+  letter-spacing: 0.01em;
+}
+.chart-ytitle { margin: 0 0 6px; }
+.chart-xtitle { text-align: center; margin-top: 2px; }
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 6px;
+}
+.chart-y { position: relative; min-width: 18px; }
+.chart-sizer {
+  display: block;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+/* Sizes the y gutter to the longest tick label without putting the text in the DOM twice. */
+.chart-sizer::before { content: attr(data-sizer); }
+.chart-tick {
+  position: absolute;
+  font-size: 0.6875rem;
+  line-height: 1;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.chart-ytick { right: 0; transform: translateY(-50%); }
+.chart-plot { position: relative; min-width: 0; }
+.chart-gridline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px solid var(--border);
+  opacity: 0.7;
+  pointer-events: none;
+}
+.chart-plot > svg { position: relative; }
+.chart-x { position: relative; height: 15px; margin-top: 4px; }
+.chart-xtick { top: 0; }
+
+/* Charts that used to carry their own top margin sit flush inside the frame. */
+.chart .sparkline { margin-top: 0; }
+.chart .arb-bars { margin-top: 0; }
+.chart .ci,
+.chart .wr-ci { margin-top: 0; }
+
+/* Axis-only scale (no plot), e.g. the shared win-rate scale above the edge rows. */
+.chart-scale { margin-top: 6px; }
+.chart-scale .chart-x { margin-top: 0; }
+.chart-scale .chart-y { min-width: 0; }
+.chart-scale .chart-grid { column-gap: 0; }
+
+.chart-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 16px; font-size: 0.6875rem; color: var(--muted); margin-top: 4px; }
+.chart-legend i { display: inline-block; vertical-align: middle; margin-right: 6px; }
+
+.chart .calib-plot { display: block; width: 100%; height: 220px; margin-top: 0; overflow: visible; }
+.chart .calib-note { font-size: 0.6875rem; fill: var(--accent); font-family: var(--font); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; }
+.chart.ci-scale-frame { margin-top: 2px; }
+.chart.wr-scale-frame { margin-top: 4px; }
+.pnl-under-frame { margin-top: 10px; }
+.pnl-dd-note { margin-top: 4px; font-size: 0.75rem; }
+.chart-scale + .ci-legend { flex-wrap: wrap; gap: 2px 12px; font-size: 0.6875rem; }

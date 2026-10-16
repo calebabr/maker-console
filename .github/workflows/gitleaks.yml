@@ -1,0 +1,40 @@
+# Secret scan over the full git history on every push and pull request (never on a schedule). No secrets used.
+# The scanner binary is downloaded from the official release and verified against a pinned sha256 before it runs.
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"   # gitleaks_8.30.1_linux_x64.tar.gz
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0              # full history: a secret removed in a later commit is still a leaked secret
+          persist-credentials: false
+      - name: Install gitleaks (pinned version and checksum)
+        run: |
+          curl -sSfL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks
+          ./gitleaks version
+      - name: Scan history
+        run: ./gitleaks git . --config .gitleaks.toml --redact --no-banner --verbose
+      - name: Scan working tree
+        run: ./gitleaks dir . --config .gitleaks.toml --redact --no-banner --verbose

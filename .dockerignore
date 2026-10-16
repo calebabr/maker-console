@@ -1,0 +1,26 @@
+# Keep the build context tiny: only control_api/ and kalshi_bot/ are needed.
+# Allow-list approach: ignore everything, then re-include.
+*
+!control_api/
+!kalshi_bot/
+!scripts/
+
+# ...but never ship secrets, runtime state, caches or tests into the image.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/bot.env
+**/secrets/
+**/logs/
+**/state.json
+**/MAKER_KILL_SWITCH
+**/ARB_KILL_SWITCH
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/tests/
+kalshi_bot/deploy/
+kalshi_bot/Dockerfile
+scripts/tests/
+scripts/*.ps1

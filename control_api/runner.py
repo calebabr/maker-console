@@ -1,0 +1,1733 @@
+"""Bot runner: an asyncio background task in the API process that runs maker_strategy passes.
+
+Fail-safe: trades only after reading desired=running from the store. Stop never raises and never depends on
+the store, Kalshi or the network for its first two steps. Trading logic lives in kalshi_bot/ and is untouched.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import functools
+import io
+import json
+import logging
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from collections import deque
+
+from .db import schemas
+from .services import arb as arbsvc
+from .services import botfiles
+from .services import closetime as ctsvc
+from .services import fillquality as fq
+from .services import pnl as pnlsvc
+from .services import queuepos as qp
+from .services import alerts as alertsvc
+from .services import strategies as strat
+from .services.alerts import Alerter
+from .services.webpush import PushService
+from .services.logbuffer import install as install_logbuffer
+
+log = logging.getLogger("control_api.runner")
+
+from .settings import LIVE_CONFIRM, live_gates_from  # noqa: E402,F401  (re-exported)
+JOURNAL_REHYDRATE_DAYS = 35
+MONITOR_EVERY = timedelta(days=7)
+TIMER_SECONDS = 60
+RUN_ONCE_MIN_GAP = timedelta(seconds=60)     # S-22: Run once can't stack passes on the 512 MB instance
+FILL_QUALITY_BUDGET_S = 20                   # S-24: total time budget for one fill-quality evaluation
+QUEUE_BUDGET_S = 20                          # same pattern for one queue-position evaluation
+CLOSE_TIME_BUDGET_S = 20                     # same pattern for one close-time backfill
+CLOSE_TIME_INSERT_TIMEOUT_S = 5              # close-time lookups for new episodes (inside the queue budget)
+FILLS_SYNC_EVERY = timedelta(minutes=30)
+FILLS_FIRST_DAYS = 35
+# fill source attribution (UX item Y1; services/strategies.py)
+MAKER_OID_MAX = 150_000             # journal maker order ids kept in memory (~35 days of quotes)
+ORDER_LOOKUPS_PER_SYNC = 20         # GET /portfolio/orders/{id} for fills no local evidence explains
+SOURCE_BACKFILL_MAX = 20_000        # fills relabelled by the startup backfill
+SOURCE_BACKFILL_BUDGET_S = 60
+PNL_TODAY_TTL_S = 60                # /status today P&L cache
+RECENT_PASSES = 12
+FILL_ALERT_MAX_LINES = 3
+_ENV_KEYS = ("KALSHI_ENV", "MAKER_LIVE", "KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY", "KALSHI_PRIVATE_KEY_PATH",
+             "KALSHI_LIVE_CONFIRM", "KALSHI_BASE_URL", "ARB_LIVE")   # the runner never uses env ARB_LIVE
+_ENV_LOCK = threading.Lock()      # os.environ is process-global: one pass/monitor/factory at a time
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt else None
+
+
+def _env(name: str) -> str | None:
+    v = (os.environ.get(name) or "").strip()
+    return v or None
+
+
+def mode_keys(mode: str) -> tuple[str | None, str | None]:
+    p = "KALSHI_PROD_" if mode == "live" else "KALSHI_DEMO_"
+    return _env(p + "API_KEY_ID"), _env(p + "PRIVATE_KEY")
+
+
+_SAVED_ENV: dict | None = None    # the owner's real env while a pass temporarily overrides it
+
+
+def live_block_reason(settings: Any) -> str | None:
+    """Why LIVE (maker or arb) is refused, or None if allowed. Fail-closed:
+    * "strategy_not_installed": kalshi_bot is the public stand-in (IS_STANDIN), i.e. the private strategy was not
+      overlaid at build time. The stand-in can never trade real money, whatever the env says.
+    * "live_not_allowed": env gates 2+3 (prod keys + KALSHI_LIVE_CONFIRM), from the startup snapshot in Settings."""
+    if botfiles.is_standin():
+        return "strategy_not_installed"
+    if not (getattr(settings, "prod_keys_present", False) and getattr(settings, "live_confirm_ok", False)):
+        return "live_not_allowed"
+    return None
+
+
+def live_allowed_settings(settings: Any) -> bool:
+    """All live gates (strategy installed + env gates 2+3 from the startup snapshot). Fail-closed."""
+    return live_block_reason(settings) is None
+
+
+@contextlib.contextmanager
+def kalshi_env(mode: str):
+    """Set the bot's env for one pass (under the global env lock); restore afterwards."""
+    global _SAVED_ENV
+    kid, pk = mode_keys(mode)
+    with _ENV_LOCK:
+        saved = {k: os.environ.get(k) for k in _ENV_KEYS}
+        _SAVED_ENV = saved
+        try:
+            for k in _ENV_KEYS:
+                os.environ.pop(k, None)
+            os.environ["KALSHI_ENV"] = "prod" if mode == "live" else "demo"
+            os.environ["MAKER_LIVE"] = "true"
+            if kid:
+                os.environ["KALSHI_API_KEY_ID"] = kid
+            if pk:
+                os.environ["KALSHI_PRIVATE_KEY"] = pk
+            # demo = demo exchange, real orders with play money; live needs the owner's env confirmation
+            confirm = LIVE_CONFIRM if mode == "demo" else ((saved.get("KALSHI_LIVE_CONFIRM") or "").strip())
+            if confirm:
+                os.environ["KALSHI_LIVE_CONFIRM"] = confirm
+            yield
+        finally:
+            # S-19: restore the owner's env FIRST, then clear the marker (still inside the lock)
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            _SAVED_ENV = None
+
+
+def default_kalshi_factory(mode: str):
+    """Authenticated KalshiClient for the mode from env keys, or None if keys are missing."""
+    kid, pk = mode_keys(mode)
+    if not (kid and pk):
+        return None
+    botfiles.ensure_bot_path()
+    from config import BASE_URLS
+    from kalshi_client import KalshiClient
+    from cryptography.hazmat.primitives import serialization
+    key = serialization.load_pem_private_key(pk.replace("\\n", "\n").encode(), password=None)
+    # built directly (no env lock), so Stop's cancel never waits for a running pass
+    return KalshiClient(BASE_URLS["prod" if mode == "live" else "demo"], key_id=kid, private_key=key, max_retries=2)
+
+
+def default_public_factory(env: str):
+    """Unauthenticated KalshiClient for public market data (arb scans). env: "demo" | "live"."""
+    botfiles.ensure_bot_path()
+    from config import BASE_URLS
+    from kalshi_client import KalshiClient
+    return KalshiClient(BASE_URLS["prod" if env == "live" else "demo"], max_retries=2)
+
+
+def closetime_public_factory(env: str):
+    """S-31: unauthenticated client for close-time lookups only: no retries and a short timeout, so a hung GET frees
+    its (dedicated) worker quickly. The trading and arb clients keep their own settings."""
+    botfiles.ensure_bot_path()
+    from config import BASE_URLS
+    from kalshi_client import KalshiClient
+    return KalshiClient(BASE_URLS["prod" if env == "live" else "demo"], max_retries=ctsvc.CLIENT_MAX_RETRIES,
+                        timeout=ctsvc.CLIENT_TIMEOUT_S)
+
+
+class StopInProgress(RuntimeError):
+    """A Stop is running, or landed while a Start/arb-enable was in flight: Stop wins and the start is refused."""
+
+
+class RunnerDisabled(RuntimeError):
+    """RUNNER_ENABLED=false: nothing can start trading (S-10)."""
+
+
+class Runner:
+    def __init__(self, settings: Any, store: Any, kalshi_factory: Callable[[str], Any] | None = None,
+                 alerter: Alerter | None = None, public_factory: Callable[[str], Any] | None = None):
+        self.settings = settings
+        self.store = store
+        self.kalshi_factory = kalshi_factory or default_kalshi_factory
+        self.public_factory = public_factory or default_public_factory
+        self.alerter = alerter or Alerter(settings)
+        self.logs = install_logbuffer()
+        self.desired = "stopped"
+        self.mode = "demo"
+        self.store_ok = False
+        self.config: dict = {}
+        self.cloud: dict = dict(schemas.DEFAULT_CLOUD_SETTINGS)
+        self.running_pass = False
+        self.last_pass_started_utc: datetime | None = None
+        self.fill_quality_cache: dict | None = None   # S-23: {mode, overall, by_series}; served by /status, /markets
+        self._fq_task: asyncio.Task | None = None
+        # queue-position telemetry (read-only): journal quote/cancel rows waiting for the next evaluation,
+        # order ids cancelled by Stop, and the cached aggregate (same S-23 pattern as fill quality)
+        self.queue_stats_cache: dict | None = None
+        self._qp_task: asyncio.Task | None = None
+        self._qp_rows: deque = deque(maxlen=5000)          # (mode, row)
+        self._stop_cancelled: deque = deque(maxlen=2000)   # order ids; appended from Stop's cancel thread
+        self.last_stop_utc: datetime | None = None
+        self._qp_day: str | None = None
+        self._qp_day_count = 0
+        # market close time (read-only; services/closetime.py): LRU+TTL cache and the single-flight backfill task
+        self.close_times = ctsvc.CloseTimeCache()
+        self._ct_task: asyncio.Task | None = None
+        # S-31: close-time GETs run on their own small pool, never on the default executor (Stop's cancel uses that).
+        # Threads start only on first use; shut down in shutdown().
+        self._ct_executor = ThreadPoolExecutor(max_workers=ctsvc.EXECUTOR_WORKERS, thread_name_prefix="closetime")
+        self.last_run_utc: datetime | None = None
+        self.last_error: str | None = None
+        self.last_monitor_utc: datetime | None = None
+        self.keepalive_state: dict = {"last_ping_utc": None, "ok": None, "error": None}
+        self.last_inbound_utc: datetime | None = None
+        self._pass_lock = asyncio.Lock()
+        self._tasks: list[asyncio.Task] = []
+        self._bg: set[asyncio.Task] = set()
+        self._state_retry: asyncio.Task | None = None
+        self._stop_pending = False        # S-3: a Stop whose desired=stopped is not yet in the store
+        self._silent_alerted = False
+        self._tail: botfiles.JournalTail | None = None
+        self._live_downgraded: list[str] = []
+        # Start/Stop race: Stop bumps _stop_gen synchronously as its very first statement and holds
+        # _stopping > 0 while it runs. Start (and arb enable) refuse if either is set or changed across their awaits.
+        self._stop_gen = 0
+        self._stopping = 0
+        # fills / P&L sync
+        self.last_fills_sync_utc: datetime | None = None
+        self.fills_sync_error: str | None = None
+        # bracket arbitrage (on/off + live live in the store's state doc; numeric settings in config["arb"])
+        self.arb_desired = "stopped"
+        self.arb_mode = "demo"           # demo = log-only; live = execute on prod (needs the env gates)
+        self.arb_lock = asyncio.Lock()
+        self.arb_running_scan = False
+        self.arb_last_scan_utc: datetime | None = None
+        self.arb_last_error: str | None = None
+        self.arb_scans = 0
+        self.arb_found = 0
+        self.arb_recent: deque = deque(maxlen=200)   # in-memory copy, used if the store is unreachable
+        # UX sprint: fill sources, today P&L cache, alert history + web push, daily summary
+        self._maker_oids: dict[str, None] = {}       # journal maker order ids (insertion ordered, bounded)
+        self.source_backfill: dict | None = None
+        self._pnl_today: tuple[float, str, dict | None] | None = None    # (monotonic t, env, value)
+        self.push = PushService(settings, store)
+        self._daily_sent: str | None = None          # local date of the last daily summary
+        if isinstance(self.alerter, Alerter):
+            self.alerter.on_alert = self._on_alert
+
+    # ---- paths (read from the bot module each time, so tests can monkeypatch them)
+    @property
+    def ms(self):
+        return botfiles.strategy()
+
+    @property
+    def kill_path(self) -> Path:
+        return Path(self.ms.KILL)
+
+    @property
+    def config_path(self) -> Path:
+        return Path(self.ms.CONFIG_PATH)
+
+    @property
+    def journal_path(self) -> Path:
+        return Path(self.ms.LOG)
+
+    @property
+    def arb_kill_path(self) -> Path:
+        return Path(arbsvc.scanner().KILL_PATH)
+
+    def arb_kill_switch(self) -> bool:
+        try:
+            return self.arb_kill_path.exists()
+        except OSError:
+            return True
+
+    def arb_settings(self) -> dict:
+        return arbsvc.current(self.config)
+
+    def arb_state(self) -> str:
+        if self.arb_desired != "running" or self.arb_kill_switch():
+            return "stopped"
+        return "live" if self.arb_mode == "live" and self.live_allowed() else "log-only"
+
+    def kill_switch(self) -> bool:
+        try:
+            return self.kill_path.exists()
+        except OSError:
+            return True
+
+    def poll_minutes(self) -> int:
+        try:
+            p = int(self.config.get("poll_minutes") or self.ms.DEFAULTS["poll_minutes"])
+        except (TypeError, ValueError):
+            p = 10
+        return max(2, min(p, int(self.settings.max_poll_minutes)))
+
+    def next_due_utc(self) -> datetime | None:
+        if self.last_run_utc is None:
+            return utcnow() if self.desired == "running" else None
+        return self.last_run_utc + timedelta(minutes=self.poll_minutes())
+
+    def live_allowed(self) -> bool:
+        """Live gates: real strategy installed + env gates from the startup snapshot (S-19), never os.environ."""
+        return live_allowed_settings(self.settings)
+
+    def live_block_reason(self) -> str | None:
+        return live_block_reason(self.settings)
+
+    # ---- lifecycle
+    async def start(self) -> None:
+        await self.rehydrate()
+        if not self.settings.runner_enabled:
+            # S-10: RUNNER_ENABLED=false is the out-of-band emergency stop. Run Stop once (kill switches, cancel
+            # resting mm- orders, persist stopped; never raises), then nothing trades until the env is changed.
+            res = await self.stop(by="env:RUNNER_ENABLED=false")
+            log.warning("runner disabled by env: stop ran at startup (errors=%s)", res.get("errors"))
+        if self.settings.runner_enabled:
+            from .services.keepalive import keepalive_loop
+            self._tasks = [asyncio.create_task(self._timer_loop(), name="runner-timer"),
+                           asyncio.create_task(self._watchdog_loop(), name="runner-watchdog"),
+                           asyncio.create_task(keepalive_loop(self), name="runner-keepalive"),
+                           asyncio.create_task(self._arb_loop(), name="runner-arb")]
+            self._spawn(self.run_source_backfill())     # read-only relabel of older fills; budgeted, never raises
+
+    async def shutdown(self) -> None:
+        with contextlib.suppress(Exception):
+            self._ct_executor.shutdown(wait=False, cancel_futures=True)
+        for t in self._tasks + list(self._bg) + ([self._state_retry] if self._state_retry else []):
+            t.cancel()
+        for t in self._tasks:
+            with contextlib.suppress(BaseException):
+                await t
+        self._tasks = []
+
+    def _spawn(self, coro) -> asyncio.Task:
+        t = asyncio.create_task(coro)
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+        return t
+
+    async def rehydrate(self) -> None:
+        """State, config, journal and cloud settings from the store. On failure: stay stopped and alert."""
+        try:
+            await self.store.ensure_indexes()
+            st = await self.store.get_state()
+            st = st or dict(schemas.DEFAULT_STATE)
+            self.desired = st.get("desired", "stopped")
+            self.mode = st.get("mode", "demo")
+            self.arb_desired = st.get("arb_desired", "stopped")
+            self.arb_mode = st.get("arb_mode", "demo")
+            self.store_ok = True
+        except Exception as e:  # noqa: BLE001
+            self.desired, self.store_ok = "stopped", False
+            self.arb_desired, self.arb_mode = "stopped", "demo"
+            self.last_error = f"store unreachable at startup: {type(e).__name__}"
+            log.error(self.last_error)
+            await self.alerter.send("Bot stopped: store unreachable", self.last_error, priority="high")
+            self.config = self._safe_local_config()
+            return
+        # S-3 fail-safe: the kill switch file is written by Stop before the store. If it is still present while
+        # the store says running, a Stop never reached the store (e.g. Atlas was down, then a restart): stay
+        # stopped and keep retrying the store write. Start removes the file only after the store says running.
+        # Remaining window: on a host whose disk is ephemeral (the file is lost on restart) AND Atlas was down at
+        # Stop AND the process restarted before the background retry succeeded, rehydrate still reads running.
+        # The Stop alert (ntfy) and the returned `errors` are the owner's signal in that case.
+        if self.desired == "running" and self.kill_switch():
+            log.warning("store says running but the kill switch is present: staying stopped")
+            self.desired = "stopped"
+            self._stop_pending = True
+            self._ensure_stop_retry("rehydrate")
+        # S-21 (owner decision): LIVE is never restored from the store. Maker and arb come back in demo (desired
+        # running/stopped kept as stored); the owner re-arms LIVE from the phone (fresh 2FA + typed LIVE).
+        self._live_downgraded = [n for n, m in (("maker", self.mode), ("arbitrage", self.arb_mode)) if m == "live"]
+        if self._live_downgraded:
+            self.mode, self.arb_mode = "demo", "demo"
+            log.warning("live state in store not restored after restart: %s now demo", self._live_downgraded)
+            kw = {"mode": "demo"} if "maker" in self._live_downgraded else {}
+            if "arbitrage" in self._live_downgraded:
+                kw["arb_mode"] = "demo"
+            try:
+                await asyncio.wait_for(self.store.set_state(by="rehydrate", **kw), timeout=5)
+            except Exception as e:  # noqa: BLE001   (memory already says demo; fail-safe either way)
+                log.error("demo mode not persisted at startup: %s", type(e).__name__)
+        if self.arb_desired == "running" and self.arb_kill_switch():
+            # same fail-safe for arbitrage: a Stop (or a legging kill) is on disk, so arb stays off
+            log.warning("store says arb running but the arb kill switch is present: arb stays off")
+            self.arb_desired = "stopped"
+            try:
+                await asyncio.wait_for(self.store.set_state(by="rehydrate", arb_desired="stopped"), timeout=5)
+            except Exception as e:  # noqa: BLE001
+                log.error("arb stopped not persisted at startup: %s", type(e).__name__)
+        try:
+            cfg = await self.store.get_config()
+            if cfg is None:
+                cfg = self._safe_local_config()
+                await self.store.save_config(cfg, before=None, by="seed")
+            else:
+                try:
+                    # S-12: store contents are not trusted; same checks as PUT /api/config + API ceilings
+                    cfg = botfiles.validate_stored(cfg, self.settings)
+                except ValueError as ve:
+                    msgs = ve.args[0] if ve.args and isinstance(ve.args[0], list) else [str(ve)]
+                    await self._invalid_config_stop("stored config failed validation", msgs)
+                    cfg = self._safe_local_config()
+                else:
+                    botfiles.write_config_file(self.config_path, cfg)
+            self.config = botfiles.public_config(cfg)
+        except Exception as e:  # noqa: BLE001
+            log.error("config rehydrate failed: %s", type(e).__name__)
+            self.config = self._safe_local_config()
+        try:
+            rows = await self.store.list_journal(since=utcnow() - timedelta(days=JOURNAL_REHYDRATE_DAYS),
+                                                 limit=200000)
+            if rows:
+                rows = list(reversed(rows))
+                botfiles.write_journal_rows(self.journal_path, rows, schemas.JOURNAL_FIELDS)
+                self._index_journal(rows)            # maker order ids for fill attribution (no extra read)
+        except Exception as e:  # noqa: BLE001
+            log.error("journal rehydrate failed: %s", e)
+        self._tail = botfiles.JournalTail(self.journal_path)
+        self._tail.skip_to_end()
+        await self.load_cloud()
+        st_alerts = self.cloud.get("alerts_state")
+        if isinstance(st_alerts, dict) and isinstance(st_alerts.get("daily_sent"), str):
+            self._daily_sent = st_alerts["daily_sent"][:10]
+        try:
+            hb = await self.store.last_heartbeat()
+            if hb and hb.get("ts"):
+                self.last_run_utc = hb["ts"]
+            ms = await self.store.last_monitor_summary()
+            if ms and ms.get("ts"):
+                self.last_monitor_utc = ms["ts"]
+        except Exception:  # noqa: BLE001
+            pass
+        await self._alert_resumed_state(st)
+        await self.refresh_fill_quality()
+        await self.refresh_queue_stats()
+
+    async def _alert_resumed_state(self, st: dict) -> None:
+        """S-21: anything that resumes trading or live from the store (no 2FA at restart) is announced loudly."""
+        parts = []
+        if self.desired == "running":
+            parts.append(f"maker running ({self.mode})")
+        if self.arb_desired == "running":
+            parts.append("arbitrage on (log-only)")
+        downgraded = list(getattr(self, "_live_downgraded", []) or [])
+        if not parts and not downgraded:
+            return
+        by = str((st or {}).get("updated_by") or "unknown")[:64]
+        msg = f"Restored from the store after a restart: {', '.join(parts) or 'nothing running'}. "               f"Last state change by: {by}."
+        if downgraded:
+            msg += (f" LIVE was NOT restored for {' and '.join(downgraded)}: now DEMO. Re-arm LIVE from the phone "
+                    "(2FA + type LIVE) if you want real money again.")
+        log.warning(msg)
+        with contextlib.suppress(Exception):
+            await self.alerter.send("LIVE not restored: re-arm from the phone" if downgraded
+                                    else "Trading resumed after restart", msg, priority="urgent")
+
+    def _safe_local_config(self) -> dict:
+        """maker_config.json if it passes validate_stored, else DEFAULTS (always valid)."""
+        try:
+            return botfiles.validate_stored(botfiles.read_config_file(self.config_path), self.settings)
+        except ValueError:
+            log.error("local maker_config.json failed validation: using DEFAULTS")
+            cfg = botfiles.public_config(self.ms.DEFAULTS)
+            with contextlib.suppress(Exception):
+                botfiles.write_config_file(self.config_path, cfg)
+            return cfg
+
+    async def _invalid_config_stop(self, what: str, msgs: list[str]) -> None:
+        """S-12: never trade on a config that fails validation; stay stopped (maker and arb) and alert."""
+        self.desired = "stopped"
+        self.arb_desired = "stopped"
+        self.last_error = f"{what}: {'; '.join(msgs)[:300]}"
+        log.error(self.last_error)
+        await self.alerter.send("Bot stopped: invalid config", self.last_error, priority="high")
+
+    async def load_cloud(self) -> dict:
+        merged = dict(schemas.DEFAULT_CLOUD_SETTINGS)
+        try:
+            merged.update(await self.store.get_cloud_settings() or {})
+        except Exception as e:  # noqa: BLE001
+            log.warning("cloud settings load failed: %s", type(e).__name__)
+        self.cloud = merged
+        return merged
+
+    # ---- scheduling
+    def _skip_reason(self) -> str | None:
+        if not self.settings.runner_enabled:
+            return "runner_disabled"             # S-10: RUNNER_ENABLED=false is a hard stop for every entry point
+        if self.desired != "running":
+            return "stopped"
+        if self._stop_pending:
+            return "stop_pending"
+        if self.kill_switch():
+            return "kill_switch"
+        if self.running_pass or self._pass_lock.locked():
+            return "pass_running"
+        if self.mode == "live" and not self.live_allowed():
+            return "live_not_allowed"
+        return None
+
+    async def tick(self, reason: str = "tick") -> dict:
+        """Starts a pass in the background if one is due; returns immediately."""
+        why = self._skip_reason()
+        if why:
+            return {"ran": False, "reason": why}
+        due = self.next_due_utc()
+        if due and utcnow() < due:
+            return {"ran": False, "reason": "not_due"}
+        self.running_pass = True           # claim immediately so concurrent ticks skip
+        self._spawn(self._pass(reason))
+        return {"ran": True, "reason": f"started ({reason})"}
+
+    async def run_once(self, by: str) -> dict:
+        why = self._skip_reason()
+        if why:
+            return {"ran": False, "reason": why}
+        last = self.last_pass_started_utc
+        if last is not None and utcnow() - last < RUN_ONCE_MIN_GAP:
+            return {"ran": False, "reason": "too_soon"}                 # S-22 (route -> 409 too_soon)
+        self.running_pass = True
+        self._spawn(self._pass(f"run-once by {by}"))
+        return {"ran": True, "reason": "started"}
+
+    async def _timer_loop(self) -> None:
+        while True:
+            try:
+                await self.tick("timer")
+            except Exception as e:  # noqa: BLE001
+                log.error("timer tick failed: %s", e)
+            await asyncio.sleep(TIMER_SECONDS)
+
+    async def _watchdog_loop(self) -> None:
+        while True:
+            await asyncio.sleep(TIMER_SECONDS)
+            try:
+                await self.check_silence()
+            except Exception as e:  # noqa: BLE001
+                log.error("watchdog failed: %s", e)
+            try:
+                await self.check_daily_summary()
+            except Exception as e:  # noqa: BLE001
+                log.error("daily summary failed: %s", type(e).__name__)
+
+    async def check_silence(self) -> None:
+        if self.desired != "running":
+            self._silent_alerted = False
+            return
+        limit = int(self.cloud.get("silent_alert_minutes") or 30)
+        last = self.last_run_utc
+        if last is None or utcnow() - last > timedelta(minutes=limit):
+            if not self._silent_alerted:
+                self._silent_alerted = True
+                await self.alerter.send("No heartbeat", f"No trading pass for over {limit} min", priority="high")
+        else:
+            self._silent_alerted = False
+
+    # ---- a pass
+    def _run_strategy_sync(self, mode: str) -> tuple[int, str]:
+        buf = io.StringIO()
+        with kalshi_env(mode), contextlib.redirect_stdout(buf):
+            rc = self.ms.main()
+        return rc, buf.getvalue()
+
+    async def _pass(self, reason: str) -> None:
+        async with self._pass_lock:
+            self.running_pass = True
+            started = utcnow()
+            self.last_pass_started_utc = started
+            ok, err = True, None
+            strategy_ran = False
+            mode = self.mode
+            try:
+                kid, pk = mode_keys(mode)
+                if not (kid and pk):
+                    raise RuntimeError(f"no Kalshi {mode} keys in the environment")
+                if mode == "live" and not self.live_allowed():
+                    raise RuntimeError("live not allowed by env")
+                if not self.settings.runner_enabled:
+                    raise RuntimeError("runner disabled (RUNNER_ENABLED=false)")
+                if self.kill_switch() or self.desired != "running" or self._stop_pending:
+                    raise RuntimeError("stopped before pass")
+                strategy_ran = True
+                rc, out = await asyncio.to_thread(self._run_strategy_sync, mode)
+                self.logs.add(out)
+                if rc:
+                    raise RuntimeError(f"maker_strategy exited {rc}")
+            except Exception as e:  # noqa: BLE001
+                ok, err = False, f"{type(e).__name__}: {e}"
+                log.error("pass failed: %s", err)
+            if strategy_ran and (self.desired != "running" or self.kill_switch()):
+                # S-4: a Stop landed during the pass; an order POST in flight at Stop time may have rested
+                # after Stop's cancel. Cancel resting mm- orders once more.
+                try:
+                    n = await asyncio.wait_for(asyncio.to_thread(self._cancel_resting, mode), timeout=25)
+                    log.warning("post-pass cancel after Stop: cancelled=%s", n)
+                except Exception as e:  # noqa: BLE001
+                    log.error("post-pass cancel failed: %s", type(e).__name__)
+            self.last_run_utc = utcnow()
+            self.last_error = err
+            await self._sync_journal(mode)
+            if strategy_ran:
+                await self.sync_fills(mode)
+            try:
+                await self.store.add_heartbeat({"ts": self.last_run_utc, "ok": ok, "error": err, "mode": mode,
+                                                "reason": reason,
+                                                "duration_s": round((self.last_run_utc - started).total_seconds(), 1)})
+            except Exception as e:  # noqa: BLE001
+                log.error("heartbeat write failed: %s", type(e).__name__)
+            if not ok:
+                await self.alerter.send("Trading pass error", err or "unknown", priority="high")
+            self.running_pass = False
+        if strategy_ran:
+            self._start_fill_quality()          # S-24: outside the pass lock, own time budget, never blocks Stop
+            self._start_queue_position(mode)    # same pattern: read-only, budgeted, Stop never waits on it
+            self._start_close_time(mode)        # same pattern; runs after the queue evaluation above
+        if ok and (self.last_monitor_utc is None or utcnow() - self.last_monitor_utc > MONITOR_EVERY):
+            await self.run_monitor("weekly")
+
+    async def _sync_journal(self, mode: str | None = None) -> int:
+        if self._tail is None:
+            self._tail = botfiles.JournalTail(self.journal_path)
+        try:
+            rows = self._tail.read_new()
+            if not rows:
+                return 0
+            self._capture_queue_rows(rows, mode or self.mode)
+            self._index_journal(rows)
+            n = await self.store.add_journal_rows(rows)
+            for r in rows:
+                if r.get("event") == "account":
+                    try:
+                        info = json.loads(r.get("note") or "{}")
+                    except ValueError:
+                        info = {}
+                    await self.store.add_account_snapshot({
+                        "ts": datetime.fromisoformat(r["utc"]) if r.get("utc") else utcnow(),
+                        "cash": info.get("cash"), "exposure": info.get("exposure"),
+                        "headroom": info.get("headroom", 0.0)})
+            return n
+        except Exception as e:  # noqa: BLE001
+            log.error("journal sync failed: %s", type(e).__name__)
+            return 0
+
+    # ---- fills + P&L (read-only Kalshi calls)
+    def _fetch_fills_sync(self, mode: str, since: datetime) -> tuple[list[dict], list[dict]]:
+        """Fills and settlements since `since`. The client is built directly (no env lock)."""
+        client = self.kalshi_factory(mode)
+        if client is None:
+            return [], []
+        min_ts = int(since.timestamp())
+        fills = list(client.get_fills(min_ts=min_ts) or [])
+        settlements: list[dict] = []
+        getter = getattr(client, "get_settlements", None)
+        if callable(getter):
+            settlements = list(getter(min_ts=min_ts) or [])
+        elif callable(getattr(client, "request", None)):
+            cursor = None
+            for _ in range(50):                          # bounded pagination
+                body = client.request("GET", "/portfolio/settlements",
+                                      params={"min_ts": min_ts, "limit": 200, "cursor": cursor}, auth=True)
+                settlements.extend(body.get("settlements") or [])
+                cursor = body.get("cursor")
+                if not cursor or not body.get("settlements"):
+                    break
+        return fills, settlements
+
+    async def sync_fills(self, mode: str, *, force: bool = False) -> dict:
+        """Copies Kalshi fills + settlements to the store, at most every FILLS_SYNC_EVERY. Never raises."""
+        now = utcnow()
+        if not force and self.last_fills_sync_utc and now - self.last_fills_sync_utc < FILLS_SYNC_EVERY:
+            return {"synced": False, "reason": "not_due"}
+        since = (self.last_fills_sync_utc - timedelta(days=2)) if self.last_fills_sync_utc \
+            else now - timedelta(days=FILLS_FIRST_DAYS)
+        try:
+            fills, settlements = await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_fills_sync, mode, since), timeout=60)
+            for f in fills:
+                f.setdefault("env", mode)                 # demo and live P&L never mix
+            fills = [f for f in fills if isinstance(f, dict) and (f.get("fill_id") or f.get("trade_id"))]
+            settlements = [x for x in settlements if isinstance(x, dict) and x.get("ticker")]
+            known = await self._label_fills(fills, mode, since)        # Y1 source/strategy; never raises
+            known_settled = await self._known_settlements(settlements, since)
+            self._stamp_cached_close_times(fills, mode)
+            self._stamp_cached_close_times(settlements, mode)
+            nf = await self.store.upsert_fills(fills)
+            ns = await self.store.upsert_settlements(settlements)
+            self.last_fills_sync_utc, self.fills_sync_error = now, None
+            if known is not None:
+                self._alert_new_fills([f for f in fills if str(f.get("fill_id") or f.get("trade_id")) not in known])
+            if known_settled is not None:
+                self._alert_settled([x for x in settlements if str(x["ticker"]) not in known_settled], fills)
+            return {"synced": True, "fills": nf, "settlements": ns}
+        except Exception as e:  # noqa: BLE001
+            self.fills_sync_error = type(e).__name__
+            log.error("fills sync failed: %s", type(e).__name__)
+            return {"synced": False, "reason": type(e).__name__}
+
+    # ---- fill sources (UX item Y1; services/strategies.py). Read-only: labels only, never orders.
+    def _index_journal(self, rows: list[dict]) -> None:
+        """Remember maker order ids from journal quote rows (bounded; oldest dropped first). Never raises."""
+        try:
+            for oid in strat.journal_order_ids(rows):
+                self._maker_oids.pop(oid, None)
+                self._maker_oids[oid] = None
+            while len(self._maker_oids) > MAKER_OID_MAX:
+                self._maker_oids.pop(next(iter(self._maker_oids)))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _order_index(self, since: datetime) -> strat.OrderIndex:
+        idx = strat.OrderIndex(self._maker_oids)
+        try:
+            arbs = await asyncio.wait_for(self.store.list_arb_opportunities(
+                since=since - timedelta(hours=1), limit=5000, executed_only=True), 5)
+            idx.add_arb_docs(arbs)
+        except Exception as e:  # noqa: BLE001
+            log.warning("fill sources: arb log read failed: %s", type(e).__name__)
+        return idx
+
+    def _lookup_orders_sync(self, mode: str, oids: list[str]) -> list[dict]:
+        """GET /portfolio/orders/{id} (read-only) for order ids no local evidence explains: their client_order_id
+        prefix settles bot vs manual. Ids are validated before they go into the path."""
+        client = self.kalshi_factory(mode)
+        req = getattr(client, "request", None)
+        if client is None or not callable(req):
+            return []
+        out = []
+        for oid in oids:
+            if not strat.ORDER_ID_RE.match(str(oid)):
+                continue
+            try:
+                body = req("GET", f"/portfolio/orders/{oid}", auth=True)
+            except Exception as e:  # noqa: BLE001
+                log.warning("order lookup failed: %s", type(e).__name__)
+                continue
+            o = body.get("order") if isinstance(body, dict) and isinstance(body.get("order"), dict) else body
+            if isinstance(o, dict) and str(o.get("order_id") or oid) == oid:
+                out.append({"order_id": oid, "client_order_id": o.get("client_order_id")})
+        return out
+
+    async def _label_fills(self, fills: list[dict], mode: str, since: datetime) -> set[str] | None:
+        """Stamp source/strategy/source_by on fills about to be upserted, never weakening a stored label.
+        Returns the fill ids already in the store, or None (and labels nothing) if that read failed."""
+        try:
+            ids = [str(f.get("fill_id") or f.get("trade_id")) for f in fills]
+            if not ids:
+                return set()
+            docs = await asyncio.wait_for(self.store.list_fills(
+                fill_ids=ids, limit=len(ids) + 1, fields=("fill_id",) + strat.LABEL_FIELDS), 10)
+            stored = {str(d.get("fill_id")): d for d in docs}
+        except Exception as e:  # noqa: BLE001
+            log.warning("fill sources: stored labels read failed: %s", type(e).__name__)
+            return None
+        try:
+            idx = await self._order_index(since)
+            weak = [f for f, fid in zip(fills, ids)
+                    if strat.EVIDENCE_RANK.get(str((stored.get(fid) or {}).get("source_by")), 0) == 0]
+            oids = strat.unresolved(weak, idx, ORDER_LOOKUPS_PER_SYNC)
+            if oids:
+                try:
+                    idx.add_orders(await asyncio.wait_for(asyncio.to_thread(self._lookup_orders_sync, mode, oids),
+                                                          20))
+                except Exception as e:  # noqa: BLE001
+                    log.warning("fill sources: order lookups failed: %s", type(e).__name__)
+            for f, fid in zip(fills, ids):
+                old = stored.get(fid) or {}
+                m = strat.merge_label(old, idx.classify(f))
+                f.update(m if m is not None else {k: old.get(k) for k in strat.LABEL_FIELDS})
+        except Exception as e:  # noqa: BLE001
+            log.warning("fill source labelling failed: %s", type(e).__name__)
+        return set(stored)
+
+    async def _known_settlements(self, settlements: list[dict], since: datetime) -> set[str] | None:
+        if not settlements:
+            return set()
+        try:
+            docs = await asyncio.wait_for(self.store.list_settlements(
+                since=since - timedelta(days=3), limit=20000, fields=("ticker",)), 10)
+            return {str(d.get("ticker")) for d in docs}
+        except Exception as e:  # noqa: BLE001
+            log.warning("settlement alert check failed: %s", type(e).__name__)
+            return None
+
+    async def backfill_sources(self, *, days: int = schemas.RETENTION_DAYS) -> dict:
+        """Label stored fills that have no source yet (or only the 'default' guess) from the journal (incl. rows older
+        than the in-memory index), the arb log and, bounded, order lookups. Read-only toward Kalshi. Never raises."""
+        res: dict = {"checked": 0, "labelled": 0, "you": 0, "lookups": 0}
+        try:
+            now = utcnow()
+            since = now - timedelta(days=days)
+            fields = ("fill_id", "ts", "ticker", "market_ticker", "order_id", "is_taker", "env",
+                      "client_order_id") + strat.LABEL_FIELDS
+            fills = await asyncio.wait_for(self.store.list_fills(since=since, limit=SOURCE_BACKFILL_MAX * 3,
+                                                                 fields=fields), 20)
+            todo = [f for f in fills if f.get("source") not in strat.SOURCES
+                    or strat.EVIDENCE_RANK.get(str(f.get("source_by")), 0) == 0][:SOURCE_BACKFILL_MAX]
+            res["checked"] = len(todo)
+            if not todo:
+                return res
+            oldest = min((f["ts"] for f in todo if isinstance(f.get("ts"), datetime)), default=since)
+            idx = await self._order_index(oldest)
+            if len(self._maker_oids) == 0 or oldest < now - timedelta(days=JOURNAL_REHYDRATE_DAYS):
+                rows = await asyncio.wait_for(self.store.list_journal(
+                    since=oldest - timedelta(days=1), limit=300000, events=["quote"], fields=("event", "note")), 20)
+                idx.add_journal(rows)
+                del rows
+            by_env: dict[str, list[dict]] = {}
+            for f in todo:
+                by_env.setdefault(str(f.get("env") or self.mode), []).append(f)
+            for env, group in by_env.items():
+                oids = strat.unresolved(group, idx, ORDER_LOOKUPS_PER_SYNC)
+                if oids and env in ("demo", "live"):
+                    try:
+                        found = await asyncio.wait_for(asyncio.to_thread(self._lookup_orders_sync, env, oids), 20)
+                        idx.add_orders(found)
+                        res["lookups"] += len(oids)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("source backfill: order lookups failed: %s", type(e).__name__)
+            updates = {}
+            for f in todo:
+                m = strat.merge_label(f, idx.classify(f))
+                if m is not None:
+                    updates[str(f["fill_id"])] = m
+                    res["you"] += m["source"] == strat.YOU
+            if updates:
+                res["labelled"] = await asyncio.wait_for(self.store.set_fills_fields(updates), 30)
+            return res
+        except Exception as e:  # noqa: BLE001
+            log.warning("source backfill failed: %s", type(e).__name__)
+            return {**res, "error": type(e).__name__}
+
+    async def run_source_backfill(self) -> dict:
+        try:
+            res = await asyncio.wait_for(self.backfill_sources(), timeout=SOURCE_BACKFILL_BUDGET_S)
+        except Exception as e:  # noqa: BLE001   (incl. the budget timeout)
+            res = {"error": type(e).__name__}
+        self.source_backfill = {**res, "ts": iso(utcnow())}
+        log.info("fill source backfill: %s", {k: v for k, v in res.items() if k != "error"} or res)
+        return res
+
+    # ---- today P&L + recent passes (/status, UX item 25)
+    async def pnl_today(self) -> dict | None:
+        """Realised P&L of markets settled since 00:00 UTC, split {maker, arb, you, bot, total}. Cached
+        PNL_TODAY_TTL_S per mode; None if the store read fails."""
+        t, env = time.monotonic(), self.mode
+        c = self._pnl_today
+        if c and c[1] == env and 0 <= t - c[0] < PNL_TODAY_TTL_S:
+            return c[2]
+        now = utcnow()
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            res, _, _ = await asyncio.wait_for(pnlsvc.by_source_since(self.store, midnight, env=env), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("today pnl failed: %s", type(e).__name__)
+            return None
+        val = {k: res.get(k) for k in strat.bucket_ids()}
+        val.update({"bot": res.get("bot"), "total": res.get("total")})
+        self._pnl_today = (t, env, val)
+        return val
+
+    async def recent_passes(self, n: int = RECENT_PASSES) -> list[dict]:
+        """Last n passes, newest last: {ts, ok, late, errors}. late = the gap since the previous pass was more than
+        poll_minutes + max(2, poll/2) minutes. [] if none or the store is unreachable."""
+        try:
+            hbs = await asyncio.wait_for(self.store.list_heartbeats(limit=n + 1), 5)
+        except Exception:  # noqa: BLE001
+            return []
+        hbs = [h for h in reversed(hbs or []) if isinstance(h.get("ts"), datetime)]
+        poll = self.poll_minutes()
+        late_after = timedelta(minutes=poll + max(2.0, poll / 2))
+        out = []
+        for i, h in enumerate(hbs):
+            prev = hbs[i - 1]["ts"] if i > 0 else None
+            out.append({"ts": iso(h["ts"]), "ok": bool(h.get("ok")),
+                        "late": bool(prev is not None and h["ts"] - prev > late_after),
+                        "errors": 0 if h.get("ok") else 1})
+        return out[-n:]
+
+    # ---- alert history, web push, everyday alerts (UX items 37, 38, 45)
+    def alert_settings(self) -> dict:
+        return alertsvc.merged_settings(self.cloud.get("alerts"))
+
+    def _on_alert(self, kind: str, title: str, body: str, priority: str, channels: list[str]) -> None:
+        """Alerter hook: history + push in the background, so no alert (Stop's included) waits on it."""
+        try:
+            self._spawn(self._deliver_alert(kind, title, body, priority, list(channels)))
+        except Exception as e:  # noqa: BLE001   (no running loop)
+            log.warning("alert delivery not scheduled: %s", type(e).__name__)
+
+    ALERT_URLS = {"fill": "/activity", "settled": "/activity", "daily": "/", "error": "/health", "stop": "/",
+                  "breaker": "/", "test": "/alerts", "system": "/"}
+
+    async def _deliver_alert(self, kind: str, title: str, body: str, priority: str, channels: list[str]) -> None:
+        try:
+            if self.push.enabled and alertsvc.should_push(self.alert_settings(), kind, priority):
+                critical = alertsvc.is_critical(kind, priority)
+                payload = {"title": title[:schemas.ALERT_TITLE_MAX], "body": body[:schemas.ALERT_BODY_MAX],
+                           "type": kind, "url": self.ALERT_URLS.get(kind, "/"), "ts": iso(utcnow())}
+                res = await asyncio.wait_for(self.push.send_all(payload, urgency="high" if critical else "normal",
+                                                                ttl=86400 if critical else 3600), 30)
+                if res.get("sent"):
+                    channels.append("push")
+        except Exception as e:  # noqa: BLE001
+            log.warning("push delivery failed: %s", type(e).__name__)
+        try:
+            await asyncio.wait_for(self.store.add_alert({"type": kind, "title": title, "body": body,
+                                                         "priority": priority, "channels": channels}), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("alert history write failed: %s", type(e).__name__)
+
+    def _notify(self, kind: str, title: str, body: str) -> None:
+        fn = getattr(self.alerter, "notify", None)
+        if callable(fn):
+            fn(kind, title, body)
+
+    @staticmethod
+    def _money(v: float | None) -> str:
+        if v is None:
+            return "$0.00"
+        return f"{'+' if v >= 0 else '−'}${abs(v):.2f}"
+
+    def _alert_new_fills(self, new: list[dict]) -> None:
+        """'every_fill' mode: one alert per sync listing the new fills. Skipped for a first bulk import."""
+        try:
+            if not new or self.alert_settings().get("mode") != "every_fill" or len(new) > 50:
+                return
+            names = {s["id"]: s["name"] for s in strat.registry()}
+            lines = []
+            for f in new[:FILL_ALERT_MAX_LINES]:
+                src, sid = strat.fill_label(f)
+                side = pnlsvc.fill_side(f) or "?"
+                price = pnlsvc.fill_price(f, side) if side in ("yes", "no") else None
+                lines.append(f"{names.get(sid or src, 'You')}: {f.get('ticker') or f.get('market_ticker')} "
+                             f"{side.upper()} {pnlsvc.fill_count(f):g}" + (f" @ ${price:.2f}" if price else ""))
+            if len(new) > FILL_ALERT_MAX_LINES:
+                lines.append(f"+{len(new) - FILL_ALERT_MAX_LINES} more")
+            self._notify("fill", "New Fill" if len(new) == 1 else f"{len(new)} New Fills", "\n".join(lines))
+        except Exception as e:  # noqa: BLE001
+            log.warning("fill alert failed: %s", type(e).__name__)
+
+    def _alert_settled(self, new: list[dict], fills: list[dict]) -> None:
+        try:
+            if not new or self.alert_settings().get("mode") != "every_fill" or len(new) > 50:
+                return
+            pnl = pnlsvc.realised_by_source(fills, [dict(s, ts=schemas._safe_to_utc(s.get("ts") or s.get(
+                "settled_time")) or utcnow()) for s in new], since=utcnow() - timedelta(days=400))
+            lines = [f"{s['ticker']}: {str(s.get('market_result') or s.get('result') or '?').upper()}"
+                     for s in new[:FILL_ALERT_MAX_LINES]]
+            if len(new) > FILL_ALERT_MAX_LINES:
+                lines.append(f"+{len(new) - FILL_ALERT_MAX_LINES} more")
+            if pnl.get("total") is not None:
+                lines.append(f"P&L {self._money(pnl['total'])}")
+            title = "Market Settled" if len(new) == 1 else f"{len(new)} Markets Settled"
+            self._notify("settled", title, "\n".join(lines))
+        except Exception as e:  # noqa: BLE001
+            log.warning("settled alert failed: %s", type(e).__name__)
+
+    async def daily_summary_text(self, now: datetime | None = None) -> str:
+        now = now or utcnow()
+        since = now - timedelta(days=1)
+        parts = []
+        try:
+            res, _, _ = await asyncio.wait_for(pnlsvc.by_source_since(self.store, since, env=self.mode), 10)
+            parts.append(f"Bot {self._money(res.get('bot'))}")
+            if res.get("you") is not None:
+                parts.append(f"You {self._money(res['you'])}")
+        except Exception as e:  # noqa: BLE001
+            log.warning("daily summary P&L failed: %s", type(e).__name__)
+        try:
+            n = len(await asyncio.wait_for(self.store.list_fills(since=since, limit=5000, fields=("fill_id",)), 10))
+            parts.append(f"{n} fill{'s' if n != 1 else ''}")
+        except Exception:  # noqa: BLE001
+            pass
+        state = "running" if self.desired == "running" and not self.kill_switch() else "stopped"
+        parts.append(f"Maker {state} ({self.mode})")
+        return "Last 24 h: " + " · ".join(parts)
+
+    async def check_daily_summary(self, now: datetime | None = None) -> bool:
+        """Once per local day at/after daily_summary_time: one 'daily' alert (history + push). Never raises."""
+        try:
+            s = self.alert_settings()
+            hhmm = s.get("daily_summary_time")
+            if not hhmm:
+                return False
+            loc = alertsvc.local_now(s, now)
+            today = loc.date().isoformat()
+            if self._daily_sent == today or loc.strftime("%H:%M") < str(hhmm):
+                return False
+            self._daily_sent = today                     # set first: a slow store never causes a repeat
+            self._notify("daily", "Daily Summary", await self.daily_summary_text(now))
+            self.cloud["alerts_state"] = {"daily_sent": today}
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.store.save_cloud_settings({"alerts_state": {"daily_sent": today}},
+                                                                      by="daily-summary"), 5)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("daily summary failed: %s", type(e).__name__)
+            return False
+
+    async def evaluate_fill_quality(self) -> dict:
+        """Read-only telemetry: for up to MAX_FILLS_PER_PASS maker fills whose 60-min window has closed, record
+        trade-through and the 60-min maker-side move on the fill doc (public trades only). Never raises."""
+        now = utcnow()
+        done = 0
+        try:
+            fills = await asyncio.wait_for(
+                self.store.list_fills(since=now - fq.MAX_AGE, until=now - fq.SETTLE_DELAY, limit=2000), timeout=10)
+            todo = [f for f in fills if not f.get("is_taker") and strat.is_bot(f)
+                    and not isinstance(f.get(fq.FIELD), dict)
+                    and f.get("fill_id") and (f.get("ticker") or f.get("market_ticker"))]
+            for f in todo[:fq.MAX_FILLS_PER_PASS]:
+                ticker = f.get("ticker") or f.get("market_ticker")
+                ts = fq._ts(f.get("ts"))
+                if ts is None:
+                    continue
+                env = f.get("env") or self.mode
+
+                def _get(env=env, ticker=ticker, ts=ts):
+                    return fq.fetch_trades(self.public_factory(env), ticker, ts, ts + fq.WINDOW)
+                try:
+                    trades = await asyncio.wait_for(asyncio.to_thread(_get), timeout=30)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("fill-quality trades fetch failed: %s", type(e).__name__)
+                    continue
+                res = fq.evaluate(f, trades) or {"unreadable": True, "evaluated_utc": utcnow()}
+                await self.store.set_fill_fields(f["fill_id"], {fq.FIELD: res})
+                done += 1
+            return {"evaluated": done, "pending": max(0, len(todo) - done)}
+        except Exception as e:  # noqa: BLE001
+            log.error("fill-quality evaluation failed: %s", type(e).__name__)
+            return {"evaluated": done, "error": type(e).__name__}
+
+    def _start_fill_quality(self) -> asyncio.Task | None:
+        """One background evaluation at a time (skipped if one is still running)."""
+        if self._fq_task is not None and not self._fq_task.done():
+            return None
+        self._fq_task = self._spawn(self.run_fill_quality())
+        return self._fq_task
+
+    async def run_fill_quality(self) -> dict:
+        """Evaluate (bounded by FILL_QUALITY_BUDGET_S in total), then refresh the cached aggregate. Never raises."""
+        try:
+            res = await asyncio.wait_for(self.evaluate_fill_quality(), timeout=FILL_QUALITY_BUDGET_S)
+        except Exception as e:  # noqa: BLE001   (incl. the budget timeout: the rest is scored next pass)
+            log.warning("fill-quality evaluation stopped: %s", type(e).__name__)
+            res = {"error": type(e).__name__}
+        await self.refresh_fill_quality()
+        return res
+
+    async def refresh_fill_quality(self, *, days: int = 30) -> dict | None:
+        """S-23: compute the aggregate once and cache it (overall + per series). None if the store read fails."""
+        try:
+            fills = await asyncio.wait_for(
+                self.store.list_fills(since=utcnow() - timedelta(days=days), limit=100000), timeout=5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("fill-quality aggregate failed: %s", type(e).__name__)
+            self.fill_quality_cache = None          # store down: serve null rather than a silently stale value
+            return None
+        fills = [f for f in fills if strat.is_bot(f)]     # Y1: manual trades are never a bot statistic
+        mode = self.mode
+        by_series = {}
+        for ser in self.ms.DEFAULTS["series"]:
+            pre = ser + "-"
+            by_series[ser] = fq.aggregate([f for f in fills if str(f.get("ticker") or f.get("market_ticker") or "")
+                                           .startswith(pre)], env=mode)
+        self.fill_quality_cache = {"mode": mode, "overall": fq.aggregate(fills, env=mode), "by_series": by_series,
+                                   "ts": utcnow()}
+        return self.fill_quality_cache
+
+    def fill_quality(self, series: str | None = None) -> dict | None:
+        """Cached aggregate for the current mode ({n, trade_through_share, avg_move_60m_c, baseline}), or None
+        if never computed or the mode changed since. Serving it costs no store read."""
+        c = self.fill_quality_cache
+        if not c or c.get("mode") != self.mode:
+            return None
+        return c["by_series"].get(series) if series else c["overall"]
+
+    # ---- queue-position telemetry (read-only; services/queuepos.py)
+    def _capture_queue_rows(self, rows: list[dict], mode: str) -> None:
+        try:
+            for r in rows:
+                if r.get("event") in ("quote", "cancel"):
+                    self._qp_rows.append((mode, r))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _start_queue_position(self, mode: str | None = None) -> asyncio.Task | None:
+        """One background evaluation at a time (skipped if one is still running; its rows wait for the next)."""
+        if self._qp_task is not None and not self._qp_task.done():
+            return None
+        self._qp_task = self._spawn(self.run_queue_position(mode or self.mode))
+        return self._qp_task
+
+    async def run_queue_position(self, mode: str | None = None) -> dict:
+        """Evaluate (bounded by QUEUE_BUDGET_S in total), then refresh the cached aggregate. Never raises."""
+        try:
+            res = await asyncio.wait_for(self.evaluate_queue_position(mode or self.mode), timeout=QUEUE_BUDGET_S)
+        except Exception as e:  # noqa: BLE001   (incl. the budget timeout: open episodes are observed next pass)
+            log.warning("queue-position evaluation stopped: %s", type(e).__name__)
+            res = {"error": type(e).__name__}
+        await self.refresh_queue_stats()
+        return res
+
+    def _qp_allowance(self, now: datetime) -> int:
+        day = now.strftime("%Y-%m-%d")
+        if day != self._qp_day:
+            self._qp_day, self._qp_day_count = day, 0
+        return max(0, qp.DAILY_NEW_CAP - self._qp_day_count)
+
+    async def evaluate_queue_position(self, mode: str) -> dict:
+        """Journal rows -> new/ended episodes; then (capped) read-only Kalshi reads -> join size, observations,
+        fills and outcomes for the open episodes of `mode`. Never raises."""
+        now = utcnow()
+        rows_by_env: dict[str, list[dict]] = {}
+        while self._qp_rows:
+            env, row = self._qp_rows.popleft()
+            rows_by_env.setdefault(env, []).append(row)
+        res: dict = {"new": 0, "closed": 0, "observed": 0, "dropped": 0, "calls": 0}
+        try:
+            open_list = await asyncio.wait_for(self.store.list_quote_episodes(status="open", limit=qp.MAX_OPEN),
+                                               timeout=10)
+        except Exception as e:  # noqa: BLE001
+            for env, rows in rows_by_env.items():          # keep the rows for the next run (bounded deque)
+                for r in rows:
+                    self._qp_rows.append((env, r))
+            log.warning("queue-position: store read failed: %s", type(e).__name__)
+            return {**res, "error": type(e).__name__}
+        open_eps = {e["order_id"]: e for e in open_list}
+        new_ids: set[str] = set()
+        try:
+            series = list(self.ms.DEFAULTS["series"])
+            for env, rows in rows_by_env.items():
+                new, closed, dropped = qp.apply_journal(rows, open_eps, env=env, series_list=series,
+                                                        allowance=self._qp_allowance(now), now=now)
+                self._qp_day_count += len(new)
+                new_ids.update(e["order_id"] for e in new)
+                if new:
+                    await self._close_times_for_new_episodes(new)
+                res["new"] += len(new)
+                res["closed"] += len(closed)
+                res["dropped"] += dropped
+                if new or closed:
+                    await asyncio.wait_for(self.store.upsert_quote_episodes(
+                        [qp.strip_private(e) for e in new + closed]), timeout=10)
+            if res["dropped"]:
+                log.warning("queue-position: daily cap reached, %s episodes not tracked", res["dropped"])
+            eps = [e for e in open_eps.values() if e.get("env") == mode]
+            if not eps:
+                return res
+            before = {e["order_id"]: repr(qp.strip_private(e)) for e in eps}
+            tickers = sorted({e["ticker"] for e in eps})
+            fills_since = max(min(e["ts"] for e in eps), now - timedelta(days=qp.FILLS_MAX_DAYS))
+
+            def _account():
+                return qp.collect_account(self.kalshi_factory(mode), tickers, fills_since)
+            acct = await asyncio.wait_for(asyncio.to_thread(_account), timeout=30)
+            res["calls"] += acct["calls"]
+            store_fills = None
+            if acct["fills"] is None:
+                with contextlib.suppress(Exception):
+                    store_fills = await asyncio.wait_for(self.store.list_fills(since=fills_since, limit=5000), 5)
+            qp.apply_account(eps, acct, now=now, new_ids=new_ids, stop_ids=set(self._stop_cancelled),
+                             last_stop_utc=self.last_stop_utc, store_fills=store_fills)
+            books, trade_specs = qp.plan_public(eps, new_ids)
+
+            def _public():
+                return qp.collect_public(self.public_factory(mode), books, trade_specs)
+            if books or trade_specs:
+                pub = await asyncio.wait_for(asyncio.to_thread(_public), timeout=60)
+            else:
+                pub = {"books": {}, "trades": {}, "calls": 0, "errors": []}
+            res["calls"] += pub["calls"]
+            qp.apply_public(eps, pub, now=now, new_ids=new_ids)
+            res["observed"] = sum(1 for e in eps if e.get("status") == "open" and e.get("updated_utc") == now)
+            res["closed"] += sum(1 for e in eps if e.get("status") == "closed" and e.get("closed_utc") == now)
+            changed = [qp.strip_private(e) for e in eps
+                       if e["order_id"] in new_ids or repr(qp.strip_private(e)) != before.get(e["order_id"])]
+            if changed:
+                await asyncio.wait_for(self.store.upsert_quote_episodes(changed), timeout=10)
+            res["written"] = len(changed)
+            errs = acct["errors"] + pub["errors"]
+            if errs:
+                res["errors"] = errs[:10]
+            return res
+        except Exception as e:  # noqa: BLE001
+            log.warning("queue-position evaluation failed: %s", type(e).__name__)
+            return {**res, "error": type(e).__name__}
+
+    async def refresh_queue_stats(self, *, days: int = 30) -> dict | None:
+        """Compute queue_stats once (overall + per series) and cache it. None if the store read fails.
+        Loads only the aggregate's fields (projection) and keeps only the fills it links to (512 MB instance)."""
+        now = utcnow()
+        mode = self.mode
+        try:
+            eps = await asyncio.wait_for(self.store.list_quote_episodes(
+                since=now - timedelta(days=days), env=mode, limit=60000, fields=qp.AGG_FIELDS), timeout=5)
+            fills_by_id: dict = {}
+            wanted = {str(e["fill_ids"][0]) for e in eps if e.get("fill_ids")}
+            if wanted:
+                fills = await asyncio.wait_for(self.store.list_fills(since=now - timedelta(days=days + 1),
+                                                                     limit=100000), timeout=5)
+                fills_by_id = {str(f.get("fill_id")): {fq.FIELD: f.get(fq.FIELD)} for f in fills
+                               if str(f.get("fill_id")) in wanted}
+                del fills
+        except Exception as e:  # noqa: BLE001
+            log.warning("queue stats aggregate failed: %s", type(e).__name__)
+            self.queue_stats_cache = None
+            return None
+        mine = [e for e in eps if e.get("env") == mode]
+        by_series = {ser: qp.aggregate([e for e in mine if e.get("series") == ser], fills_by_id, now=now)
+                     for ser in self.ms.DEFAULTS["series"]}
+        self.queue_stats_cache = {"mode": mode, "overall": qp.aggregate(mine, fills_by_id, now=now),
+                                  "by_series": by_series, "ts": now}
+        return self.queue_stats_cache
+
+    def queue_stats(self, series: str | None = None) -> dict | None:
+        """Cached queue_stats for the current mode, or None if never computed, the store was down at the last
+        refresh, or the mode changed since. Serving it costs no store read."""
+        c = self.queue_stats_cache
+        if not c or c.get("mode") != self.mode:
+            return None
+        return c["by_series"].get(series) if series else c["overall"]
+
+    # ---- market close time (read-only; services/closetime.py)
+    def _stamp_cached_close_times(self, docs: list[dict], env: str) -> int:
+        """close_time from the doc itself or the cache (no Kalshi call) on docs about to be written."""
+        n = 0
+        try:
+            for d in docs:
+                if not isinstance(d, dict):
+                    continue
+                t = ctsvc.doc_ticker(d)
+                e = str(d.get("env") or env)
+                have = ctsvc.to_utc(d.get(ctsvc.FIELD))
+                if have is not None:
+                    self.close_times.seed(e, t, have)
+                    continue
+                d.pop(ctsvc.FIELD, None)
+                c = self.close_times.get(e, t) if ctsvc.valid_ticker(t) else None
+                if c is not None:
+                    d[ctsvc.FIELD] = c
+                    n += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("close-time stamp failed: %s", type(e).__name__)
+        return n
+
+    async def _close_times_for_new_episodes(self, eps: list[dict]) -> None:
+        """Set close_time on new episodes before their insert (cache, else at most MAX_FETCH_EPISODES GETs, short
+        timeout). Unresolved ones are filled in later by the backfill. Never raises."""
+        try:
+            wanted = [(e["env"], e["ticker"]) for e in eps if ctsvc.to_utc(e.get(ctsvc.FIELD)) is None]
+            if not wanted:
+                return
+            deadline = time.monotonic() + CLOSE_TIME_INSERT_TIMEOUT_S - 0.5
+            found = await asyncio.wait_for(self._ct_resolve(wanted, ctsvc.MAX_FETCH_EPISODES, deadline),
+                                           timeout=CLOSE_TIME_INSERT_TIMEOUT_S)
+            for e in eps:
+                c = found.get((e["env"], e["ticker"]))
+                if c is not None and ctsvc.to_utc(e.get(ctsvc.FIELD)) is None:
+                    e[ctsvc.FIELD] = c
+        except Exception as e:  # noqa: BLE001
+            log.warning("close-time lookup for new episodes failed: %s", type(e).__name__)
+
+    def _ct_factory(self, env: str):
+        """Close-time client: the injected public factory if one was given (tests), else the no-retry, 5 s client."""
+        f = self.public_factory
+        return closetime_public_factory(env) if f is default_public_factory else f(env)
+
+    def _ct_resolve(self, wanted: list, max_fetch: int, deadline: float):
+        """closetime.resolve on the dedicated executor (S-31). A timeout cancels it if it hasn't started yet."""
+        loop = asyncio.get_running_loop()
+        return loop.run_in_executor(self._ct_executor, functools.partial(
+            self.close_times.resolve, self._ct_factory, wanted, max_fetch=max_fetch, deadline=deadline))
+
+    def _start_close_time(self, mode: str | None = None) -> asyncio.Task | None:
+        """One background backfill at a time (skipped if one is still running)."""
+        if self._ct_task is not None and not self._ct_task.done():
+            return None
+        self._ct_task = self._spawn(self.run_close_time(mode or self.mode))
+        return self._ct_task
+
+    async def run_close_time(self, mode: str | None = None) -> dict:
+        """Wait (bounded) for the queue evaluation so both share one cache, then backfill within
+        CLOSE_TIME_BUDGET_S. Never raises."""
+        qt = self._qp_task
+        if qt is not None and not qt.done():
+            with contextlib.suppress(Exception):
+                await asyncio.wait({qt}, timeout=QUEUE_BUDGET_S + 5)
+        try:
+            return await asyncio.wait_for(self.backfill_close_times(mode or self.mode), timeout=CLOSE_TIME_BUDGET_S)
+        except Exception as e:  # noqa: BLE001   (incl. the budget timeout: the rest is filled next pass)
+            log.warning("close-time backfill stopped: %s", type(e).__name__)
+            return {"error": type(e).__name__}
+
+    async def backfill_close_times(self, mode: str) -> dict:
+        """Bounded best-effort backfill of close_time on open episodes, recent fills (maker and taker) and recent
+        settlements that lack it. Values already in the store seed the cache first; then at most
+        MAX_FETCH_BACKFILL GET /markets/{t} and MAX_BACKFILL_WRITES writes. Never raises."""
+        res: dict = {"episodes": 0, "fills": 0, "settlements": 0, "fetches": 0}
+        try:
+            since = utcnow() - timedelta(days=ctsvc.BACKFILL_DAYS)
+            eps = await asyncio.wait_for(self.store.list_quote_episodes(status="open", limit=qp.MAX_OPEN), 10)
+            fills = await asyncio.wait_for(self.store.list_fills(
+                since=since, limit=2000, fields=("fill_id", "ticker", "market_ticker", "env", "close_time", "ts")), 10)
+            try:
+                setts = await asyncio.wait_for(self.store.list_settlements(
+                    since=since, limit=500, fields=("ticker", "env", "close_time", "ts")), 10)
+            except Exception as e:  # noqa: BLE001
+                log.warning("close-time: settlements read failed: %s", type(e).__name__)
+                setts = []
+            groups = (("episodes", eps), ("fills", fills), ("settlements", setts))
+            for _, docs in groups:                    # values already in the store cost nothing
+                for d in docs:
+                    c = ctsvc.to_utc(d.get(ctsvc.FIELD))
+                    if c is not None:
+                        self.close_times.seed(str(d.get("env") or mode), ctsvc.doc_ticker(d), c)
+            todo = [(name, d) for name, docs in groups for d in ctsvc.missing(docs)
+                    if ctsvc.valid_ticker(ctsvc.doc_ticker(d))]
+            if not todo:
+                return res
+            wanted = [(str(d.get("env") or mode), ctsvc.doc_ticker(d)) for _, d in todo]
+            before = self.close_times.fetches
+            deadline = time.monotonic() + max(0.1, CLOSE_TIME_BUDGET_S - 5)
+            found = await asyncio.wait_for(self._ct_resolve(wanted, ctsvc.MAX_FETCH_BACKFILL, deadline),
+                                           timeout=max(0.2, CLOSE_TIME_BUDGET_S - 3))
+            res["fetches"] = self.close_times.fetches - before
+            writes = 0
+            for name, d in todo:
+                if writes >= ctsvc.MAX_BACKFILL_WRITES:
+                    break
+                c = found.get((str(d.get("env") or mode), ctsvc.doc_ticker(d)))
+                if c is None:
+                    continue
+                try:
+                    if name == "episodes":
+                        ok = await asyncio.wait_for(self.store.set_quote_episode_close_time(d["order_id"], c), 5)
+                    elif name == "fills":
+                        ok = await asyncio.wait_for(self.store.set_fill_fields(d["fill_id"], {ctsvc.FIELD: c}), 5)
+                    else:
+                        ok = await asyncio.wait_for(
+                            self.store.set_settlement_fields(d["ticker"], {ctsvc.FIELD: c}), 5)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("close-time write failed (%s): %s", name, type(e).__name__)
+                    continue
+                writes += 1
+                if ok:
+                    res[name] += 1
+            res["pending"] = max(0, len(todo) - res["episodes"] - res["fills"] - res["settlements"])
+            return res
+        except Exception as e:  # noqa: BLE001
+            log.warning("close-time backfill failed: %s", type(e).__name__)
+            return {**res, "error": type(e).__name__}
+
+    async def pnl(self, *, taker: bool = False) -> dict | None:
+        """d7/d30 realised P&L in the current maker mode (taker=True: arbitrage legs). None if no data or error."""
+        try:
+            return await asyncio.wait_for(pnlsvc.compute(self.store, utcnow(), taker=taker, env=self.mode), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("pnl compute failed: %s", type(e).__name__)
+            return None
+
+    # ---- bracket arbitrage
+    def _arb_skip_reason(self) -> str | None:
+        if not self.settings.runner_enabled:
+            return "runner_disabled"
+        if self.arb_desired != "running":
+            return "stopped"
+        if self.arb_kill_switch():
+            return "kill_switch"
+        if self.arb_lock.locked():
+            return "scan_running"
+        return None
+
+    async def _arb_loop(self) -> None:
+        while True:
+            try:
+                await self.arb_scan()
+            except Exception as e:  # noqa: BLE001
+                log.error("arb loop failed: %s", type(e).__name__)
+            try:
+                secs = int(self.arb_settings()["arb_poll_seconds"])
+            except (TypeError, ValueError, KeyError):
+                secs = arbsvc.DEFAULT_POLL_SECONDS
+            await asyncio.sleep(max(arbsvc.POLL_MIN, min(arbsvc.POLL_MAX, secs)))
+
+    def _arb_live_ok(self, gen: int) -> bool:
+        """Re-checked right before every arb execution (a Stop may land mid-scan)."""
+        return (self.settings.runner_enabled and self.arb_desired == "running" and self.arb_mode == "live"
+                and gen == self._stop_gen
+                and not self._stopping and self.live_allowed() and not self.arb_kill_switch())
+
+    def _arb_execute_sync(self, scanner: Any, op: Any, gen: int) -> str:
+        if not self._arb_live_ok(gen):
+            return "skipped: stopped"
+        client = self.kalshi_factory("live")
+        if client is None:
+            return "skipped: no prod keys"
+        try:
+            cash = float((client.get_balance() or {}).get("balance") or 0) / 100.0
+        except Exception as e:  # noqa: BLE001
+            return f"skipped: balance {type(e).__name__}"
+        try:
+            frac = float(self.config.get("max_open_frac") or 0.5)
+        except (TypeError, ValueError):
+            frac = 0.5
+        cap = cash * min(frac, float(self.settings.max_open_frac))
+        if op.cost > cap:
+            return f"skipped: cost {op.cost:.2f} > cap {cap:.2f}"
+        if not self._arb_live_ok(gen):
+            return "skipped: stopped"
+        if not (live_allowed_settings(self.settings) and all(mode_keys("live"))):
+            return "skipped: live not allowed"           # S-19: second live check right before execution
+        try:
+            return str(scanner.execute(client, op))       # arb_scanner trips its own kill switch on a partial set
+        except Exception as e:  # noqa: BLE001
+            # an order error mid-set may leave a leg filled: legging risk, so trip the arb kill switch
+            try:
+                self.arb_kill_path.write_text(json.dumps({"reason": "legging risk: order error mid-set",
+                                                          "event": op.event, "error": type(e).__name__,
+                                                          "utc": utcnow().isoformat()}), encoding="utf-8")
+            except OSError:
+                pass
+            return f"ERROR {type(e).__name__}"
+
+    def _arb_scan_sync(self, cfg: dict, live: bool, gen: int, data_env: str) -> list[tuple[Any, str]]:
+        scanner = arbsvc.scanner()
+        pub = self.public_factory(data_env)
+        if pub is not None:
+            pub = ctsvc.RecordingPublic(pub, self.close_times, data_env)   # market close times at no extra call
+        # client=None: scan_once itself never executes; live execution goes through the gated path above
+        ops = scanner.scan_once(pub, None, list(cfg["arb_series"]), float(cfg["arb_max_contracts"]),
+                                float(cfg["arb_min_profit"]))
+        return [(op, self._arb_execute_sync(scanner, op, gen) if live else "log-only") for op in ops]
+
+    async def arb_scan(self) -> dict:
+        """One arbitrage scan if arb is on. Log-only unless arb_mode=live AND the env allows live."""
+        if self.arb_desired == "running" and self.arb_kill_switch():
+            await self._arb_tripped()
+        why = self._arb_skip_reason()
+        if why:
+            return {"scanned": False, "reason": why}
+        async with self.arb_lock:
+            gen = self._stop_gen
+            live = self.arb_mode == "live" and self.live_allowed()
+            data_env = "live" if live else self.mode
+            self.arb_running_scan = True
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.to_thread(self._arb_scan_sync, self.arb_settings(), live, gen, data_env), timeout=120)
+                self.arb_last_error = None
+            except Exception as e:  # noqa: BLE001
+                self.arb_last_error = type(e).__name__
+                log.error("arb scan failed: %s", type(e).__name__)
+                return {"scanned": False, "reason": "error", "error": type(e).__name__}
+            finally:
+                self.arb_running_scan = False
+                self.arb_last_scan_utc = utcnow()
+            self.arb_scans += 1
+            self.arb_found += len(results)
+            for op, executed in results:
+                doc = arbsvc.opportunity_doc(op, executed, "live" if live else "log-only")
+                doc["ts"] = utcnow()
+                self.arb_recent.appendleft(doc)
+                try:
+                    await asyncio.wait_for(self.store.add_arb_opportunity(dict(doc)), timeout=5)
+                except Exception as e:  # noqa: BLE001
+                    log.error("arb log write failed: %s", type(e).__name__)
+                if executed.startswith(("PARTIAL", "ERROR")):
+                    await self.alerter.send("Arbitrage legging risk: arb kill switch tripped",
+                                            f"{op.event}: {executed}", priority="urgent")
+                elif executed.startswith("FILLED"):
+                    await self.alerter.send("Arbitrage executed", f"{op.event} {op.kind} profit ${op.profit}")
+            if self.arb_kill_switch() and self.arb_desired == "running":
+                await self._arb_tripped()
+            return {"scanned": True, "found": len(results)}
+
+    async def _arb_tripped(self) -> None:
+        """The arb kill switch is on disk (legging) while arb is on: turn arb off and persist it, because Render's
+        disk is ephemeral and the file alone would not survive a restart. Never raises."""
+        self.arb_desired = "stopped"
+        self.arb_mode = "demo"
+        reason = arbsvc.kill_reason(self.arb_kill_path)
+        try:
+            await asyncio.wait_for(self.store.set_state(by="arb-kill-switch", arb_desired="stopped",
+                                                        arb_mode="demo"), timeout=5)
+        except Exception as e:  # noqa: BLE001
+            log.error("arb stopped not persisted: %s", type(e).__name__)
+        with contextlib.suppress(Exception):
+            await self.alerter.send("Arbitrage stopped: kill switch", f"reason: {reason}", priority="urgent")
+
+    async def set_arb(self, *, enabled: bool | None, live: bool | None, by: str, ack_legging: bool = False) -> dict:
+        """Arb on/off and the arb-live switch (the route enforces fresh 2FA and typed LIVE). Store first (fail-safe).
+        Raises PermissionError("live_not_allowed" | "arb_legging_kill"), StopInProgress, or the store's error."""
+        gen = self._stop_gen
+        desired = None if enabled is None else ("running" if enabled else "stopped")
+        mode = None if live is None else ("live" if live else "demo")
+        if desired == "stopped" and mode is None:
+            mode = "demo"            # turning arb off also drops live: re-enabling live needs LIVE + 2FA again
+        turning_on =desired == "running" or mode == "live"
+        if turning_on and not self.settings.runner_enabled:
+            raise RunnerDisabled("runner_disabled")
+        if turning_on and self._stopping:
+            raise StopInProgress("stop_in_progress")
+        if mode == "live" and not self.live_allowed():
+            raise PermissionError(self.live_block_reason() or "live_not_allowed")
+        if desired == "running" and arbsvc.kill_reason(self.arb_kill_path) in ("legging", "unknown") \
+                and not ack_legging:
+            raise PermissionError("arb_legging_kill")
+        if desired is None and mode is None:
+            return {"arb_desired": self.arb_desired, "arb_mode": self.arb_mode}
+        await self.store.set_state(by=by, arb_desired=desired, arb_mode=mode)
+        if turning_on and (gen != self._stop_gen or self._stopping):
+            # a Stop landed during our write, which may have reached the store after Stop's: re-assert stopped
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.store.set_state(by="stop-wins", arb_desired="stopped",
+                                                            arb_mode="demo"), timeout=5)
+            raise StopInProgress("stopped_during_start")
+        # no await between the check above and these assignments, so a Stop can't interleave
+        if mode is not None:
+            self.arb_mode = mode
+        if desired is not None:
+            if desired == "running":
+                with contextlib.suppress(FileNotFoundError):
+                    self.arb_kill_path.unlink()
+            self.arb_desired = desired
+        if mode == "live":
+            self._spawn(self.alerter.send("Arbitrage LIVE enabled", f"arb_mode=live set by {by}", priority="urgent"))
+        return {"arb_desired": self.arb_desired, "arb_mode": self.arb_mode}
+
+    def arb_status(self) -> dict:
+        return {"state": self.arb_state(), "running": self.arb_running_scan, "kill_switch": self.arb_kill_switch(),
+                "kill_reason": arbsvc.kill_reason(self.arb_kill_path), "last_scan_utc": iso(self.arb_last_scan_utc),
+                "last_error": self.arb_last_error, "live_allowed": self.live_allowed(), "scans": self.arb_scans,
+                "found": self.arb_found}
+
+    # ---- controls
+    async def stop(self, by: str) -> dict:
+        """Never raises. Stops the maker AND arbitrage.
+        1) in-memory flags + stop generation 2) kill switches 3) cancel mm- orders 4) store (retried in the
+        background). Nothing before step 3 awaits, touches the store, Kalshi or the network."""
+        self._stop_gen += 1          # first statement: an in-flight Start / arb enable sees this and backs off
+        self._stopping += 1
+        errors: list[str] = []
+        cancelled = 0
+        try:
+            self.desired = "stopped"
+            self.arb_desired = "stopped"
+            self.arb_mode = "demo"
+            self.last_stop_utc = utcnow()          # queue telemetry: orders gone after this were stopped
+            stamp = f"stopped by {by} at {utcnow().isoformat()}\n"
+            try:
+                self.kill_path.parent.mkdir(parents=True, exist_ok=True)
+                self.kill_path.write_text(stamp, encoding="utf-8")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"kill_switch: {type(e).__name__}")
+            try:
+                if arbsvc.kill_reason(self.arb_kill_path) is None:     # keep a legging record if one is there
+                    self.arb_kill_path.parent.mkdir(parents=True, exist_ok=True)
+                    self.arb_kill_path.write_text(stamp, encoding="utf-8")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"arb_kill_switch: {type(e).__name__}")
+            try:
+                cancelled = await asyncio.wait_for(asyncio.to_thread(self._cancel_resting, self.mode), timeout=25)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"cancel: {type(e).__name__}")
+            self._stop_pending = True
+            try:
+                await asyncio.wait_for(self._write_stopped(by), timeout=5)
+                if self.desired == "stopped":
+                    self._stop_pending = False
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"store: {type(e).__name__} (retrying in background)")
+                self._ensure_stop_retry(by)
+            try:
+                log.warning("STOP by %s: cancelled=%s errors=%s", by, cancelled, errors)
+                self._spawn(self.alerter.send("Bot stopped", f"by {by}; cancelled {cancelled}; errors {errors}"))
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as e:  # noqa: BLE001   (belt and braces: Stop never raises)
+            errors.append(f"stop: {type(e).__name__}")
+        finally:
+            self._stopping -= 1
+        return {"desired": "stopped", "kill_switch": self.kill_switch(), "arb_kill_switch": self.arb_kill_switch(),
+                "cancelled": cancelled, "errors": errors,
+                # toast fields (UX item 39); same values as above, new names, nothing removed
+                "stopped_at": iso(self.last_stop_utc), "orders_cancelled": cancelled}
+
+    async def _write_stopped(self, by: str) -> None:
+        """One store write that stops both strategies (maker-only on a store without the arb fields)."""
+        try:
+            await self.store.set_state(by=by, desired="stopped", arb_desired="stopped", arb_mode="demo")
+        except TypeError:
+            await self.store.set_state(by=by, desired="stopped")
+
+    def _cancel_resting(self, mode: str) -> int:
+        client = self.kalshi_factory(mode)
+        if client is None:
+            return 0
+        n = 0
+        for o in client.get_orders(status="resting"):
+            if str(o.get("client_order_id", "")).startswith("mm-"):
+                try:
+                    client.cancel_order(o["order_id"], market_ticker=o.get("ticker"))
+                    n += 1
+                    q = getattr(self, "_stop_cancelled", None)
+                    if q is not None:
+                        q.append(str(o["order_id"]))      # queue telemetry: outcome "stopped" (in-memory only)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("cancel failed for an order: %s", type(e).__name__)
+        return n
+
+    def _ensure_stop_retry(self, by: str) -> None:
+        try:
+            if self._state_retry is None or self._state_retry.done():
+                self._state_retry = asyncio.create_task(self._retry_stopped(by))
+        except Exception:  # noqa: BLE001
+            pass
+
+    RETRY_FIRST_DELAY = 5
+
+    async def _retry_stopped(self, by: str) -> None:
+        """Retries the desired=stopped store write forever (backoff to 300 s) until it lands or Start wins."""
+        delay = self.RETRY_FIRST_DELAY
+        while self.desired == "stopped":
+            await asyncio.sleep(delay)
+            if self.desired != "stopped":
+                return
+            try:
+                await asyncio.wait_for(self._write_stopped(by), timeout=10)
+                self._stop_pending = False
+                log.warning("Stop persisted to store after retry")
+                return
+            except Exception:  # noqa: BLE001
+                delay = min(delay * 2, 300)
+
+    async def start_trading(self, by: str) -> dict:
+        """Removes the kill switch and sets desired=running (store first: fail-safe).
+        Stop always wins a race: if a Stop is running, or one ran while the store write was in flight, the start is
+        refused (StopInProgress) and stopped is re-asserted in the store. Arbitrage is not started by this."""
+        if not self.settings.runner_enabled:
+            raise RunnerDisabled("runner_disabled")
+        if self.mode == "live" and botfiles.is_standin():
+            # never start real-money trading on the public stand-in (mode is normally demo here: LIVE is refused
+            # by set_mode and never restored after a restart; this is the belt-and-braces check)
+            raise PermissionError("strategy_not_installed")
+        gen = self._stop_gen
+        if self._stopping:
+            raise StopInProgress("stop_in_progress")
+        kw ={"arb_desired": "stopped"} if self.arb_desired == "stopped" else {}   # keep the store's arb state honest
+        try:
+            await self.store.set_state(by=by, desired="running", **kw)
+        except TypeError:
+            await self.store.set_state(by=by, desired="running")
+        if gen != self._stop_gen or self._stopping:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._write_stopped("stop-wins"), timeout=5)
+            raise StopInProgress("stopped_during_start")
+        # from here to the return there is no await, so a Stop cannot interleave
+        if self._state_retry is not None and not self._state_retry.done():
+            self._state_retry.cancel()     # the store now says running; a late stopped-retry must not override
+        self._stop_pending = False
+        with contextlib.suppress(FileNotFoundError):
+            self.kill_path.unlink()
+        self.desired = "running"
+        self.store_ok = True
+        return {"desired": "running"}
+
+    async def set_mode(self, mode: str, by: str) -> dict:
+        if mode not in ("demo", "live"):
+            raise ValueError("mode must be demo or live")
+        if mode == "live" and not self.live_allowed():
+            raise PermissionError(self.live_block_reason() or "live_not_allowed")
+        await self.store.set_state(by=by, mode=mode)
+        self.mode = mode
+        if mode == "live":
+            await self.alerter.send("LIVE trading enabled", f"mode=live set by {by}", priority="urgent")
+        return {"mode": mode}
+
+    async def apply_config(self, cfg: dict) -> None:
+        """Writes a config the API already validated. Re-validated here too (S-12); raises ValueError([msgs])."""
+        cfg = botfiles.validate_stored(cfg, self.settings)
+        botfiles.write_config_file(self.config_path, cfg)
+        self.config = botfiles.public_config(cfg)
+
+    async def run_monitor(self, by: str) -> dict:
+        mon = botfiles.monitor()
+        before = botfiles.read_config_file(self.config_path)
+        summary: dict = {}
+        try:
+            def _go():
+                buf = io.StringIO()
+                with kalshi_env(self.mode), contextlib.redirect_stdout(buf):
+                    mon.main(["--apply"])
+                return buf.getvalue()
+            self.logs.add(await asyncio.to_thread(_go))
+            logs_dir = Path(mon.LOGS)
+            with contextlib.suppress(OSError, ValueError):
+                summary = json.loads((logs_dir / "monitor_summary.json").read_text(encoding="utf-8"))
+            report = None
+            with contextlib.suppress(OSError):
+                report = (logs_dir / "monitor_report.txt").read_text(encoding="utf-8")
+            if self.kill_switch() and self.desired == "running":
+                # maker_monitor --apply created MAKER_KILL_SWITCH (every market confidently losing). Make it a
+                # real Stop (persisted, orders cancelled), since the file alone is lost on Render restarts.
+                await self.stop(by="monitor")
+            doc = {"ts": utcnow(), "by": by, "summary": summary, "report_text": report}
+            await self.store.add_monitor_summary(doc)
+            self.last_monitor_utc = doc["ts"]
+            after = botfiles.read_config_file(self.config_path)
+            if after and after != before:
+                try:
+                    after = botfiles.validate_stored(after, self.settings)          # S-12
+                except ValueError as ve:
+                    if before:
+                        botfiles.write_config_file(self.config_path, before)
+                    msgs = ve.args[0] if ve.args and isinstance(ve.args[0], list) else [str(ve)]
+                    await self._invalid_config_stop("monitor wrote an invalid config (reverted)", msgs)
+                    return {"summary": summary, "error": "invalid_config"}
+                await self.store.save_config(after, before=before, by="monitor")
+                self.config = after
+                await self.alerter.send("Monitor changed config", str(summary.get("applied", "")))
+            return {"summary": summary}
+        except Exception as e:  # noqa: BLE001
+            log.error("monitor failed: %s", e)
+            await self.alerter.send("Monitor failed", f"{type(e).__name__}: {e}")
+            self.last_monitor_utc = utcnow()      # don't retry every pass
+            return {"summary": summary or None, "error": f"{type(e).__name__}"}
+
+    def status(self) -> dict:
+        return {"running_pass": self.running_pass, "last_run_utc": iso(self.last_run_utc),
+                "last_error": self.last_error, "next_due_utc": iso(self.next_due_utc()),
+                "kill_switch": self.kill_switch(), "desired": self.desired, "mode": self.mode,
+                "live_allowed": self.live_allowed(), "live_block_reason": self.live_block_reason(),
+                "arb": {"state": self.arb_state(), "last_scan_utc": iso(self.arb_last_scan_utc)},
+                "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error}}

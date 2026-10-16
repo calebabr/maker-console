@@ -1,0 +1,123 @@
+# CI: bot + control API tests (Python 3.11) and the PWA tests/build/audit (Node 22).
+# Public CI runs ONLY against the stand-in kalshi_bot: the private strategy is never fetched here (no token, no
+# overlay), and the step below fails the job if an overlay marker ever lands in the repo.
+# Runs only on push / pull request (never on a schedule). Uses NO secrets: tests use fakes,
+# MemoryStore and mocks; RUNNER_ENABLED=false; Kalshi, Atlas, cron-job.org and ntfy are never called.
+# Third-party actions are pinned to full commit SHAs (tag in the trailing comment).
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      STORE: memory
+      RUNNER_ENABLED: "false"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: control_api/requirements-dev.txt
+      - name: Install deps (hash-pinned lock, wheels only)
+        # requirements-dev.txt = the runtime lock (same pins as requirements.txt) + pytest, pytest-asyncio, pytest-xdist.
+        run: |
+          python -m pip install --require-hashes --only-binary :all: --no-deps -r control_api/requirements-dev.txt
+          python -m pip check
+      - name: Runtime lock and dev lock agree
+        # Every pin in requirements.txt must appear with the same version in requirements-dev.txt.
+        run: |
+          python - <<'EOF'
+          import re, sys
+          pins = lambda f: dict(re.findall(r"^([A-Za-z0-9_.-]+)==([^ ;]+)", open(f).read(), re.M))
+          rt, dev = pins("control_api/requirements.txt"), pins("control_api/requirements-dev.txt")
+          bad = {k: (v, dev.get(k)) for k, v in rt.items() if dev.get(k) != v}
+          if bad:
+              sys.exit(f"requirements-dev.txt out of sync with requirements.txt: {bad}")
+          print(f"{len(rt)} runtime pins match")
+          EOF
+      - name: Stand-in only (no private overlay in the repo)
+        run: |
+          test ! -e kalshi_bot/_overlay.py
+          test ! -e control_api/data/cell_expectations.json
+          python -c "import sys; sys.path.insert(0, 'kalshi_bot'); import maker_strategy; assert maker_strategy.IS_STANDIN is True; print('IS_STANDIN=True')"
+      - name: Deploy script and push-gate tests
+        run: python -m pytest -q -p no:cacheprovider scripts/tests
+      - name: Bot tests (kalshi_bot)
+        working-directory: kalshi_bot
+        run: python -m pytest -q -p no:cacheprovider tests
+      - name: Control API tests
+        run: python -m pytest -q -n auto -p no:cacheprovider control_api/tests   # full run incl. slow, parallel
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: control_app
+    env:
+      VITE_API_BASE_URL: http://localhost:8000   # placeholder; not a real deployment URL
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: control_app/package-lock.json
+      - name: Install (lockfile only)
+        run: npm ci --no-audit --no-fund
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=low
+      - name: Test
+        run: npm test   # vitest run (single pass)
+      - name: Build
+        run: npm run build
+      - name: CSP connect-src check (S-14)
+        working-directory: .
+        run: node deploy/check_csp.mjs
+
+  e2e:
+    # Playwright against the in-app mock backend (npm run dev:mock). No secrets, no real API.
+    # The full-stack run (npm run e2e:real, real API + TOTP) is local-only: it needs Python deps and ~4 min.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: frontend
+    defaults:
+      run:
+        working-directory: control_app
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: control_app/package-lock.json
+      - name: Install (lockfile only)
+        run: npm ci --no-audit --no-fund
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end (mock backend, 375 px)
+        env:
+          CI: "true"
+        run: npm run e2e

@@ -1,0 +1,54 @@
+# /etc/systemd/system/kalshi-control.service
+# Control API + in-process bot runner on any Ubuntu VM (optional path; the main path is Render).
+# Listens on 127.0.0.1:8000 only; Caddy terminates HTTPS in front of it (deploy/vm/Caddyfile).
+[Unit]
+Description=Kalshi maker bot control API + runner
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=kalshi
+Group=kalshi
+WorkingDirectory=/opt/kalshi-control
+# Secrets: root:kalshi 0640. Never in the repo.
+EnvironmentFile=/etc/kalshi/bot.env
+Environment=PYTHONUNBUFFERED=1
+# --workers 1: the runner is inside the process; more workers = more runners.
+ExecStart=/opt/kalshi-control/.venv/bin/uvicorn control_api.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=5
+# Give an in-flight pass time to finish its HTTP calls on stop/restart.
+TimeoutStopSec=90
+KillSignal=SIGINT
+
+# ---- Hardening ----
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+# The bot writes logs/, MAKER_KILL_SWITCH and maker_config.json in kalshi_bot/; nothing else is writable.
+ReadWritePaths=/opt/kalshi-control/kalshi_bot
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# MemoryDenyWriteExecute is left off: cffi callbacks (argon2-cffi/cryptography) may need W+X pages.
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

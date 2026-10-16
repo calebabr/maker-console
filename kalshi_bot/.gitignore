@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pem
+*.key
+bot.env
+.env
+state/
+logs/
+cache/
+_smoke/
+model_state_history/

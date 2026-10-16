@@ -1,0 +1,424 @@
+"""Read-only analytics: GET /api/analytics/summary and GET /api/analytics/trades (docs/ANALYTICS_CONTRACT.md).
+
+Signed-in session only (no fresh 2FA, like /history).
+
+Load guards (Atlas M0 + the 512 MB instance; SECURITY_REVIEW S-28 / S-30):
+* ONE build per process at a time (the gate). A build reads the store once and produces BOTH the summary and the
+  trade rows for one (env, days); concurrent requests for the same key share it (single flight); a request for
+  another key waits up to BUSY_WAIT_S for the gate, then gets 429 `analytics_busy` + Retry-After.
+* Builds run on a dedicated one-thread executor, never the default pool that Stop's cancel uses (S-25 family).
+* Results are cached CACHE_TTL_S per (env, days): the summary (small; `generated_utc` shows its age) and the trade
+  rows (at most ROWS_CACHE_KEYS keys; the largest objects), so /trades paging and filtering never re-reads Atlas.
+  Only successful builds are cached.
+* Store reads are projected to the fields used. Journal `quote` rows are folded into an order_id -> cell map kept
+  across requests and refreshed incrementally (only rows newer than the last read), so the journal cap is not hit
+  on every request (S-30).
+* Both routes are rate limited PER USER with the auth sliding-window limiter (own buckets, so login/2FA/step-up
+  limits and Stop are unaffected): 429 `rate_limited` + Retry-After.
+"""
+from __future__ import annotations
+
+import asyncio
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
+
+from ..auth.deps import current_user
+from ..auth.ratelimit import get_limiter
+from ..services import analytics as an
+from ..services import botfiles
+from ..services import strategies as strat
+
+router = APIRouter(prefix="/api")
+STORE_TIMEOUT_S = 10.0
+CACHE_TTL_S = 60.0
+CACHE_MAX_KEYS = 32                      # (env, days) has 3 x 4 = 12 possible keys; hard guard anyway
+ROWS_CACHE_KEYS = 2                      # cached trade-row sets (each up to MAX_FILLS rows)
+BUSY_WAIT_S = 8.0                        # how long a request waits for another key's build before 429
+BUSY_RETRY_S = 5
+JOURNAL_OVERLAP = timedelta(hours=6)     # incremental journal reads re-read this much (late-synced rows)
+JOURNAL_FULL_REFRESH_S = 6 * 3600.0      # rebuild the order_id -> cell map from scratch this often
+JOURNAL_MAP_MAX = 60_000                 # order ids kept in the map (oldest dropped beyond this)
+RATE_LIMITS = {"analytics_summary": (30, 60.0), "analytics_trades": (60, 60.0)}   # per user, per minute
+_clock = time.monotonic                  # tests monkeypatch this
+_SERIES_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.]{0,39}$")
+_CHOICES = {"env": an.ENVS, "side": ("yes", "no"), "kind": ("maker", "taker"), "status": ("settled", "open"),
+            "result": ("win", "loss"), "source": ("bot", "you", "all"),
+            "strategy": tuple(strat.STRATEGIES)}
+_POOL: ThreadPoolExecutor | None = None
+
+
+def _pool() -> ThreadPoolExecutor:
+    """Dedicated single worker for analytics builds (at most one runs at a time anyway)."""
+    global _POOL
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="analytics")
+    return _POOL
+
+
+def _bad(field: str, msg: str) -> HTTPException:
+    return HTTPException(422, [{"loc": ["query", field], "msg": msg}])
+
+
+def _choice(field: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value not in _CHOICES[field]:
+        raise _bad(field, f"must be one of {list(_CHOICES[field])}")
+    return value
+
+
+def _int(field: str, raw: str | None, default: int, lo: int, hi: int | None = None,
+         allowed: tuple[int, ...] | None = None) -> int:
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        raise _bad(field, "must be an integer") from None
+    if allowed is not None and v not in allowed:
+        raise _bad(field, f"must be one of {list(allowed)}")
+    if v < lo or (hi is not None and v > hi):
+        raise _bad(field, f"must be between {lo} and {hi}" if hi is not None else f"must be >= {lo}")
+    return v
+
+
+def _context(request: Request) -> tuple[list, list[str]]:
+    """(config cells, known series) -- read only."""
+    r = request.app.state.runner
+    cfg = r.config or botfiles.read_config_file(r.config_path) or {}
+    try:
+        ms = botfiles.strategy()
+        defaults = ms.DEFAULTS
+    except Exception:  # noqa: BLE001
+        defaults = {}
+    cells = cfg.get("cells") or defaults.get("cells") or []
+    series = list(dict.fromkeys(list(defaults.get("series") or []) + list(cfg.get("series") or [])
+                                + list(((cfg.get("arb") or {}).get("arb_series")) or [])))
+    return cells, series
+
+
+def _rate_limit(request: Request, user: dict, bucket: str) -> None:
+    """Per-user sliding window on the app's auth limiter (own bucket). 429 + Retry-After when exceeded."""
+    lim = get_limiter(request)
+    lim.limits.setdefault(bucket, RATE_LIMITS[bucket])
+    ok, retry = lim.hit(bucket, "user:" + str(user.get("username") or "?"))
+    if not ok:
+        raise HTTPException(status_code=429, detail="rate_limited", headers={"Retry-After": str(retry)})
+
+
+def _cache(request: Request) -> dict:
+    c = getattr(request.app.state, "analytics_cache", None)
+    if c is None:
+        c = request.app.state.analytics_cache = {}
+    return c
+
+
+def _state(request: Request) -> dict:
+    st = getattr(request.app.state, "analytics", None)
+    if st is None:
+        st = request.app.state.analytics = {"rows": {}, "inflight": {}, "gate": asyncio.Lock(), "jmap": None}
+    return st
+
+
+def clear_cache(app) -> None:
+    """Drop cached summaries, trade rows and the journal cell map (tests / tooling)."""
+    app.state.analytics_cache = {}
+    st = getattr(app.state, "analytics", None)
+    if st is not None:
+        st["rows"].clear()
+        st["jmap"] = None
+
+
+def _env(request: Request, raw: str | None) -> str:
+    if raw is None:
+        mode = getattr(request.app.state.runner, "mode", None)
+        return mode if mode in ("demo", "live") else "demo"
+    return _choice("env", raw)
+
+
+async def _read(coro):
+    try:
+        return await asyncio.wait_for(coro, timeout=STORE_TIMEOUT_S)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(503, "store_unavailable") from e
+
+
+def _capped(rows: list, cap: int) -> tuple[list, bool]:
+    return (rows[:cap], True) if len(rows) > cap else (rows, False)
+
+
+def _fresh(entry, t0: float) -> bool:
+    return entry is not None and 0 <= t0 - entry[0] < CACHE_TTL_S
+
+
+async def _journal_map(request: Request, start: datetime, now: datetime) -> tuple[dict[str, str], bool]:
+    """order_id -> cell id from journal quote rows since `start`, kept across requests (S-30).
+
+    The first read (or one reaching further back, or one every JOURNAL_FULL_REFRESH_S) reads the window; later reads
+    only fetch rows newer than the newest seen (minus JOURNAL_OVERLAP). Projected to event/note/cell/ts, and folded
+    into the map right away (the rows are not kept). Returns (map, truncated)."""
+    st = _state(request)
+    jm = st["jmap"]
+    t = _clock()
+    full = jm is None or start < jm["from"] or not 0 <= t - jm["built"] < JOURNAL_FULL_REFRESH_S
+    since = start if full else jm["hw"] - JOURNAL_OVERLAP
+    rows, trunc = _capped(await _read(request.app.state.store.list_journal(
+        since=since, limit=an.MAX_JOURNAL + 1, events=["quote"], fields=an.JOURNAL_FIELDS)), an.MAX_JOURNAL)
+    entries = an.journal_cell_entries(rows)
+    del rows
+    hw = max((e[1] for e in entries.values() if e[1] is not None), default=since)
+    if full:
+        jm = {"from": start, "built": t, "hw": hw, "map": entries, "truncated": trunc}
+    else:
+        for k, v in entries.items():
+            jm["map"].setdefault(k, v)
+        jm["hw"] = max(jm["hw"], hw)
+        jm["truncated"] = jm["truncated"] or trunc
+    m = jm["map"]
+    lo = now - timedelta(days=max(an.DAYS_ALLOWED)) - an.LOOKBACK
+    for k in [k for k, v in m.items() if v[1] is not None and v[1] < lo]:
+        del m[k]
+    if len(m) > JOURNAL_MAP_MAX:                              # keep the newest
+        jm["map"] = m = dict(sorted(m.items(), key=lambda kv: kv[1][1] or now, reverse=True)[:JOURNAL_MAP_MAX])
+        jm["truncated"] = True
+    st["jmap"] = jm
+    return {k: v[0] for k, v in m.items()}, jm["truncated"]
+
+
+async def _build(request: Request, env: str, days: int) -> tuple[dict, list[dict]]:
+    """Bounded, projected reads -> (summary, trade rows), computed on the dedicated executor. Runs under the gate."""
+    store = request.app.state.store
+    cells, series = _context(request)
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=days)
+    start = since - an.LOOKBACK
+    fills, t1 = _capped(await _read(store.list_fills(since=start, limit=an.MAX_FILLS + 1,
+                                                     fields=an.FILL_FIELDS)), an.MAX_FILLS)
+    settl, t2 = _capped(await _read(store.list_settlements(since=start, limit=an.MAX_SETTLEMENTS + 1,
+                                                           fields=an.SETTLEMENT_FIELDS)), an.MAX_SETTLEMENTS)
+    eps, t3 = _capped(await _read(store.list_quote_episodes(since=start, env=None if env == "all" else env,
+                                                            limit=an.MAX_EPISODES + 1, fields=an.EPISODE_FIELDS)),
+                      an.MAX_EPISODES)
+    jcells, t4 = await _journal_map(request, start, now)
+    arbs, t5 = _capped(await _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)), an.MAX_ARB)
+    truncated = any((t1, t2, t3, t4, t5))
+
+    def build() -> tuple[dict, list[dict]]:
+        rows = an.trade_rows(fills, settl, eps, cells=cells, series_list=series, env=env, jcells=jcells)
+        return an.summary(rows, eps, arbs, days=days, env=env, now=now, cells=cells, truncated=truncated,
+                          expectations=an.load_expectations(), jcells=jcells, series_list=series), rows
+    return await asyncio.get_running_loop().run_in_executor(_pool(), build)
+
+
+def _store_result(request: Request, key: tuple, t0: float, summary: dict, rows: list[dict]) -> None:
+    cache, rc = _cache(request), _state(request)["rows"]
+    for c in (cache, rc):
+        for k in [k for k, v in c.items() if not _fresh(v, t0)]:
+            c.pop(k, None)                                    # drop expired entries
+    if len(cache) >= CACHE_MAX_KEYS:
+        cache.clear()
+    cache[key] = (t0, summary)
+    rc.pop(key, None)
+    while len(rc) >= ROWS_CACHE_KEYS:                         # drop the oldest row set
+        rc.pop(min(rc, key=lambda k: rc[k][0]))
+    rc[key] = (t0, rows)
+
+
+def _pick(res: tuple[dict, list[dict]], want: str):
+    return res[0] if want == "summary" else res[1]
+
+
+async def _dataset(request: Request, env: str, days: int, want: str):
+    """Cached summary (want="summary") or trade rows (want="rows") for (env, days); at most one build at a time."""
+    st, key = _state(request), (env, days)
+
+    def cached():
+        hit = _cache(request).get(key) if want == "summary" else st["rows"].get(key)
+        return hit[1] if _fresh(hit, _clock()) else None
+
+    res = cached()
+    if res is not None:
+        return res
+    fut = st["inflight"].get(key)
+    if fut is not None:                                       # same key already building: share it
+        return _pick(await asyncio.shield(fut), want)
+    gate: asyncio.Lock = st["gate"]
+    try:
+        await asyncio.wait_for(gate.acquire(), timeout=BUSY_WAIT_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(429, "analytics_busy", headers={"Retry-After": str(BUSY_RETRY_S)}) from None
+    try:
+        res = cached()                                        # built while we waited for the gate?
+        if res is not None:
+            return res
+        fut = st["inflight"].get(key)
+        if fut is not None:
+            return _pick(await asyncio.shield(fut), want)
+        fut = asyncio.get_running_loop().create_future()
+        st["inflight"][key] = fut
+        t0 = _clock()
+        try:
+            res = await _build(request, env, days)
+        except BaseException as e:
+            fut.set_exception(e if isinstance(e, HTTPException) else HTTPException(503, "store_unavailable"))
+            fut.exception()                                   # mark retrieved (no "never retrieved" warning)
+            raise
+        finally:
+            st["inflight"].pop(key, None)
+        _store_result(request, key, t0, *res)
+        fut.set_result(res)
+        return _pick(res, want)
+    finally:
+        gate.release()
+
+
+@router.get("/analytics/summary")
+async def analytics_summary(request: Request, user: dict = Depends(current_user)) -> dict:
+    _rate_limit(request, user, "analytics_summary")
+    q = request.query_params
+    days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
+    env = _env(request, q.get("env"))
+    return await _dataset(request, env, days, "summary")
+
+
+def _filters(request: Request) -> tuple[int, str, dict]:
+    """Validated (days, env, filters) shared by /trades and /trades.csv (422 on bad values)."""
+    q = request.query_params
+    days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
+    env = _env(request, q.get("env"))
+    cells, series = _context(request)
+    flt = {k: _choice(k, q.get(k)) for k in ("side", "kind", "status", "result")}
+    b = q.get("band")
+    bands = an.band_labels(cells) + (an.BAND_OTHER,)          # derived from the installed cells, never hard-coded
+    if b is not None and b not in bands:
+        raise _bad("band", f"must be one of {list(bands)}")
+    flt["band"] = b
+    # Y1: bot-only by default (the "bot-only vs combined" toggle defaults to bot-only); source=all or you opt in
+    src = _choice("source", q.get("source")) or "bot"
+    flt["source"] = None if src == "all" else src
+    flt["strategy"] = _choice("strategy", q.get("strategy"))
+    s = q.get("series")
+    if s is not None and (not _SERIES_RE.match(s) or s not in series):
+        raise _bad("series", f"must be one of {series}")
+    flt["series"] = s
+    c = q.get("cell")
+    if c is not None:
+        ids = [an.cell_id(x) for x in an.parse_cells(cells)] + [an.CELL_NONE]
+        if c not in ids:
+            raise _bad("cell", f"must be one of {ids}")
+    flt["cell"] = c
+    return days, env, flt
+
+
+async def _hits(request: Request, days: int, env: str, flt: dict) -> list[dict]:
+    rows = await _dataset(request, env, days, "rows")
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return an.filter_trades(rows, since=since, **flt)         # a filter over cached rows (no store read)
+
+
+@router.get("/analytics/trades")
+async def analytics_trades(request: Request, user: dict = Depends(current_user)) -> dict:
+    _rate_limit(request, user, "analytics_trades")
+    q = request.query_params
+    limit = _int("limit", q.get("limit"), 50, 1, 200)
+    offset = _int("offset", q.get("offset"), 0, 0, 1_000_000)
+    days, env, flt = _filters(request)
+    hits = await _hits(request, days, env, flt)
+    return {"total": len(hits), "offset": offset, "limit": limit,
+            "trades": [an.public_trade(r) for r in hits[offset:offset + limit]]}
+
+
+@router.get("/analytics/my-trades")
+async def analytics_my_trades(request: Request, user: dict = Depends(current_user)) -> dict:
+    """Y5: the owner's own (manual) trades beside the bot. Same cache, gate and rate-limit bucket as /summary."""
+    _rate_limit(request, user, "analytics_summary")
+    q = request.query_params
+    days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
+    env = _env(request, q.get("env"))
+    limit = _int("limit", q.get("limit"), 100, 1, 200)
+    rows = await _dataset(request, env, days, "rows")
+    return an.my_trades(rows, days=days, env=env, now=datetime.now(timezone.utc), limit=limit)
+
+
+NOTE_MAX = 200
+_FILL_ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,80}$")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩]")
+RATE_LIMITS["trade_note"] = (30, 60.0)
+
+
+def clean_note(raw) -> str:
+    """One line of plain text: control / bidi characters removed, whitespace collapsed. ValueError if too long."""
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError("note: must be a string")
+    s = " ".join(_CTRL_RE.sub(" ", raw).split())
+    if len(s) > NOTE_MAX:
+        raise ValueError(f"note: at most {NOTE_MAX} characters")
+    return s
+
+
+async def _note_fill(request: Request, fill_id: str) -> dict:
+    if not _FILL_ID_RE.match(fill_id or ""):
+        raise HTTPException(400, ["fill_id: invalid"])
+    docs = await _read(request.app.state.store.list_fills(fill_ids=[fill_id], limit=1,
+                                                          fields=("fill_id", "user_note", "source")))
+    if not docs:
+        raise HTTPException(404, "fill_not_found")
+    return docs[0]
+
+
+@router.get("/trades/{fill_id}/note")
+async def get_trade_note(fill_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    doc = await _note_fill(request, fill_id)
+    return {"fill_id": doc["fill_id"], "note": doc.get("user_note") or ""}
+
+
+@router.put("/trades/{fill_id}/note")
+async def put_trade_note(fill_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Y5 journal note on one fill. A display-only annotation (no trading effect), so a signed-in session is enough
+    (no fresh 2FA); rate limited per user and audited. Plain text, <= 200 chars; "" clears it."""
+    from ..auth.audit import audit
+    _rate_limit(request, user, "trade_note")
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or set(body) - {"note"}:
+        raise HTTPException(400, ["body: must be {\"note\": \"...\"}"])
+    try:
+        note = clean_note(body.get("note"))
+    except ValueError as e:
+        raise HTTPException(400, [str(e)]) from e
+    await _note_fill(request, fill_id)
+    try:
+        await asyncio.wait_for(request.app.state.store.set_fill_fields(fill_id, {"user_note": note or None}),
+                               STORE_TIMEOUT_S)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(503, "store_unavailable") from e
+    for _, rows in list(_state(request)["rows"].values()):     # cached trade rows carry the note: patch in place
+        for r in rows:
+            if r.get("fill_id") == fill_id:
+                r["_note"] = note or None
+    await audit(request, "trade.note", user=user, details={"fill_id": fill_id, "length": len(note)})
+    return {"fill_id": fill_id, "note": note}
+
+
+@router.get("/analytics/trades.csv")
+async def analytics_trades_csv(request: Request, user: dict = Depends(current_user)) -> Response:
+    """All matching trade rows (newest first) up to CSV_MAX_ROWS as CSV; X-Truncated: true when there were more.
+    Same auth, rate-limit bucket and filters as /analytics/trades (limit/offset ignored). CSV-injection safe."""
+    _rate_limit(request, user, "analytics_trades")
+    days, env, flt = _filters(request)
+    hits = await _hits(request, days, env, flt)
+    body = an.trades_csv([an.public_trade(r) for r in hits[:an.CSV_MAX_ROWS]])
+    name = f"trades-{datetime.now(timezone.utc):%Y-%m-%d}.csv"
+    return Response(content=body.encode("utf-8"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"',
+                             "X-Truncated": "true" if len(hits) > an.CSV_MAX_ROWS else "false",
+                             "Cache-Control": "no-store"})

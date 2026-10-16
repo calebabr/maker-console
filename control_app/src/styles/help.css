@@ -1,0 +1,131 @@
+/* HelpIcon + Terminology page. Kept out of index.css so concurrent edits don't collide. */
+
+.help-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0 0 0 4px;
+  vertical-align: -3px;
+  color: var(--muted);
+  border-radius: 50%;
+  flex-shrink: 0;
+  line-height: 0;
+  padding: 0;
+  font: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  transition: color var(--ease);
+}
+/* Invisible pad: 34px tap target without moving anything around it. */
+.help-icon::before {
+  content: '';
+  position: absolute;
+  inset: -9px;
+  border-radius: 50%;
+}
+.help-icon:hover { color: var(--accent); text-decoration: none; }
+.help-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; color: var(--accent); }
+.help-icon svg { display: block; }
+.help-icon[aria-expanded='true'] { color: var(--accent); }
+
+/* Definition popover opened by a (?) (the .popover shell lives in index.css). */
+.popover.help-pop { padding: 12px 14px 10px; }
+.help-pop-term { margin: 0 0 4px; font-size: 0.8125rem; font-weight: 600; color: var(--muted); }
+.help-pop-short { margin: 0 0 8px; font-size: 0.9375rem; line-height: 1.4; color: var(--text); }
+.help-more { display: inline-flex; align-items: center; min-height: 34px; font-size: 0.875rem; font-weight: 500; }
+
+/* ---------- Terminology ---------- */
+
+/* Height of the sticky filter block: 4 pad + 44 input + 6 + 18 count + 10 pad + 1 hairline. */
+.terminology { --term-filter-h: calc(65px + 1.125rem); }
+
+/* Sticky filter: sits just below the app header + sticky page title (--sticky-top is set on :root
+   by PageTitle; 51px fallback = header alone at 375 px). Full-bleed across the 16px gutters with an opaque
+   background and a z-index above the entries, so nothing scrolls visibly underneath it. */
+.term-search {
+  position: sticky;
+  top: var(--sticky-top, 51px);
+  z-index: 10; /* above entries, below .appbar (20) */
+  background: var(--bg);
+  margin: 0 calc(-1 * var(--gutter));
+  padding: 4px var(--gutter) 10px;
+  border-bottom: 1px solid var(--border);
+  /* Paints over any sub-pixel seam between the bar above and the filter (text glinted through at DPR 2.75). */
+  box-shadow: 0 -3px 0 var(--bg);
+  transition: top var(--ease);
+}
+.term-search input {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  min-height: 44px;
+}
+.term-search input::placeholder { color: var(--muted); }
+.term-count { color: var(--muted); font-size: 0.75rem; line-height: 1.125rem; height: 1.125rem; margin-top: 6px; }
+
+.term-jump { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 8px; font-size: 0.8125rem; }
+.term-jump a { color: var(--muted); padding: 6px 0; }
+.term-jump a:hover { color: var(--accent); }
+
+.term-group { padding-top: 14px; scroll-margin-top: calc(var(--sticky-top, 51px) + var(--term-filter-h, 85px)); }
+.term-group > h2 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.term-list { list-style: none; margin: 0; padding: 0; }
+.term {
+  /* Padding inside the entry (no negative margins), so the highlight stays within the page gutter. */
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--border);
+  /* Hash-scroll lands the entry's top just below header + page title + sticky filter. */
+  scroll-margin-top: calc(var(--sticky-top, 51px) + var(--term-filter-h, 85px) + 8px);
+  transition: background-color 600ms ease, box-shadow 600ms ease;
+}
+.term h3 { font-size: 0.9375rem; font-weight: 600; }
+.term h3 a { color: var(--text); }
+.term h3 a:hover { text-decoration: none; color: var(--accent); }
+.term-short { color: var(--text); margin: 4px 0 6px; font-weight: 500; }
+.term-body { color: var(--muted); font-size: 0.875rem; margin: 0; }
+.term-related { margin: 8px 0 0; font-size: 0.8125rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; }
+.term-related a { padding: 4px 0; }
+.term.highlight { background: var(--surface2); box-shadow: inset 2px 0 0 var(--accent); }
+
+.term-back { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; margin: 0 0 2px; font-size: 0.875rem; font-weight: 500; }
+.term-best {
+  display: inline-block; margin-left: 8px; padding: 1px 8px; vertical-align: 1px;
+  font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--accent); border: 1px solid var(--accent); border-radius: 999px;
+}
+.term-via { margin: 2px 0 0; font-size: 0.75rem; color: var(--muted); }
+.term mark { color: inherit; background: color-mix(in srgb, var(--accent) 28%, transparent); border-radius: 2px; padding: 0 1px; }
+.term-more {
+  display: block; width: 100%; min-height: 44px; margin-top: 8px; padding: 10px 0;
+  font: inherit; font-size: 0.875rem; color: var(--accent); text-align: left;
+  background: none; border: 0; border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.term-more:hover { text-decoration: underline; }
+/* A new query fades the list in so it is clear it changed. */
+.term-results { animation: term-fade-in 180ms ease-out; }
+@keyframes term-fade-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .term, .help-icon, .term-search { transition: none; }
+  .term-results { animation: none; }
+}
+
+/* Large text size at 375px: long identifiers (max_open_frac) and the popover must wrap, never scroll sideways. */
+.term, .popover.help-pop { overflow-wrap: anywhere; }
+.term-jump { row-gap: 2px; }

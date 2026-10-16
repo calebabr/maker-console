@@ -1,0 +1,92 @@
+# Render Blueprint: the control API + in-process bot runner as ONE free web service.
+# Spec: https://render.com/docs/blueprint-spec
+#
+# How to use (owner): Render dashboard -> New -> Blueprint -> pick this repo -> fill in the
+# `sync: false` values when prompted. Full steps: docs/DEPLOY.md.
+#
+# Rules:
+#   * Secrets are `sync: false` (typed into the Render dashboard once, never in git).
+#     Render only prompts for them on the FIRST Blueprint creation; later changes are made
+#     in the dashboard (service -> Environment).
+#   * Free plan: 512 MB RAM, 0.1 CPU, ephemeral disk, no shell, sleeps after 15 min without
+#     inbound traffic (the self-ping + cron-job.org tick keep it awake; see DASHBOARD_PLAN.md).
+#   * Exactly one worker: the runner is an asyncio task inside the process; two workers
+#     would mean two runners placing orders.
+#   * Render sets PORT and RENDER_EXTERNAL_URL itself; do not add them here.
+services:
+  - type: web
+    name: kalshi-control
+    runtime: python
+    plan: free
+    region: virginia            # US East; put the Atlas M0 cluster in AWS us-east-1 too
+    branch: main
+    autoDeployTrigger: commit   # replaces the deprecated `autoDeploy: true`
+    # scripts/render_build.sh: hash-pinned pip install (pip refuses any file whose sha256 is not in
+    # requirements.txt), then the optional private-strategy overlay (only when PRIVATE_REPO_TOKEN is set; without
+    # it the build succeeds as a demo-only build and live mode is refused), then prints IS_STANDIN=True/False.
+    buildCommand: "bash scripts/render_build.sh"
+    startCommand: uvicorn control_api.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /healthz
+    # Don't redeploy (and restart the runner mid-pass) for docs-only commits.
+    buildFilter:
+      paths:
+        - control_api/**
+        - kalshi_bot/**
+        - scripts/**
+        - render.yaml
+      ignoredPaths:
+        - kalshi_bot/tests/**
+        - control_api/tests/**
+        - scripts/tests/**
+        - "**/*.md"
+    envVars:
+      # ---- runtime / non-secret ----
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: STORE
+        value: mongo
+      - key: MONGODB_DB
+        value: kalshi_control
+      - key: RUNNER_ENABLED
+        value: "true"
+      - key: MAX_RUN_BUDGET
+        value: "500"
+      - key: MAX_OPEN_FRAC
+        value: "0.5"
+      - key: MAX_POLL_MINUTES
+        value: "14"           # must stay < 15 (Render's sleep timeout)
+      - key: MAX_ARB_CONTRACTS
+        value: "25"           # API ceiling for the arb block's contract size (code clamps to 1..100)
+      - key: ALLOWED_ORIGIN
+        sync: false           # e.g. https://<your-app>.vercel.app  (no trailing slash)
+      - key: NTFY_TOPIC
+        sync: false           # long random topic name; treat as semi-secret (anyone with it can read alerts)
+      - key: PUBLIC_URL
+        sync: false           # optional; leave EMPTY on Render (falls back to RENDER_EXTERNAL_URL)
+      - key: PRIVATE_REPO_REF
+        value: main           # branch, tag or commit of the private repo that the build overlays
+
+      # ---- secrets (owner enters in the dashboard; never in git) ----
+      - key: PRIVATE_REPO_TOKEN
+        sync: false           # BUILD-time. Fine-grained read-only GitHub token for the private strategy repo
+                              # (steps: deploy/private_overlay.md). Empty = demo-only build, live mode refused.
+      - key: MONGODB_URI
+        sync: false           # mongodb+srv://<user>:<password>@<cluster>/?retryWrites=true&w=majority
+      - key: JWT_SECRET
+        sync: false           # from: python -m control_api.auth.bootstrap --gen-keys
+      - key: TOTP_ENC_KEY
+        sync: false           # Fernet key, same --gen-keys output; must match the one used on your PC for bootstrap
+      - key: TICK_TOKEN
+        sync: false           # same --gen-keys output; sent by cron-job.org as X-Tick-Token
+      - key: CRONJOB_API_KEY
+        sync: false           # optional; cron-job.org Console -> Settings -> API
+      - key: KALSHI_DEMO_API_KEY_ID
+        sync: false
+      - key: KALSHI_DEMO_PRIVATE_KEY
+        sync: false           # PEM text; multi-line is fine, or one line with literal \n
+      - key: KALSHI_PROD_API_KEY_ID
+        sync: false           # leave empty until you deliberately go live
+      - key: KALSHI_PROD_PRIVATE_KEY
+        sync: false           # leave empty until you deliberately go live
+      - key: KALSHI_LIVE_CONFIRM
+        sync: false           # leave empty; only I_UNDERSTAND_REAL_MONEY enables real money

@@ -1,0 +1,78 @@
+# --- Secrets: never commit ---
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+!control_app/.env.mock
+bot.env
+**/secrets/
+
+# --- Private strategy overlay (scripts/overlay_private.py): never commit ---
+# The overlay copies private files over the public stand-in in a BUILD or TEMP copy only. If it is ever run in a
+# working tree, these keep its output out of git (the overlaid kalshi_bot files themselves show as modified:
+# never commit them; restore with `git checkout -- kalshi_bot`).
+kalshi_bot/_overlay.py
+control_api/data/cell_expectations.json
+_private/
+private_checkout/
+
+# --- Archives and data dumps ---
+*.zip
+*.pkl
+*.parquet
+
+# --- Runtime state / logs (bot, runner, API) ---
+logs/
+**/logs/
+state/
+**/state.json
+MAKER_KILL_SWITCH
+ARB_KILL_SWITCH
+cache/
+_smoke/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Node / frontend ---
+node_modules/
+dist/
+build/
+.vite/
+.vercel/
+
+# --- Editors / OS / local assistant settings ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/
+CLAUDE.md
+
+# --- Local env overrides, PWA dev build, coverage ---
+.env.local
+.env.*.local
+dev-dist/
+coverage/
+*.tsbuildinfo
+
+# --- Local data pull and dev server (never commit) ---
+local_data/
+local_dev/
+local_dev_*.log
+*.log
+
+# --- Local screenshots ---
+screenshots/
+Mobile Screenshots/
+
+# --- private denylist (edge-revealing; lives in the private repo, never here) ---
+.denylist*
+tools/.denylist*

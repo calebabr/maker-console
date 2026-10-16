@@ -1,0 +1,23 @@
+{
+  "_README": "PUBLIC STAND-IN settings. The cells below are EXAMPLE values (made up, no strategy). The private overlay replaces this file. Edit settings from the app, not here.",
+
+  "run_budget": 10,
+  "_run_budget": "UNITS: US dollars per run. RANGE: N-10000 where N = number of series (>= $1 per market). Max total $ of new bids per run, split evenly across 'series'.",
+
+  "max_order": 5,
+  "_max_order": "UNITS: US dollars per order. RANGE: 1-1000. Max $ per single order.",
+
+  "max_open_frac": 0.2,
+  "_max_open_frac": "UNITS: fraction of balance (0.2 = 20%). RANGE: 0.05-0.9. Hard cap: $ at risk can never exceed this fraction of (balance + open positions).",
+
+  "series": ["KXDEMOA", "KXDEMOB", "KXDEMOC", "KXDEMOD", "KXDEMOE", "KXDEMOF"],
+  "_series": "UNITS: Kalshi series tickers. Markets the strategy may quote.",
+
+  "poll_minutes": 10,
+  "_poll_minutes": "UNITS: minutes. RANGE: 2-60 (the cloud API caps it at 14). How often a trading pass runs.",
+
+  "cells": [
+    [0.35, 0.50, 3, 9, "yes"], [0.50, 0.62, 9, 30, "no"]
+  ],
+  "_cells": "EXAMPLE VALUES ONLY. Each row: [min price, max price, min hours to close, max hours to close, side]. Never editable from the app."
+}

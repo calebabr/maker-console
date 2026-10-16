@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Refuses a push whose new commits (added lines, file names, commit messages) match the private denylist, or that
+# contain a secret gitleaks recognises. git feeds "<local ref> <local sha> <remote ref> <remote sha>" lines on stdin.
+# gitleaks missing = REFUSE (fail closed) unless SKIP_GITLEAKS_LOCAL=1 (CI still runs gitleaks on every push).
+set -u
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+top="$(cd "$here/.." && pwd)"
+"$here/_run.sh" push || exit $?
+if command -v gitleaks >/dev/null 2>&1; then
+  cfg=(); [ -f "$top/.gitleaks.toml" ] && cfg=(-c "$top/.gitleaks.toml")
+  gitleaks git "$top" --redact --no-banner "${cfg[@]}" || { echo "pre-push: gitleaks found a secret, refusing." >&2; exit 1; }
+elif [ "${SKIP_GITLEAKS_LOCAL:-}" = "1" ]; then
+  echo "pre-push: gitleaks not installed; SKIP_GITLEAKS_LOCAL=1 set, skipping (CI still runs it)." >&2
+else
+  cat >&2 <<'MSG'
+pre-push: gitleaks is not installed, refusing the push (fail closed).
+  Install it (Windows: winget install gitleaks.gitleaks, or scoop install gitleaks; macOS: brew install gitleaks;
+  Linux: download the release from https://github.com/gitleaks/gitleaks/releases and put it on PATH), then push again.
+  To push without the local scan once (CI still scans every push): SKIP_GITLEAKS_LOCAL=1 git push
+MSG
+  exit 1
+fi
