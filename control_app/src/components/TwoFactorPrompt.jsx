@@ -51,6 +51,7 @@ export default function TwoFactorPrompt({
           <span className="field-label">Code from your authenticator app</span>
           <input
             className="code-input"
+            autoFocus
             inputMode="numeric"
             autoComplete="one-time-code"
             pattern="\d{6}"
