@@ -6,14 +6,14 @@
 #   pip install --require-hashes -r control_api/requirements.txt
 # (pip-tools works too: pip-compile --generate-hashes ... but run it on Linux / Python 3.11
 #  so platform-only wheels such as uvloop are included.)
-fastapi>=0.115
+fastapi>=0.143.0
 uvicorn[standard]>=0.30
-pydantic>=2.7
-pymongo>=4.10          # async API (AsyncMongoClient); Motor is deprecated
+pydantic>=2.14.1
+pymongo>=4.18.3          # async API (AsyncMongoClient); Motor is deprecated
 pyjwt>=2.8
 argon2-cffi>=23.1
 pyotp>=2.9
-cryptography>=42       # Fernet (TOTP secret at rest) + Kalshi RSA-PSS signing
+cryptography>=50.0.2       # Fernet (TOTP secret at rest) + Kalshi RSA-PSS signing
 httpx>=0.27            # self-ping, cron-job.org API, ntfy
 requests>=2.31         # used by kalshi_bot/kalshi_client.py
 qrcode>=7.4            # bootstrap CLI: ASCII QR for 2FA enrollment
