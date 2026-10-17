@@ -87,6 +87,16 @@ def iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
+def _where(e: BaseException) -> str:
+    """Exception type plus the innermost file:line, never the message (messages can echo secrets)."""
+    tb = e.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    if tb is None:
+        return type(e).__name__
+    return f"{type(e).__name__} at {os.path.basename(tb.tb_frame.f_code.co_filename)}:{tb.tb_lineno}"
+
+
 def _env(name: str) -> str | None:
     v = (os.environ.get(name) or "").strip()
     return v or None
@@ -1225,7 +1235,7 @@ class Runner:
             return {"synced": True, "fills": nf, "settlements": ns}
         except Exception as e:  # noqa: BLE001
             self.fills_sync_error = type(e).__name__
-            log.error("fills sync failed: %s", type(e).__name__)
+            log.error("fills sync failed: %s", _where(e))
             return {"synced": False, "reason": type(e).__name__}
 
     # ---- fill sources (UX item Y1; services/strategies.py). Read-only: labels only, never orders.
