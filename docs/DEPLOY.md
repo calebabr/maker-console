@@ -108,6 +108,20 @@ Never set `DEV_MODE=true` on Render.
 
 ---
 
+## Releasing a change (every time you push)
+
+Pushing to GitHub does **not** change your running app (Render's auto-deploy is off). Two things are yours to do:
+
+1. **Wait for CI.** GitHub > repo > Actions (or the commit's checks): all 7 green. A red X means a failure; "cancelled" on an older commit just means a newer push replaced it. You get an email only on failures.
+2. **Run workflow.** Actions > **release** > Run workflow > branch `main` > paste the commit SHA (the full 40 characters; Commits > copy icon) > Run. The gate checks that CI is green and that the commit is the tip of `main`.
+3. **Approve in the app.** Open Keel > Server page > the pending release > approve with a fresh Duo code. Nothing deploys before this.
+4. **Wait about 3 to 5 minutes.** The workflow deploys Render, then Vercel, then reports. ntfy sends "release done".
+5. **Check.** Server page: the new `api_version`, you are the single **Leader**, the lease **generation** went up by one. A notification "Trading resumed after restart" is normal: the bot was restored to demo/running as it was.
+
+**If something looks wrong:** press **Stop** (always works, no 2FA). If the app is unreachable: Render > service > Suspend. A refusal code in the gate is a safe stop (see `docs/RELEASE_PROCESS.md`): fix the cause and start a new run; a failed run cannot be re-run, start a fresh one.
+
+**Known gap (2026-10-17):** Vercel also deploys the frontend automatically on every push to `main` (its GitHub integration), so app-screen changes can reach your phone without the approval step. Backend and trading changes are not affected. Tracked as a task.
+
 ## What each email means
 
 Real alerts never ask for your password, 2FA code or key. If an email asks for one, do not click; go to the site yourself by typing the address.
