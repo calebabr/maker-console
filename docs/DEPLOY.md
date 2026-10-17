@@ -56,6 +56,8 @@ Never set `DEV_MODE=true` on Render.
 4. Type the current 6-digit code into the CLI to confirm.
 *Check:* the CLI says `Saved user '<YOUR_USERNAME>'`. Then close the terminal so the variables are gone.
 
+*One-time check after your first login (step 11):* open the app's Audit/Security log and confirm the IP shown for your login is your phone's or home network's public address, not a Render-internal one (10.x, 172.16-31.x). If it is an internal address, tell the assistant before going further: the login rate limiter would then count every visitor as one client.
+
 **7. Vercel.** New Project > import the repo > Root Directory `control_app` > env `VITE_API_BASE_URL` = Render URL (no trailing slash; never set `VITE_MOCK`) > Deploy.
 1. CSP step: edit `control_app/vercel.json`, replace `https://your-api-origin.invalid` in `connect-src` with your Render origin, run `node deploy/check_csp.mjs https://<service>.onrender.com`, commit and push.
 2. Render > Environment > `ALLOWED_ORIGIN` = the exact Vercel URL (https, no trailing slash). Save (redeploys).
