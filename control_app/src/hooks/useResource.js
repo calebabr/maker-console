@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { registerRefresh } from '../services/refreshBus.js';
 import { readCache } from '../services/cache.js';
 
 /**
@@ -46,6 +47,9 @@ export function useResource(fetcher, cacheKey, { auto = true } = {}) {
   useEffect(() => {
     if (auto) reload();
   }, [auto, reload]);
+
+  // Pull-to-refresh runs the same reload as the Refresh button.
+  useEffect(() => (auto ? registerRefresh(reload) : undefined), [auto, reload]);
 
   const setData = useCallback((data) => setState((s) => ({ ...s, data, staleAt: null })), []);
 

@@ -642,3 +642,21 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 @media (prefers-reduced-motion: reduce) {
   .login-line { animation: none; background-position: 50% 0; background-size: 100% 100%; }
 }
+
+/* Pull-to-refresh indicator (installed iOS PWA). Overscroll is contained so rubber-banding does not fight it. */
+html, body { overscroll-behavior-y: contain; }
+.ptr {
+  position: fixed; top: calc(env(safe-area-inset-top, 0px) - 36px); left: 50%; margin-left: -70px; width: 140px; z-index: 40;
+  display: flex; align-items: center; justify-content: center; gap: 8px; height: 32px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--muted);
+  font-size: 0.75rem; pointer-events: none; transition: transform 0.18s ease-out;
+}
+.ptr[data-phase='pulling'] { transition: none; }
+.ptr-spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); }
+.ptr-spinner.spin { animation: ptr-spin 0.8s linear infinite; }
+.ptr[data-phase='done'] { color: var(--accent); }
+@keyframes ptr-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .ptr { transition: none; }
+  .ptr-spinner.spin { animation: none; border-right-color: var(--accent); }
+}

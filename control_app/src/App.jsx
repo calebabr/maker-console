@@ -9,6 +9,7 @@ import WakingBanner from './components/WakingBanner.jsx';
 import WhatsNew from './components/WhatsNew.jsx';
 import UpdateBanner from './components/UpdateBanner.jsx';
 import PageTitle from './components/PageTitle.jsx';
+import PullToRefresh from './components/PullToRefresh.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 import Login from './pages/Login.jsx';
 import Overview from './pages/Overview.jsx';
@@ -63,6 +64,7 @@ function SignedIn() {
           </ErrorBoundary>
         </main>
         <NavBar />
+        <PullToRefresh />
       </div>
     </StatusProvider>
   );

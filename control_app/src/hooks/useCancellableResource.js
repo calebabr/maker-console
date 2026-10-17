@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { registerRefresh } from '../services/refreshBus.js';
 import { readCache } from '../services/cache.js';
 
 /**
@@ -47,6 +48,8 @@ export function useCancellableResource(fetcher, key) {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  useEffect(() => registerRefresh(reload), [reload]);
 
   // Abort whatever is in flight when the page goes away.
   useEffect(

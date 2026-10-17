@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../services/api.js';
+import { registerRefresh } from '../services/refreshBus.js';
 import { readCache } from '../services/cache.js';
 import { usePageVisible } from '../hooks/usePageVisible.js';
 
@@ -36,6 +37,8 @@ export function StatusProvider({ enabled = true, children }) {
     const id = setInterval(refresh, POLL_MS);
     return () => clearInterval(id);
   }, [enabled, visible, refresh]);
+
+  useEffect(() => (enabled ? registerRefresh(refresh) : undefined), [enabled, refresh]);
 
   const value = useMemo(() => ({ ...state, refresh }), [state, refresh]);
   return <StatusContext.Provider value={value}>{children}</StatusContext.Provider>;
