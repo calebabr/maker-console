@@ -1,5 +1,5 @@
 # Dependency update PRs (contract C4). Monthly and grouped so the owner reviews one PR per ecosystem, not a stream.
-# Nothing auto-merges. Locked Python files carry hashes: after a bump, CI re-checks the hash-pinned install and that
+# Nothing auto-merges. No labels are set (the repo has none; the security-review checklist lives in the PR template). Locked Python files carry hashes: after a bump, CI re-checks the hash-pinned install and that
 # requirements.txt and requirements-dev.txt still agree. The monthly review routine is in docs/ (docs agent).
 # Dependabot commit subjects can exceed 72 characters; the commit-message check skips dependabot[bot] commits,
 # and the owner edits the PR title to a Conventional Commit when squash-merging.
@@ -12,7 +12,6 @@ updates:
     groups:
       python-runtime: {patterns: ["*"]}
     commit-message: {prefix: "chore(deploy)"}
-    labels: [dependencies, security-review]
   - package-ecosystem: pip
     directory: /.github/semgrep
     schedule: {interval: monthly}
@@ -20,15 +19,19 @@ updates:
     groups:
       semgrep-ci: {patterns: ["*"]}
     commit-message: {prefix: "chore(deploy)"}
-    labels: [dependencies]
   - package-ecosystem: npm
     directory: /control_app
     schedule: {interval: monthly}
     open-pull-requests-limit: 3
     groups:
       app-dependencies: {patterns: ["*"]}
+    # Major framework upgrades (React 19 etc.) are planned work after the demo, not a monthly bot PR.
+    ignore:
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
     commit-message: {prefix: "chore(app)"}
-    labels: [dependencies, security-review]
   - package-ecosystem: github-actions
     directory: /
     schedule: {interval: monthly}
@@ -36,4 +39,3 @@ updates:
     groups:
       actions: {patterns: ["*"]}
     commit-message: {prefix: "ci(deploy)"}
-    labels: [dependencies, security-review]
