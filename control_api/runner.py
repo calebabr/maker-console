@@ -250,6 +250,7 @@ class Runner:
         # Threads start only on first use; shut down in shutdown().
         self._ct_executor = ThreadPoolExecutor(max_workers=ctsvc.EXECUTOR_WORKERS, thread_name_prefix="closetime")
         self.last_run_utc: datetime | None = None
+        self._silence_ref: datetime | None = None   # when the watchdog first saw the bot running (grace for the first pass)
         self.last_error: str | None = None
         self.last_monitor_utc: datetime | None = None
         self.keepalive_state: dict = {"last_ping_utc": None, "ok": None, "error": None}
@@ -1002,10 +1003,15 @@ class Runner:
     async def check_silence(self) -> None:
         if self.desired != "running":
             self._silent_alerted = False
+            self._silence_ref = None
             return
         limit = int(self.cloud.get("silent_alert_minutes") or 30)
-        last = self.last_run_utc
-        if last is None or utcnow() - last > timedelta(minutes=limit):
+        # A fresh Start (or restart) must get the full window before the first pass, so measure from the later of
+        # the last pass and the moment the watchdog first saw the bot running.
+        if self._silence_ref is None:
+            self._silence_ref = utcnow()
+        last = max(filter(None, (self.last_run_utc, self._silence_ref)))
+        if utcnow() - last > timedelta(minutes=limit):
             if not self._silent_alerted:
                 self._silent_alerted = True
                 await self.alerter.send("No heartbeat", f"No trading pass for over {limit} min", priority="high")

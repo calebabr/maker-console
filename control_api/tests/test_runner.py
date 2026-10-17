@@ -192,9 +192,24 @@ async def test_silence_alert_once(env):
     env.runner.alerter.send = send
     env.runner.desired = "running"
     env.runner.last_run_utc = rn.utcnow() - timedelta(hours=5)
+    env.runner._silence_ref = rn.utcnow() - timedelta(hours=5)
     await env.runner.check_silence()
     await env.runner.check_silence()
     assert len(sent) == 1
+
+
+async def test_no_silence_alert_right_after_start(env):
+    sent = []
+
+    async def send(*a, **k):
+        sent.append(a)
+    env.runner.alerter.send = send
+    env.runner.desired = "running"
+    env.runner.last_run_utc = None                     # never ran, or ran long ago: a fresh Start gets the full window
+    await env.runner.check_silence()
+    env.runner.last_run_utc = rn.utcnow() - timedelta(hours=5)
+    await env.runner.check_silence()
+    assert sent == []
 
 
 async def test_stop_while_running_makes_next_tick_skip(env):
