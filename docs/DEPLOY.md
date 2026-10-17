@@ -70,7 +70,7 @@ Never set `DEV_MODE=true` on Render.
 
 **9. `PRIVATE_REPO_TOKEN` (real strategy at build time).** Without it the build is **demo-only** and **LIVE is refused**. That is correct for now; you can do this step now or just before the live switch. Details: `deploy/private_overlay.md`.
 1. github.com > profile picture > **Settings** > **Developer settings** (bottom of the left sidebar) > **Personal access tokens** > **Fine-grained tokens** > **Generate new token**.
-2. Name `render-build-overlay`, expiration **90 days** (set a calendar reminder). Resource owner: your account.
+2. Name `render-build-overlay`, expiration **90 days**. Resource owner: your account. **Renewal: the token created 2026-10-17 expires 2027-01-15.** Set a calendar reminder for 2027-01-08. To renew: generate a new token with the same settings, paste it into Render `PRIVATE_REPO_TOKEN`, redeploy, then delete the old token. If it lapses, the next build falls back to the stand-in and live mode is refused (safe).
 3. Repository access: **Only select repositories** > the private strategy repo only.
 4. Repository permissions > **Contents: Read-only**; everything else No access.
 5. Generate, copy the `github_pat_...` value once, save it in the password manager.
