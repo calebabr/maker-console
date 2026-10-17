@@ -1,5 +1,5 @@
 # Dependency update PRs (contract C4). Monthly and grouped so the owner reviews one PR per ecosystem, not a stream.
-# Nothing auto-merges. No labels are set (the repo has none; the security-review checklist lives in the PR template). Locked Python files carry hashes: after a bump, CI re-checks the hash-pinned install and that
+# Nothing auto-merges. rebase-strategy is disabled so open PRs are not re-run (and re-emailed) every time main moves; comment `@dependabot rebase` on a PR to refresh it. No labels are set (the repo has none; the security-review checklist lives in the PR template). Locked Python files carry hashes: after a bump, CI re-checks the hash-pinned install and that
 # requirements.txt and requirements-dev.txt still agree. The monthly review routine is in docs/ (docs agent).
 # Dependabot commit subjects can exceed 72 characters; the commit-message check skips dependabot[bot] commits,
 # and the owner edits the PR title to a Conventional Commit when squash-merging.
@@ -8,6 +8,7 @@ updates:
   - package-ecosystem: pip
     directory: /control_api
     schedule: {interval: monthly}
+    rebase-strategy: disabled
     open-pull-requests-limit: 3
     groups:
       python-runtime: {patterns: ["*"]}
@@ -15,6 +16,7 @@ updates:
   - package-ecosystem: pip
     directory: /.github/semgrep
     schedule: {interval: monthly}
+    rebase-strategy: disabled
     open-pull-requests-limit: 1
     groups:
       semgrep-ci: {patterns: ["*"]}
@@ -22,6 +24,7 @@ updates:
   - package-ecosystem: npm
     directory: /control_app
     schedule: {interval: monthly}
+    rebase-strategy: disabled
     open-pull-requests-limit: 3
     groups:
       app-dependencies: {patterns: ["*"]}
@@ -35,6 +38,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: {interval: monthly}
+    rebase-strategy: disabled
     open-pull-requests-limit: 2
     groups:
       actions: {patterns: ["*"]}
