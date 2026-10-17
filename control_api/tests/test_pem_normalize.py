@@ -40,3 +40,20 @@ def test_pem_with_no_separators_at_all_loads():
 def test_non_pem_and_empty_pass_through():
     assert rn.normalize_pem(None) is None and rn.normalize_pem("") == ""
     assert rn.normalize_pem("not a key") == "not a key"
+
+
+def _body(pem: str) -> list:
+    return pem.strip().splitlines()[1:-1]
+
+
+def test_bare_base64_body_without_begin_end_loads():
+    pem = _pem()
+    assert _loads(rn.normalize_pem("".join(_body(pem)))).key_size == 2048
+    assert _loads(rn.normalize_pem(" ".join(_body(pem)))).key_size == 2048
+
+
+def test_bare_rsa_pkcs1_body_loads():
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                            serialization.NoEncryption()).decode()
+    assert _loads(rn.normalize_pem("".join(_body(pem)))).key_size == 2048

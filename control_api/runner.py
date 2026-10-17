@@ -94,16 +94,32 @@ def _env(name: str) -> str | None:
 
 def normalize_pem(text: str | None) -> str | None:
     """Rebuild a PEM private key whose line breaks were lost or turned into spaces or a literal backslash-n when it was
-    pasted into a one-line dashboard field. Anything that is not a BEGIN/END block is returned unchanged."""
+    pasted into a one-line dashboard field, and add the BEGIN/END lines when only the base64 body was pasted. Anything
+    else is returned unchanged."""
     if not text:
         return text
     t = text.replace("\n", "\n").strip()
     m = re.fullmatch(r"-----BEGIN ([A-Z ]+)-----(.*?)-----END \1-----", t, re.S)
-    if not m:
-        return t
-    body = re.sub(r"\s+", "", m.group(2))
+    if m:
+        label, raw = m.group(1), m.group(2)
+        body = re.sub(r"\s+", "", raw)
+        return _wrap_pem(label, body)
+    body = re.sub(r"\s+", "", t)
+    if re.fullmatch(r"[A-Za-z0-9+/=]{200,}", body):          # a bare base64 body: find the label that loads
+        from cryptography.hazmat.primitives import serialization
+        for label in ("PRIVATE KEY", "RSA PRIVATE KEY"):
+            pem = _wrap_pem(label, body)
+            try:
+                serialization.load_pem_private_key(pem.encode(), password=None)
+                return pem
+            except ValueError:
+                continue
+    return t
+
+
+def _wrap_pem(label: str, body: str) -> str:
     lines = [body[i:i + 64] for i in range(0, len(body), 64)]
-    return "\n".join([f"-----BEGIN {m.group(1)}-----", *lines, f"-----END {m.group(1)}-----"]) + "\n"
+    return "\n".join([f"-----BEGIN {label}-----", *lines, f"-----END {label}-----"]) + "\n"
 
 
 def mode_keys(mode: str) -> tuple[str | None, str | None]:
