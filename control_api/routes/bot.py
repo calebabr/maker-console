@@ -142,5 +142,8 @@ async def monitor_run(request: Request, user: dict = Depends(current_user)) -> d
     or creating the kill switch if all would be paused, so it can only reduce risk, never add any. The result
     is validated (S-12), versioned by="monitor" in the store, alerted via ntfy and audited here."""
     res = await _runner(request).run_monitor(by=user.get("username", "user"))
+    if res.get("error") == "monitor_running":     # CA-2: single-flight; a second tap does not start another run
+        await audit(request, "monitor.run", ok=False, user=user, details="monitor_running")
+        raise HTTPException(409, "monitor_running")
     await audit(request, "monitor.run", ok="error" not in res, user=user)
     return {"summary": res.get("summary")}

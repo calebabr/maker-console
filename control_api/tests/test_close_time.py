@@ -624,7 +624,8 @@ async def test_s31_hanging_lookups_do_not_block_stop_cancel(env, kalshi, monkeyp
         t0 = time.monotonic()
         res = await env.runner.stop(by="owner")
         assert time.monotonic() - t0 < 1.0 and res["errors"] == [] and res["cancelled"] == 2
-        assert sorted(kalshi.cancelled) == ["o1", "o3"] and spy.calls >= 1     # Stop's cancel ran on the default pool
+        # CA-2: Stop's cancel now runs on its own pool, so it never even touches the default one
+        assert sorted(kalshi.cancelled) == ["o1", "o3"] and spy.calls == 0
     finally:
         release.set()
         spy.shutdown(wait=False, cancel_futures=True)

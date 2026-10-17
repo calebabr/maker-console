@@ -9,7 +9,8 @@ import re
 _SECRET_ENVS = ("KALSHI_DEMO_PRIVATE_KEY", "KALSHI_PROD_PRIVATE_KEY", "KALSHI_PRIVATE_KEY", "KALSHI_DEMO_API_KEY_ID",
                 "KALSHI_PROD_API_KEY_ID", "KALSHI_API_KEY_ID", "JWT_SECRET", "TOTP_ENC_KEY", "TICK_TOKEN",
                 "CRONJOB_API_KEY", "MONGODB_URI", "NTFY_TOPIC", "VAPID_PRIVATE_KEY",
-                "PRIVATE_REPO_TOKEN")    # S-44: read-only GitHub token for the private strategy overlay
+                "PRIVATE_REPO_TOKEN",    # S-44: read-only GitHub token for the private strategy overlay
+                "HANDOVER_HMAC_KEY", "DEPLOY_STATUS_KEY", "RELEASE_TOKEN")    # B-10: release-process secrets
 _SUBS = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED]"),
     (re.compile(r"mongodb(\+srv)?://\S+"), "[REDACTED]"),

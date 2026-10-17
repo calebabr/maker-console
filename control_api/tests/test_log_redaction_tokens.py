@@ -40,3 +40,13 @@ def test_ring_buffer_never_stores_the_token(monkeypatch):
 def test_ordinary_text_is_untouched():
     s = "ghost_town ghp_short github_pattern KXDEMOA pass ok"
     assert lb.redact(s) == s
+
+
+@pytest.mark.parametrize("name", ["HANDOVER_HMAC_KEY", "DEPLOY_STATUS_KEY", "RELEASE_TOKEN"])
+def test_release_process_secrets_are_redacted(monkeypatch, name):
+    """B-10: the release-process secrets are on the env-name list (defence in depth)."""
+    value = "rel-" + name.lower().replace("_", "") + "-value-9z"
+    monkeypatch.setenv(name, value)
+    assert name in lb._SECRET_ENVS
+    out = lb.redact(f"handover step saw {value} in a message")
+    assert value not in out and "[REDACTED]" in out

@@ -63,6 +63,11 @@ FENCE_MARGIN_S = 5.0                # a pass starts only if the lease outlives P
 SHUTDOWN_TAIL_S = 10.0              # after the order step: time for the pass's journal/heartbeat writes
 SHUTDOWN_STORE_TIMEOUT_S = 5.0
 CANCEL_TIMEOUT_S = 25.0             # same bound as Stop's own cancel
+# CA-2: Stop's cancel runs on its own pool, never the default executor, so monitor runs, abandoned arb scans or
+# anything else using asyncio.to_thread can never queue it behind them. 4 workers: a few Stop taps against a hung
+# Kalshi can each hold one for up to CANCEL_TIMEOUT_S and a new tap still gets a thread.
+STOP_WORKERS = 4
+ARB_SCAN_TIMEOUT_S = 120.0          # an arb scan is abandoned after this (its thread stays on the 1-worker arb pool)
 # S-25: queue-position, fill-quality and fills-sync Kalshi reads run on their own small pool with a short client,
 # never on the default executor that Stop's cancel uses.
 TELEMETRY_WORKERS = 2
@@ -282,6 +287,12 @@ class Runner:
         self._daily_sent: str | None = None          # local date of the last daily summary
         # S-25: telemetry Kalshi reads on their own pool (threads start on first use; shut down in shutdown())
         self._tel_executor = ThreadPoolExecutor(max_workers=TELEMETRY_WORKERS, thread_name_prefix="telemetry")
+        # CA-2: dedicated pools (threads start on first use). Stop's cancel only on _stop_executor; the monitor and
+        # the arb scan each get one worker, so neither can pile threads onto the default executor.
+        self._stop_executor = ThreadPoolExecutor(max_workers=STOP_WORKERS, thread_name_prefix="stop")
+        self._monitor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="monitor")
+        self._arb_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arb")
+        self._monitor_running = False     # CA-2: single-flight; a second run while one runs gets monitor_running
         # ---- release process: single-leader lease + fencing (R1), graceful handover (R2/R3), schema (R4)
         g = lambda n, d: getattr(settings, n, d)  # noqa: E731   (tests may pass a minimal settings object)
         self.instance_id = new_instance_id()
@@ -559,7 +570,7 @@ class Runner:
     async def _best_effort_cancel(self, mode: str, why: str) -> int:
         """Cancel resting mm- orders (the same call Stop makes; no fence: it only removes risk). Never raises."""
         try:
-            n = await asyncio.wait_for(asyncio.to_thread(self._cancel_resting, mode), timeout=CANCEL_TIMEOUT_S)
+            n = await asyncio.wait_for(self._cancel_in_stop_pool(mode), timeout=CANCEL_TIMEOUT_S)
             if n:
                 log.warning("%s: cancelled %s resting mm- orders (%s)", why, n, mode)
             return n
@@ -663,9 +674,11 @@ class Runner:
                 with contextlib.suppress(BaseException):
                     await asyncio.wait_for(self.lease.release(handover=None), SHUTDOWN_STORE_TIMEOUT_S)
         self._leader_ready = False
-        for ex in (self._ct_executor, self._tel_executor):
+        for ex in (self._ct_executor, self._tel_executor, self._monitor_executor, self._arb_executor):
             with contextlib.suppress(Exception):
                 ex.shutdown(wait=False, cancel_futures=True)
+        with contextlib.suppress(Exception):       # last, and without cancelling a queued Stop cancel
+            self._stop_executor.shutdown(wait=False)
         for t in self._tasks + list(self._bg) + ([self._state_retry] if self._state_retry else []):
             t.cancel()
         for t in self._tasks:
@@ -1074,7 +1087,7 @@ class Runner:
                 # S-4: a Stop landed during the pass; an order POST in flight at Stop time may have rested
                 # after Stop's cancel. Cancel resting mm- orders once more.
                 try:
-                    n = await asyncio.wait_for(asyncio.to_thread(self._cancel_resting, mode), timeout=25)
+                    n = await asyncio.wait_for(self._cancel_in_stop_pool(mode), timeout=CANCEL_TIMEOUT_S)
                     log.warning("post-pass cancel after Stop: cancelled=%s", n)
                 except Exception as e:  # noqa: BLE001
                     log.error("post-pass cancel failed: %s", type(e).__name__)
@@ -1949,8 +1962,11 @@ class Runner:
             data_env = "live" if live else self.mode
             self.arb_running_scan = True
             try:
-                results = await asyncio.wait_for(
-                    asyncio.to_thread(self._arb_scan_sync, self.arb_settings(), live, gen, data_env), timeout=120)
+                # CA-2: own 1-worker pool. A scan abandoned at the timeout keeps that worker until it ends, so the
+                # next scan queues behind it (and times out) instead of taking another thread from the default pool.
+                fut = asyncio.get_running_loop().run_in_executor(
+                    self._arb_executor, self._arb_scan_sync, self.arb_settings(), live, gen, data_env)
+                results = await asyncio.wait_for(fut, timeout=ARB_SCAN_TIMEOUT_S)
                 self.arb_last_error = None
             except Exception as e:  # noqa: BLE001
                 self.arb_last_error = type(e).__name__
@@ -2064,7 +2080,7 @@ class Runner:
             except Exception as e:  # noqa: BLE001
                 errors.append(f"arb_kill_switch: {type(e).__name__}")
             try:
-                cancelled = await asyncio.wait_for(asyncio.to_thread(self._cancel_resting, self.mode), timeout=25)
+                cancelled = await asyncio.wait_for(self._cancel_in_stop_pool(self.mode), timeout=CANCEL_TIMEOUT_S)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"cancel: {type(e).__name__}")
             self._stop_pending = True
@@ -2096,6 +2112,24 @@ class Runner:
             await self.store.set_state(by=by, desired="stopped", arb_desired="stopped", arb_mode="demo")
         except TypeError:
             await self.store.set_state(by=by, desired="stopped")
+
+    def _cancel_in_stop_pool(self, mode: str) -> asyncio.Future:
+        """CA-2: _cancel_resting on Stop's dedicated pool (never the default executor). If that pool was already shut
+        down (a Stop racing the very end of shutdown), fall back to a one-off thread so the cancel still runs."""
+        loop = asyncio.get_running_loop()
+        try:
+            return loop.run_in_executor(self._stop_executor, self._cancel_resting, mode)
+        except RuntimeError:
+            fut = loop.create_future()
+
+            def _run() -> None:
+                try:
+                    n = self._cancel_resting(mode)
+                    loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(n))
+                except BaseException as e:  # noqa: BLE001
+                    loop.call_soon_threadsafe(lambda: fut.done() or fut.set_exception(e))
+            threading.Thread(target=_run, name="stop-fallback", daemon=True).start()
+            return fut
 
     def _cancel_resting(self, mode: str) -> int:
         client = self.kalshi_factory(mode)
@@ -2191,6 +2225,17 @@ class Runner:
         self.config = botfiles.public_config(cfg)
 
     async def run_monitor(self, by: str) -> dict:
+        """CA-2: single-flight. A run while another is in progress returns {"error": "monitor_running"} at once
+        (the route answers 409) instead of parking another thread behind it."""
+        if self._monitor_running:
+            return {"summary": None, "error": "monitor_running"}
+        self._monitor_running = True      # set before the first await: no second run can slip in
+        try:
+            return await self._run_monitor(by)
+        finally:
+            self._monitor_running = False
+
+    async def _run_monitor(self, by: str) -> dict:
         mon = botfiles.monitor()
         before = botfiles.read_config_file(self.config_path)
         summary: dict = {}
@@ -2200,7 +2245,7 @@ class Runner:
                 with kalshi_env(self.mode), contextlib.redirect_stdout(buf):
                     mon.main(["--apply"])
                 return buf.getvalue()
-            self.logs.add(await asyncio.to_thread(_go))
+            self.logs.add(await asyncio.get_running_loop().run_in_executor(self._monitor_executor, _go))
             logs_dir = Path(mon.LOGS)
             with contextlib.suppress(OSError, ValueError):
                 summary = json.loads((logs_dir / "monitor_summary.json").read_text(encoding="utf-8"))
