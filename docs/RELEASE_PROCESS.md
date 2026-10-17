@@ -141,6 +141,8 @@ Today (S-21), any restart drops LIVE to demo, and you re-arm from the phone. Wit
 | **B** Who triggers deploys | **B2: manual release workflow** | Render auto-deploy **Off**. A GitHub Actions "release" workflow with an owner approval step (approvable from the phone) runs: CI green on the exact commit → safety gate → backend deploy hook → verify → frontend deploy → verify → ntfy "Release vX healthy" → tag. Agents can open PRs but never run or approve it |
 | **C** Shutdown delay | **120 s** | `render.yaml` shutdown delay 120 s; pass budget 25 s; handover must complete well inside it (tested) |
 
+> **Free-plan limit found 2026-10-17:** Render rejects `maxShutdownDelaySeconds` on the free plan, so the 120 s window above needs a paid plan. On free, Render's default shutdown window applies; a shutdown that is cut short is covered by the successor's takeover cancel. This is fine for the demo (demo mode only). Before LIVE, either move to a paid plan and restore `maxShutdownDelaySeconds: 120`, or shorten the runner shutdown to fit the default window.
+
 ### B2 mechanics (checked 2026-10-13)
 
 GitHub's native "required reviewers" on deployment environments is **not available for private repos on GitHub Free/Pro/Team** ([GitHub docs](https://docs.github.com/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment)). So B2 for the private repo works like this:

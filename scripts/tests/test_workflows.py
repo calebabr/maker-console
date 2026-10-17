@@ -126,7 +126,7 @@ def render():
 def test_render_release_settings():
     svc = render()
     assert svc["autoDeployTrigger"] == "off"            # only the release workflow deploys
-    assert svc["maxShutdownDelaySeconds"] == 120
+    assert "maxShutdownDelaySeconds" not in svc          # Render rejects it on the free plan
     assert svc["plan"] == "free" and "--workers 1" in svc["startCommand"]
     env = {e["key"]: e for e in svc["envVars"]}
     for name in ("APP_VERSION", "HANDOVER_HMAC_KEY", "DEPLOY_STATUS_KEY", "RELEASE_TOKEN"):

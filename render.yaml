@@ -23,9 +23,9 @@ services:
     # Auto-deploy is OFF (release process, decision B2): production changes only through the owner-approved `release`
     # workflow (.github/workflows/release.yml), which calls this service's deploy hook with the approved commit.
     autoDeployTrigger: "off"
-    # The old instance gets this long after SIGTERM to finish its pass, write the signed handover and release the lease
-    # (pass budget 25 s, shutdown work well inside 120 s) before Render kills it. Max allowed is 300.
-    maxShutdownDelaySeconds: 120
+    # Render's free plan rejects maxShutdownDelaySeconds (it is a paid-plan setting), so the old instance gets Render's
+    # default window after SIGTERM. A slower shutdown is covered by the successor's takeover cancel; planned LIVE
+    # handover needs a paid plan with maxShutdownDelaySeconds: 120 (see docs/RELEASE_PROCESS.md).
     # scripts/render_build.sh: hash-pinned pip install (pip refuses any file whose sha256 is not in
     # requirements.txt), then the optional private-strategy overlay (only when PRIVATE_REPO_TOKEN is set; without
     # it the build succeeds as a demo-only build and live mode is refused), then prints IS_STANDIN=True/False.
