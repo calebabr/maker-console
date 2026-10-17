@@ -107,13 +107,21 @@ export default function PullToRefresh() {
   if (phase === 'idle') return null;
   const label =
     phase === 'pulling' ? (pull >= THRESHOLD ? 'Release to refresh' : 'Pull to refresh') : phase === 'refreshing' ? 'Refreshing' : 'Updated';
+  // Rests just below the sticky app bar (CSS); the pull distance only slides it down from behind the bar.
+  const slide = phase === 'pulling' ? Math.round(pull) - THRESHOLD : 0;
   return (
-    <div className="ptr" data-phase={phase} style={{ transform: `translateY(${Math.round(pull)}px)` }} role="status" aria-live="polite">
-      <span
-        className={`ptr-spinner${phase === 'refreshing' ? ' spin' : ''}`}
-        aria-hidden="true"
-        style={phase === 'pulling' ? { transform: `rotate(${pull * 4}deg)` } : undefined}
-      />
+    <div className="ptr" data-phase={phase} data-armed={phase === 'pulling' && pull >= THRESHOLD ? 'true' : undefined} style={{ transform: `translateY(${slide}px)` }} role="status" aria-live="polite">
+      {phase === 'done' ? (
+        <svg className="ptr-check" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+          <path d="M2 6.5l2.6 2.6L10 3.2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : phase === 'refreshing' ? (
+        <span className="ptr-spinner spin" aria-hidden="true" />
+      ) : (
+        <svg className="ptr-arrow" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" style={{ transform: pull >= THRESHOLD ? 'rotate(180deg)' : undefined }}>
+          <path d="M6 2v8M2.8 6.8L6 10l3.2-3.2" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
       <span className="ptr-label">{label}</span>
     </div>
   );

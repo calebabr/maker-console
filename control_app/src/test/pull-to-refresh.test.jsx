@@ -1,5 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import PullToRefresh from '../components/PullToRefresh.jsx';
 import { registerRefresh } from '../services/refreshBus.js';
 
@@ -42,6 +44,8 @@ describe('PullToRefresh', () => {
     await pullTo(screen.getByTestId('body'), 200);
     expect(fn).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('status')).toHaveTextContent('Updated');
+    expect(document.querySelector('.ptr-spinner')).toBeNull();
+    expect(document.querySelector('.ptr-check')).not.toBeNull();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1200);
     });
@@ -89,10 +93,32 @@ describe('PullToRefresh', () => {
     render(<Shell />);
     await pullTo(screen.getByTestId('body'), 200);
     expect(screen.getByRole('status')).toHaveTextContent('Refreshing');
+    expect(document.querySelector('.ptr-spinner.spin')).not.toBeNull();
+    expect(document.querySelector('.ptr-check')).toBeNull();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(11500);
     });
     expect(screen.queryByRole('status')).toBeNull();
+    off();
+  });
+
+  it('renders the indicator outside the app bar, below it in CSS', async () => {
+    vi.useFakeTimers();
+    const off = registerRefresh(() => new Promise(() => {}));
+    render(
+      <div>
+        <header className="appbar">Demo Running</header>
+        <Shell />
+      </div>,
+    );
+    await pullTo(screen.getByTestId('body'), 200);
+    const ptr = document.querySelector('.ptr');
+    expect(ptr).not.toBeNull();
+    expect(ptr.closest('header.appbar')).toBeNull();
+    expect(document.querySelector('header.appbar').contains(ptr)).toBe(false);
+    expect(ptr.style.top).toBe('');
+    const css = readFileSync(resolve(__dirname, '../index.css'), 'utf8');
+    expect(css).toMatch(/\.ptr \{[^}]*top: calc\(var\(--appbar-h[^}]*pointer-events: none/s);
     off();
   });
 });
