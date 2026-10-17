@@ -40,7 +40,7 @@ async def login(body: LoginIn, request: Request) -> dict:
     store = request.app.state.store
     user = await store_call(store.get_user(body.username))
     if not user:
-        sec.verify_password(None, body.password)  # equalize timing
+        await sec.verify_password_async(None, body.password)  # equalize timing (B-3: off the event loop)
         await audit(request, "auth.login", ok=False, details={"reason": "bad_credentials"})
         raise HTTPException(status_code=401, detail=_BAD_CREDENTIALS)
 
@@ -49,7 +49,7 @@ async def login(body: LoginIn, request: Request) -> dict:
         await audit(request, "auth.login", ok=False, user=user, details={"reason": "locked"})
         raise locked_exception(left)
 
-    if not sec.verify_password(user.get("password_hash"), body.password):
+    if not await sec.verify_password_async(user.get("password_hash"), body.password):
         # Wrong passwords are throttled per IP (enforce above) but do NOT count toward the account
         # lockout: otherwise anyone who knows the username could keep the owner locked out of the
         # app -- and out of Stop (SECURITY_REVIEW S-2). The lockout counts TOTP failures, which
@@ -68,7 +68,7 @@ async def login(body: LoginIn, request: Request) -> dict:
     if sec.password_needs_rehash(user["password_hash"]):
         try:
             await store.update_user_fields(user["username"], set={
-                "password_hash": sec.hash_password(body.password), "updated_utc": sec.utcnow()})
+                "password_hash": await sec.hash_password_async(body.password), "updated_utc": sec.utcnow()})
         except Exception as e:
             log.warning("password rehash not saved: %s", type(e).__name__)
 

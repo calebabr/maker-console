@@ -5,9 +5,12 @@ Nothing here touches the store or logs secrets. Keys come from ``settings`` (``j
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import secrets
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -67,6 +70,34 @@ def verify_password(password_hash: str | None, password: str) -> bool:
         return False
     except Exception:
         return False
+
+
+# B-3: argon2id costs ~70 ms of a full core and 64 MiB per call (~0.7 s at Render's 0.1 CPU). Running it in the
+# async login route froze the event loop, so a login flood delayed Stop. The async wrappers below run it on ONE
+# dedicated worker thread: the event loop stays free, and at most one 64 MiB hash is in memory at a time (extra
+# logins queue; the per-IP limiter bounds the queue). The pool is created on first use (no thread at import).
+HASH_WORKERS = 1
+_hash_pool: ThreadPoolExecutor | None = None
+_hash_pool_lock = threading.Lock()
+
+
+def _hash_executor() -> ThreadPoolExecutor:
+    global _hash_pool
+    with _hash_pool_lock:
+        if _hash_pool is None:
+            _hash_pool = ThreadPoolExecutor(max_workers=HASH_WORKERS, thread_name_prefix="argon2")
+        return _hash_pool
+
+
+async def verify_password_async(password_hash: str | None, password: str) -> bool:
+    """``verify_password`` off the event loop, on the bounded argon2 pool."""
+    return await asyncio.get_running_loop().run_in_executor(_hash_executor(), verify_password, password_hash,
+                                                            password)
+
+
+async def hash_password_async(password: str) -> str:
+    """``hash_password`` off the event loop, on the bounded argon2 pool."""
+    return await asyncio.get_running_loop().run_in_executor(_hash_executor(), hash_password, password)
 
 
 def password_needs_rehash(password_hash: str) -> bool:
