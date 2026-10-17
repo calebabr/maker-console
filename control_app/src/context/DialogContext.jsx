@@ -22,6 +22,7 @@ export function DialogProvider({ children }) {
   const [tfaState, setTfaState] = useState(null);
   const [toasts, setToasts] = useState([]);
   const nextId = useRef(1);
+  const anchorRef = useRef(null);
 
   const confirm = useCallback(
     (opts) =>
@@ -38,8 +39,10 @@ export function DialogProvider({ children }) {
   );
 
   const twoFactor = useCallback(
-    (opts) =>
-      new Promise((resolve, reject) => {
+    (opts) => {
+      // iOS opens the keyboard only if focus() runs synchronously inside the tap: focus a hidden anchor now.
+      if (anchorRef.current) anchorRef.current.focus({ preventScroll: true });
+      return new Promise((resolve, reject) => {
         setTfaState({
           ...opts,
           done: (result) => {
@@ -51,7 +54,8 @@ export function DialogProvider({ children }) {
             reject(err);
           },
         });
-      }),
+      });
+    },
     [],
   );
 
@@ -74,7 +78,17 @@ export function DialogProvider({ children }) {
     <DialogContext.Provider value={value}>
       {children}
       {confirmState && <ConfirmDialog {...confirmState} />}
-      {tfaState && <TwoFactorPrompt {...tfaState} />}
+      {tfaState && <TwoFactorPrompt {...tfaState} anchorRef={anchorRef} />}
+      <input
+        ref={anchorRef}
+        className="kb-anchor"
+        data-testid="kb-anchor"
+        aria-hidden="true"
+        tabIndex={-1}
+        inputMode="numeric"
+        autoComplete="off"
+        readOnly={false}
+      />
       <Toasts toasts={toasts} onDismiss={dismiss} />
     </DialogContext.Provider>
   );

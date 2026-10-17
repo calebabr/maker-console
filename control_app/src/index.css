@@ -395,6 +395,10 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 
 /* ---------- modal ---------- */
 
+.kb-anchor {
+  position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; padding: 0; border: 0;
+  font-size: 16px; pointer-events: none;
+}
 .modal-backdrop {
   position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); z-index: 50;
   height: var(--vv-h, 100vh); height: var(--vv-h, 100dvh);

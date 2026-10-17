@@ -1,4 +1,4 @@
-﻿import { useState } from 'react';
+﻿import { useLayoutEffect, useRef, useState } from 'react';
 import Modal from './Modal.jsx';
 
 /**
@@ -14,7 +14,18 @@ export default function TwoFactorPrompt({
   action,
   done,
   fail,
+  anchorRef,
 }) {
+  const inputRef = useRef(null);
+  // Hand focus from the shell's keyboard anchor to the real input (moving focus keeps the iOS keyboard up).
+  useLayoutEffect(() => {
+    if (inputRef.current) inputRef.current.focus({ preventScroll: true });
+    const a = anchorRef && anchorRef.current;
+    if (a) {
+      a.value = '';
+      if (document.activeElement === a) a.blur();
+    }
+  }, [anchorRef]);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -51,7 +62,7 @@ export default function TwoFactorPrompt({
           <span className="field-label">Code from your authenticator app</span>
           <input
             className="code-input"
-            autoFocus
+            ref={inputRef}
             inputMode="numeric"
             autoComplete="one-time-code"
             pattern="\d{6}"
