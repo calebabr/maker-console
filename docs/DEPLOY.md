@@ -1,6 +1,138 @@
 # Deploy runbook (owner)
 
-Everything runs on free tiers. Follow the steps in order. Never paste a key into chat, git or a screenshot; keep keys in a password manager.
+## Demo-Day Checklist (do these in order)
+
+Demo only: Kalshi **demo** keys, no real money. Keep every secret in a password manager; never paste one into chat, git or a screenshot. **Stop** (the red button in the app) always works; last resort is Render dashboard > `kalshi-control` > Suspend service (or `stop_maker.ps1` on the desktop).
+
+**1. Accounts and 2FA.** Create accounts at GitHub, MongoDB Atlas, Render, Vercel, cron-job.org and ntfy.sh (the app only). Turn on 2FA for each that offers it (GitHub, Atlas, Render, Vercel: Account/Security settings). Save recovery codes in the password manager.
+*Check:* you can log out and back in to each one with a 2FA code.
+
+**2. MongoDB Atlas free M0** (details: `deploy/atlas.md`).
+1. Atlas > Create > **M0 Free**, AWS, us-east-1, name `kalshi-control`.
+2. Security > Database Access > Add user, password auth, role **readWrite** on one database. Use a long random password.
+3. Security > Network Access > Add IP Address > **Allow access from anywhere** (`0.0.0.0/0`); Render's free IPs change.
+4. Database > Connect > Drivers > copy the connection string; fill in the password (URL-encode special characters). This is `MONGODB_URI`. Save it in the password manager.
+*Check:* the cluster shows green/Active and the string starts with `mongodb+srv://`.
+
+**3. Generate secrets** (PC, repo root, `maker-console/`).
+1. `python -m control_api.auth.bootstrap --gen-keys` prints `JWT_SECRET`, `TOTP_ENC_KEY`, `TICK_TOKEN`.
+2. Make three more random values, using these commands: `python -c "import secrets; print(secrets.token_urlsafe(48))"` for `HANDOVER_HMAC_KEY` (must be at least 32 bytes; shorter or empty turns handover off, so every restart drops to demo), and `python -c "import secrets; print(secrets.token_urlsafe(32))"` for `DEPLOY_STATUS_KEY` and `RELEASE_TOKEN`. Use a different value for each.
+3. `APP_VERSION` is optional: leave it empty and the API reports the first 7 characters of the Render commit as its version. Setting it restarts the service, so only set it if you want a fixed label.
+4. Save all of them in the password manager.
+*Check:* 6 distinct values saved (3 from `--gen-keys`, 3 you made).
+
+**4. Kalshi DEMO keys only.** On Kalshi's demo site create an API key: you get a key ID (`KALSHI_DEMO_API_KEY_ID`) and a private key file (`KALSHI_DEMO_PRIVATE_KEY`). Do **not** create a production key now and leave `KALSHI_PROD_*` and `KALSHI_LIVE_CONFIRM` empty.
+*Check:* the key shows in the demo site's API keys list.
+
+**5. Render free web service from the Blueprint.**
+1. Render > New > **Blueprint** > connect GitHub > pick this repo (service `kalshi-control`, free plan).
+2. Fill the secret prompts from the table below. Auto-deploy is **OFF** in `render.yaml` (`autoDeployTrigger: off`): pushing to GitHub does not deploy; releases go through the release process.
+3. Deploy. Open `https://<service>.onrender.com/healthz`.
+*Check:* it shows `{"ok":true}`. Settings > Build & Deploy shows Auto-Deploy **Off**.
+
+| Variable | Where it comes from | Secret? |
+|---|---|---|
+| `MONGODB_URI` | step 2 | yes |
+| `JWT_SECRET`, `TOTP_ENC_KEY`, `TICK_TOKEN` | step 3 (`--gen-keys`) | yes |
+| `HANDOVER_HMAC_KEY` | step 3, at least 32 bytes | yes |
+| `DEPLOY_STATUS_KEY` | step 3; same value as GitHub secret `DEPLOY_STATUS_KEY` | yes |
+| `RELEASE_TOKEN` | step 3; same value as GitHub secret `RELEASE_TOKEN` | yes |
+| `APP_VERSION` | optional; empty = Render commit (7 chars) | no |
+| `KALSHI_DEMO_API_KEY_ID`, `KALSHI_DEMO_PRIVATE_KEY` | step 4 | yes |
+| `NTFY_TOPIC` | step 8 | yes (topic is the password) |
+| `ALLOWED_ORIGIN` | step 7 (Vercel URL) | no |
+| `CRONJOB_API_KEY` | step 8 | yes |
+| `PRIVATE_REPO_TOKEN` | step 9 (build time) | yes |
+| `PRIVATE_REPO_REF` | optional, default `main` | no |
+| `KALSHI_PROD_*`, `KALSHI_LIVE_CONFIRM` | leave empty until going live | yes |
+| `PUBLIC_URL` | leave empty (Render sets it) | no |
+
+Never set `DEV_MODE=true` on Render.
+
+**6. Owner account + 2FA (PC).**
+1. In the terminal set `MONGODB_URI` and `TOTP_ENC_KEY` (same values as Render), then run `python -m control_api.auth.bootstrap --username <YOUR_USERNAME>`. Choose a password.
+2. On your phone install **Duo Mobile** > **+ Add** > **Use QR code** and scan the QR code the CLI prints. (Duo works as a normal third-party TOTP app; no Duo account/organisation is needed.) If the QR does not scan, choose manual entry with the printed key.
+3. The CLI prints the secret/URI **once**. Save the manual key in the password manager now; it is your recovery.
+4. Type the current 6-digit code into the CLI to confirm.
+*Check:* the CLI says `Saved user '<YOUR_USERNAME>'`. Then close the terminal so the variables are gone.
+
+**7. Vercel.** New Project > import the repo > Root Directory `control_app` > env `VITE_API_BASE_URL` = Render URL (no trailing slash; never set `VITE_MOCK`) > Deploy.
+1. CSP step: edit `control_app/vercel.json`, replace `https://your-api-origin.invalid` in `connect-src` with your Render origin, run `node deploy/check_csp.mjs https://<service>.onrender.com`, commit and push.
+2. Render > Environment > `ALLOWED_ORIGIN` = the exact Vercel URL (https, no trailing slash). Save (redeploys).
+*Check:* the Vercel URL shows the login page and a login attempt does not show a network/CORS error.
+
+**8. cron-job.org keep-awake and ntfy.**
+1. cron-job.org > Settings > API > create an API key (unrestricted) > Render `CRONJOB_API_KEY`. In the app, Server page: keep-awake and pinger **at most 14 minutes** (10 and 5 recommended), save with a 2FA code. Details: `deploy/cronjob.md`.
+2. ntfy app > subscribe to a long random topic name (`NTFY_TOPIC`; anyone who knows it can read alerts) > put it in Render.
+*Check:* Server page shows a cron job ID and "synced"; cron-job.org execution history shows green runs; the phone gets an ntfy test message.
+
+**9. `PRIVATE_REPO_TOKEN` (real strategy at build time).** Without it the build is **demo-only** and **LIVE is refused**. That is correct for now; you can do this step now or just before the live switch. Details: `deploy/private_overlay.md`.
+1. github.com > profile picture > **Settings** > **Developer settings** (bottom of the left sidebar) > **Personal access tokens** > **Fine-grained tokens** > **Generate new token**.
+2. Name `render-build-overlay`, expiration **90 days** (set a calendar reminder). Resource owner: your account.
+3. Repository access: **Only select repositories** > the private strategy repo only.
+4. Repository permissions > **Contents: Read-only**; everything else No access.
+5. Generate, copy the `github_pat_...` value once, save it in the password manager.
+6. Render > `kalshi-control` > Environment > add `PRIVATE_REPO_TOKEN` > Save > Manual Deploy > Deploy latest commit.
+*Check:* the build log shows `private strategy installed` and `IS_STANDIN=False`. With no token it prints `demo-only build`.
+
+**10. GitHub environment `production`** (release secrets; full text: `deploy/release_secrets.md`).
+1. Repo > **Settings** > **Environments** > **New environment** > `production` > Configure environment.
+2. **Deployment branches and tags** > Selected branches and tags > Add rule > Branch `main` > Add rule. Optional: tick **Required reviewers**, add yourself, Save protection rules.
+3. **Environment secrets** > Add environment secret, one per row: `API_BASE_URL` (Render URL), `APP_URL` (Vercel URL), `DEPLOY_STATUS_KEY` and `RELEASE_TOKEN` (same as Render), `RENDER_DEPLOY_HOOK` (Render > service > Settings > Deploy Hook), `VERCEL_DEPLOY_HOOK` (Vercel > project > Settings > Git > Deploy Hooks, name `release`, branch `main`), `NTFY_TOPIC` (same as Render).
+4. Do **not** add them as repository secrets (delete any you did).
+*Check:* the `production` page lists `main` as the only branch and 7 secret names; Repository secrets has none of them.
+
+**11. Phone and laptop.**
+- **iPhone:** open the Vercel URL in Safari (or Chrome) > Share > **Add to Home Screen**. Push needs iOS 16.4 or newer and only works from the Home Screen icon. **Android:** browser menu > Install app.
+- Open the app from the icon, log in with password + Duo code, More > Alerts > **Enable notifications** > Allow > **Send test**. Push also needs the VAPID keys (step 7b below).
+- Laptop: open the same URL in a browser and log in.
+*Check:* the test notification arrives within seconds.
+
+**12. Demo acceptance: must work from a phone AND a laptop.**
+- [ ] Login with password + 2FA code
+- [ ] Overview loads with numbers (or clear empty states)
+- [ ] **Stop** works (no 2FA) and shows the kill switch on
+- [ ] **Start** asks for a fresh 2FA code and the bot starts in demo
+- [ ] Settings change saves (fresh 2FA); bad values are refused
+- [ ] Server page shows the leader, `api_version` and app version, keep-awake synced
+- [ ] Push test arrives on the phone
+- [ ] Heartbeat age stays under 15 min for 24 hours
+- [ ] **Three-deploy rehearsal** (dress rehearsal; use dummy commits, e.g. a README edit): run the `release` workflow (Actions > release > Run workflow, from `main`) three times in a row with the bot running in demo.
+  - *Watch:* the app shows a pending release for you to approve (fresh 2FA); the Server page shows the new version, still one leader, generation going up; ntfy sends a "release done" message.
+  - *No double orders:* Activity/Logs show a single `mm-` order per market per pass, no duplicates around the restart, and the Kalshi demo site lists no doubled resting orders.
+  - *Stop mid-deploy:* during one rehearsal press **Stop**. Stop wins; the deploy finishes with the bot stopped. If the app is unreachable, use Render > Suspend service.
+  - A refusal code (for example `CI_NOT_GREEN`, `NOT_HANDOVER_CAPABLE`) is a safe stop, not a failure; read `docs/RELEASE_PROCESS.md`.
+- [ ] Live stays off: switching to live is refused while `KALSHI_PROD_*` or the private strategy is missing.
+
+---
+
+## What each email means
+
+Real alerts never ask for your password, 2FA code or key. If an email asks for one, do not click; go to the site yourself by typing the address.
+
+| From | Meaning | Urgency | What to do |
+|---|---|---|---|
+| GitHub: workflow failed (`python`, `frontend`, `e2e`) | Tests failed on a push or PR | Medium | Open the run, read the first failing step. Nothing deploys automatically; fix before releasing. |
+| GitHub: `gitleaks` failed | A secret-like string was found in a commit | **High** | Do not push further. Treat the value as leaked: rotate it (Render/Kalshi/Atlas), then remove it from history. |
+| GitHub: `semgrep` failed | A new code-safety finding | Medium | Review it; fix, or add it to the baseline in `CONTRIBUTING.md` if a false positive. |
+| GitHub: `commit-messages` failed | A commit subject is not `type(area): summary` | Low | Reword the commit/PR title. |
+| GitHub: `release` failed or cancelled | A release stopped at a stage | Medium-High | Open the run; a gate refusal code is a safe stop. Check the Server page that exactly one leader is running; Stop if unsure. |
+| Dependabot PR | A dependency update proposed (monthly) | Low | Wait for green tests, then merge or close. Retitle to `chore(deploy): ...`. |
+| Dependabot alert / GitHub security advisory | A known vulnerability in a package | Medium-High | Open the alert; merge the fix PR if there is one. |
+| GitHub secret scanning alert | GitHub found a key pattern in the repo | **High** | Revoke that key at once at its provider, then replace it. |
+| Render: deploy failed | Build or start failed | Medium | Open the logs. The previous version keeps running. |
+| Render: health check failing / service crashed | API not answering | **High** if the bot runs | Check the app; press Stop; look at Render logs. |
+| Render: service suspended | Free hours or a manual suspend | **High** | Resume only after checking why, then Start from the app. |
+| Atlas: cluster paused / storage near limit | Inactivity pause or 0.5 GB nearly used | Medium (paused: High, app fails closed) | Log in to Atlas and Resume; for storage, wait for data to expire or clear old logs. Stop still works. |
+| Vercel: build failed | New app version did not build | Low-Medium | The old app stays live. Open the build log. |
+| cron-job.org: job failed | Keep-awake ping failed | Medium | Check Render is up and the URL/`TICK_TOKEN`; repeat failures can let the service sleep. |
+| healthchecks.io (later) | Dead-man alert: no heartbeat | **High** | Open the app; Stop if unsure. |
+| ntfy (phone, not email) | Bot alerts: fills, Stop, breaker, LIVE not restored | Per message | Urgent ones: open the app. "LIVE not restored" means re-arm Live yourself. |
+| Kalshi account/API-key notice | Key expiry, account or policy change | Medium | Log in on Kalshi's site directly; replace the key in Render if needed. |
+
+---
+
+ on free tiers. Follow the steps in order. Never paste a key into chat, git or a screenshot; keep keys in a password manager.
 
 **Safety first.** Starting the bot or going live is always reversible with **Stop**:
 1. Best: the app's red **Stop** button (one tap, no 2FA).
@@ -49,7 +181,7 @@ Start in **demo** mode. Do not create a production Kalshi key until step 15 is d
     5. You accept the residual risks: someone with Atlas write access could resume **demo** or log-only trading at a restart (you get an alert); a stolen login token can force extra passes (not more often than every 60 s), but only within the limits you armed.
     6. You have read your strategy's validation (kept in the private repo): run demo first, then live at a small size you can afford to lose entirely in a day, and judge by the **fill quality** block (Overview and Markets) before P&L. See `docs/FEATURES.md`, "Before you go live".
 17. **Maintenance.**
-    - Pushes to GitHub auto-deploy. To roll back, redeploy an earlier deploy in Render (Events tab).
+    - Auto-deploy is off: ship with the `release` workflow (see `docs/RELEASE_PROCESS.md`). To roll back, redeploy an earlier deploy in Render (Events tab).
     - After rotating `TICK_TOKEN`, press Sync on the Server page.
     - **Adding or upgrading a Python package:** edit `control_api/requirements.in`, regenerate both locks with the command in the header of the `.in` files (needs `uv`; Python 3.11 target), commit `requirements.txt` and `requirements-dev.txt`. Never hand-edit them. Installs always use `pip install --require-hashes --only-binary :all: --no-deps -r ...`.
     - Atlas pauses after 30 days inactive: log in and Resume.

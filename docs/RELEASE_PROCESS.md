@@ -1,6 +1,6 @@
 # Release process (CI/CD): updating Keel while the bot runs
 
-_Status: **design approved, owner decisions made 2026-10-13 (A2, B2, C = 120 s), not yet built.** Must be built and verified before the first deploy. Owner: lead (infra, backend, security, tests, docs). Written 2026-10-13._
+_Status: **design approved, owner decisions made 2026-10-13 (A2, B2, C = 120 s); built (Sprint 1, 2026-10-16).** The real first-run verification happens in the dress rehearsal (three dummy releases in demo, see the Demo-Day Checklist in DEPLOY.md). Owner: lead (infra, backend, security, tests, docs). Written 2026-10-13._
 
 Goal: ship backend or frontend updates **while the bot is running (demo or live)** without double trading, lost orders, a stuck Stop or a broken app. If any check fails, the system fails **safe** (no new orders) instead of failing open.
 
