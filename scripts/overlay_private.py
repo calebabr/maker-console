@@ -8,6 +8,7 @@ which is what lets the control API allow LIVE mode. Nothing is marked installed 
 
 Overlay contract (see kalshi_bot/README.md):
   * the real kalshi_bot/maker_strategy.py must not set IS_STANDIN = True (the stand-in does); checked here;
+  * it must expose desired_quotes (5 parameters) and Quote (7 fields) for shadow mode (exit 3 otherwise);
   * the stand-in kalshi_bot/__init__.py and botfiles.is_standin() read kalshi_bot/_overlay.py; both must say False;
   * only paths under kalshi_bot/ and control_api/data/ can be overlaid; secrets never come from the private repo.
 
@@ -19,6 +20,7 @@ Exit codes: 0 ok, 2 bad arguments/manifest, 3 private file missing or contract b
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import os
 import re
@@ -119,6 +121,35 @@ def check_contract(private: Path) -> None:
     if STANDIN_TRUE.search(ms.read_text(encoding="utf-8", errors="replace")):
         raise OverlayError("kalshi_bot/maker_strategy.py sets IS_STANDIN = True: that is the public stand-in, not "
                            "the private strategy (check --private)")
+    check_shadow_interface(ms)
+
+
+SHADOW_PARAMS = ["markets", "books", "now", "max_order_dollars", "budget"]
+QUOTE_FIELDS = ["ticker", "side", "price", "count", "book_side", "order_price", "cell"]
+
+
+def check_shadow_interface(ms: Path) -> None:
+    """Shadow-mode contract (docs/SHADOW_CONTRACT.md): desired_quotes with exactly 5 parameters and a Quote class
+    with the 7 fields. Checked on the syntax tree, so the private module is never imported or run here."""
+    try:
+        tree = ast.parse(ms.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError as e:
+        raise OverlayError(f"{ms.name}: cannot parse ({e.msg})")
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    fn = fns.get("desired_quotes")
+    if fn is None:
+        raise OverlayError("maker_strategy.py has no desired_quotes(markets, books, now, max_order_dollars, budget)")
+    a = fn.args
+    params = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]
+    if params != SHADOW_PARAMS or a.vararg or a.kwarg:
+        raise OverlayError(f"desired_quotes parameters are {params}, expected exactly {SHADOW_PARAMS}")
+    quote = next((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Quote"), None)
+    if quote is None:
+        raise OverlayError("maker_strategy.py has no Quote class")
+    fields = {n.target.id for n in quote.body if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)}
+    missing = [f for f in QUOTE_FIELDS if f not in fields]
+    if missing:
+        raise OverlayError(f"Quote is missing fields: {missing}")
 
 
 def _atomic_copy(src: Path, dst: Path) -> None:

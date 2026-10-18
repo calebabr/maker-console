@@ -21,11 +21,33 @@ REQUIRED = ("maker_strategy.py", "maker_monitor.py", "maker_config.json", "arb_s
             "kalshi_client.py", "markets.py")
 
 
+# A private maker_strategy.py must satisfy the shadow-mode contract (docs/SHADOW_CONTRACT.md) to pass the overlay check.
+PRIVATE_STRATEGY = (
+    "# private maker_strategy.py\n"
+    "from dataclasses import dataclass\n"
+    "\n"
+    "\n"
+    "@dataclass(frozen=True)\n"
+    "class Quote:\n"
+    "    ticker: str\n"
+    "    side: str\n"
+    "    price: float\n"
+    "    count: float\n"
+    "    book_side: str\n"
+    "    order_price: float\n"
+    "    cell: tuple\n"
+    "\n"
+    "\n"
+    "def desired_quotes(markets, books, now, max_order_dollars, budget):\n"
+    "    return []\n"
+)
+
+
 def _private(tmp_path: Path, *, standin=False) -> Path:
     p = tmp_path / "private"
     (p / "kalshi_bot" / "tests").mkdir(parents=True)
     for name in REQUIRED:
-        (p / "kalshi_bot" / name).write_text(f"# private {name}\n", encoding="utf-8")
+        (p / "kalshi_bot" / name).write_text(PRIVATE_STRATEGY if name == "maker_strategy.py" else f"# private {name}\n", encoding="utf-8")
     if standin:
         (p / "kalshi_bot" / "maker_strategy.py").write_text("IS_STANDIN = True\n", encoding="utf-8")
     (p / "kalshi_bot" / "tests" / "test_private.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
@@ -50,7 +72,7 @@ def test_overlay_copies_manifest_files_and_writes_marker_last(tmp_path):
     rels = ov.overlay(priv, tgt, with_tests=True)
     assert "kalshi_bot/maker_strategy.py" in rels and "kalshi_bot/tests/test_private.py" in rels
     assert "control_api/data/cell_expectations.json" in rels
-    assert (tgt / "kalshi_bot" / "maker_strategy.py").read_text(encoding="utf-8") == "# private maker_strategy.py\n"
+    assert (tgt / "kalshi_bot" / "maker_strategy.py").read_text(encoding="utf-8") == PRIVATE_STRATEGY
     marker = (tgt / "kalshi_bot" / "_overlay.py").read_text(encoding="utf-8")
     assert "IS_STANDIN = False" in marker and "kalshi_bot/maker_strategy.py" in marker
     assert not (tgt / "kalshi_bot" / "bot.env").exists()                       # not in the manifest

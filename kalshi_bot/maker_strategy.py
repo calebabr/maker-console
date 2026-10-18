@@ -1,7 +1,8 @@
 """DEMO PLACEHOLDER STRATEGY (public stand-in). It holds no trading edge and places NO orders.
 
 It exists so the public control API, its tests and CI run without the private strategy. It has the same
-interface the control API uses: LOG, KILL, CONFIG_PATH, DEFAULTS, load_config, validate_config, in_cell, main.
+interface the control API uses: LOG, KILL, CONFIG_PATH, DEFAULTS, load_config, validate_config, in_cell, main, Quote, desired_quotes
+(Quote and desired_quotes are the shadow-mode interface; here desired_quotes returns an empty list).
 `main()` reads and validates maker_config.json, journals nothing and returns 0 without any network call.
 
 The `cells` in DEFAULTS and maker_config.json are EXAMPLE values only (made up, not a strategy).
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -83,6 +85,27 @@ def journal(event: str, note: str) -> None:
         if new:
             w.writerow(JOURNAL_FIELDS)
         w.writerow([datetime.now(timezone.utc).isoformat(), event, "", "", "", "", "", "", note])
+
+
+@dataclass(frozen=True)
+class Quote:
+    """One desired resting bid (shape only; the stand-in never creates one)."""
+    ticker: str
+    side: str
+    price: float
+    count: int
+    book_side: str
+    order_price: float
+    cell: tuple
+
+    @property
+    def cost(self) -> float:
+        return self.count * self.price
+
+
+def desired_quotes(markets, books, now, max_order_dollars, budget) -> list:
+    """Stand-in: places and plans nothing, so it always returns an empty list."""
+    return []
 
 
 def main() -> int:

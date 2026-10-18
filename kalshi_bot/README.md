@@ -29,13 +29,17 @@ python scripts/overlay_private.py --private /path/to/private-checkout [--target 
 1. Only paths under `kalshi_bot/` and `control_api/data/` can be overlaid; each file is written atomically.
 2. The private `maker_strategy.py` must **not** set `IS_STANDIN = True` (the overlay checks this before and after
    copying and fails otherwise).
-3. Only after every file is copied does the overlay write `kalshi_bot/_overlay.py` with `IS_STANDIN = False`.
+3. Shadow-mode interface (`docs/SHADOW_CONTRACT.md`): the installed `maker_strategy.py` must define
+   `desired_quotes(markets, books, now, max_order_dollars, budget)` (exactly these 5 parameters) and a `Quote`
+   class with fields `ticker, side, price, count, book_side, order_price, cell`; the overlay checks this on the
+   syntax tree and exits 3 otherwise. The stand-in defines both and `desired_quotes` returns `[]`.
+4. Only after every file is copied does the overlay write `kalshi_bot/_overlay.py` with `IS_STANDIN = False`.
    `control_api.services.botfiles.is_standin()` reads both the strategy module and this marker and is fail-closed:
    anything other than "strategy without `IS_STANDIN = True` **and** marker `IS_STANDIN = False`" counts as the
    stand-in.
-4. Run it in a build or temporary copy. A git work tree is refused unless `--allow-git-worktree` is given (for a
+5. Run it in a build or temporary copy. A git work tree is refused unless `--allow-git-worktree` is given (for a
    throwaway deploy clone); never commit overlaid files (`_overlay.py` and `control_api/data/cell_expectations.json`
    are git-ignored).
-5. Secrets never come from the private repository: Kalshi keys stay in environment variables.
+6. Secrets never come from the private repository: Kalshi keys stay in environment variables.
 
 `tests/test_standin.py` checks the stand-in before the overlay and the marker after it.
