@@ -152,7 +152,9 @@ async def test_stop_concurrent_with_random_operations_always_ends_stopped(env, m
     await asyncio.gather(*tasks)
     await asyncio.gather(*list(r._bg), return_exceptions=True)
     if r._state_retry is not None:
-        with contextlib.suppress(Exception):
+        # A Start that wins after the Stop cancels this retry task on purpose (a stale stopped-retry must not override
+        # it), and awaiting a cancelled task raises CancelledError, which is not an Exception.
+        with contextlib.suppress(Exception, asyncio.CancelledError):
             await asyncio.wait_for(r._state_retry, 2)
 
     # a Start / arb-enable that began after the Stop returned is allowed to win
