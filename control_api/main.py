@@ -16,14 +16,16 @@ log = logging.getLogger("control_api")
 def create_app(settings: Settings | None = None, store: Any = None,
                kalshi_factory: Callable[[str], Any] | None = None,
                cronjob_factory: Callable[[str], Any] | None = None,
-               public_factory: Callable[[str], Any] | None = None) -> FastAPI:
+               public_factory: Callable[[str], Any] | None = None,
+               shadow_factory: Callable[[], Any] | None = None) -> FastAPI:
     """kalshi_factory(mode) -> authenticated client or None; public_factory(env) -> unauthenticated client for
-    arb scans; cronjob_factory(api_key) -> cron-job.org client. Tests inject fakes for all three."""
+    arb scans; cronjob_factory(api_key) -> cron-job.org client; shadow_factory() -> read-only public market data
+    for shadow mode (never authenticated). Tests inject fakes for all four."""
     from .auth.middleware import install_security
     from .auth.routes import router as auth_router
     from .db import get_store
     from . import version as ver
-    from .routes import alerts, analytics, arb, bot, cloud, config, data, deploy_status, release, ux
+    from .routes import alerts, analytics, arb, bot, cloud, config, data, deploy_status, release, shadow, ux
     from .runner import Runner
     from .services import keepalive as ka
     from .services.cronjob import CronJobClient
@@ -32,7 +34,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
     settings = settings or Settings.from_env()
     store = store if store is not None else get_store(settings)
     install_logbuffer()
-    runner = Runner(settings, store, kalshi_factory, public_factory=public_factory)
+    runner = Runner(settings, store, kalshi_factory, public_factory=public_factory, shadow_factory=shadow_factory)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -73,7 +75,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
         return {"ok": True, **ver.handshake(), "role": runner.role(), "lease_generation": runner.lease.generation}
 
     app.include_router(auth_router)
-    for mod in (bot, config, data, cloud, arb, analytics, ux, alerts, deploy_status, release):
+    for mod in (bot, config, data, cloud, arb, analytics, ux, alerts, deploy_status, release, shadow):
         app.include_router(mod.router)
     return app
 

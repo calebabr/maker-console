@@ -31,6 +31,8 @@ from .services import pnl as pnlsvc
 from .services import queuepos as qp
 from .services import alerts as alertsvc
 from .services import strategies as strat
+from .services import shadow as shadowsvc
+from .services import shadow_model as shadow_model
 from .services.alerts import Alerter
 from .services.webpush import PushService
 from .services.logbuffer import install as install_logbuffer
@@ -259,11 +261,15 @@ class RunnerDisabled(RuntimeError):
 
 class Runner:
     def __init__(self, settings: Any, store: Any, kalshi_factory: Callable[[str], Any] | None = None,
-                 alerter: Alerter | None = None, public_factory: Callable[[str], Any] | None = None):
+                 alerter: Alerter | None = None, public_factory: Callable[[str], Any] | None = None,
+                 shadow_factory: Callable[[], Any] | None = None):
         self.settings = settings
         self.store = store
         self.kalshi_factory = kalshi_factory or default_kalshi_factory
         self.public_factory = public_factory or default_public_factory
+        # shadow mode (services/shadow.py): its own read-only, credential-free market-data factory. It never gets the
+        # trading factory above, the pass lock, the env lock, the fence or the Stop pool.
+        self.shadow_factory = shadow_factory or shadowsvc.default_shadow_factory
         self.alerter = alerter or Alerter(settings)
         self.logs = install_logbuffer()
         self.desired = "stopped"
@@ -334,6 +340,12 @@ class Runner:
         self._stop_executor = ThreadPoolExecutor(max_workers=STOP_WORKERS, thread_name_prefix="stop")
         self._monitor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="monitor")
         self._arb_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arb")
+        self._shadow_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shadow")
+        self._shadow_task: asyncio.Task | None = None
+        self._shadow_cf: Any = None           # the worker's concurrent future (busy while not done)
+        self._shadow_active = False           # a cycle ran since shadow was last turned on
+        self._shadow_summary_utc: datetime | None = None   # last cached-summary refresh (SH-2)
+        self.shadow_state: dict = {"last_cycle_utc": None, "last_reason": None, "last_error": None}
         self._monitor_running = False     # CA-2: single-flight; a second run while one runs gets monitor_running
         # ---- release process: single-leader lease + fencing (R1), graceful handover (R2/R3), schema (R4)
         g = lambda n, d: getattr(settings, n, d)  # noqa: E731   (tests may pass a minimal settings object)
@@ -694,6 +706,10 @@ class Runner:
                            asyncio.create_task(keepalive_loop(self), name="runner-keepalive"),
                            asyncio.create_task(self._arb_loop(), name="runner-arb"),
                            asyncio.create_task(self._lease_loop(), name="runner-lease")]
+            if getattr(self.settings, "shadow_enabled", False):
+                # kept out of self._tasks: shutdown cancels it without waiting. It idles while the cloud setting
+                # shadow_enabled is false, so the app can turn it on and off without a restart.
+                self._shadow_task = asyncio.create_task(self._shadow_loop(), name="runner-shadow")
             self._spawn(self.run_source_backfill())     # read-only relabel of older fills; budgeted, never raises
         log.info("runner started: instance %s on %s, role %s", self.instance_id[:8], hostname(), self.role())
 
@@ -708,6 +724,8 @@ class Runner:
         PASS_BUDGET_S), persist, then hand over and release the lease if still leader. Never raises. A pass that
         overran its budget keeps the lease (it expires after the TTL), so no other instance trades beside it."""
         self._shutting_down = True
+        if self._shadow_task is not None:
+            self._shadow_task.cancel()                 # shadow never delays shutdown: cancel, never await
         try:
             await asyncio.wait_for(self._graceful_handover(), timeout=self.shutdown_budget_s())
         except BaseException as e:  # noqa: BLE001   (incl. the budget timeout and cancellation)
@@ -716,7 +734,8 @@ class Runner:
                 with contextlib.suppress(BaseException):
                     await asyncio.wait_for(self.lease.release(handover=None), SHUTDOWN_STORE_TIMEOUT_S)
         self._leader_ready = False
-        for ex in (self._ct_executor, self._tel_executor, self._monitor_executor, self._arb_executor):
+        for ex in (self._ct_executor, self._tel_executor, self._monitor_executor, self._arb_executor,
+                   self._shadow_executor):
             with contextlib.suppress(Exception):
                 ex.shutdown(wait=False, cancel_futures=True)
         with contextlib.suppress(Exception):       # last, and without cancelling a queued Stop cancel
@@ -1933,6 +1952,153 @@ class Runner:
         if not self._fence_ok():
             return "standby"                     # R1: only the lease holder scans (and executes)
         return None
+
+    # ---- shadow mode (read only; docs/SHADOW_CONTRACT.md)
+    def shadow_enabled(self) -> bool:
+        """Env SHADOW_ENABLED (startup snapshot) AND the cloud setting shadow_enabled."""
+        return bool(getattr(self.settings, "shadow_enabled", False)) and self.cloud.get("shadow_enabled") is True
+
+    def _shadow_skip_reason(self) -> str | None:
+        """Pure local reads; never takes a lock."""
+        if not self.settings.runner_enabled:
+            return "runner_disabled"
+        if self._shutting_down:
+            return "shutting_down"
+        if self.role() != "leader":
+            return "standby"
+        if self._stopping:
+            return "stop_running"
+        if self._strategy_running or self.running_pass or self._pass_lock.locked():
+            return "pass_running"
+        if self._shadow_cf is not None and not self._shadow_cf.done():
+            return "busy"                       # an abandoned worker is still finishing: never queue behind it
+        return None
+
+    async def _shadow_loop(self) -> None:
+        await asyncio.sleep(self.poll_minutes() * 30)        # offset by half an interval from the passes
+        while True:
+            try:
+                await self.shadow_cycle()
+            except Exception as e:  # noqa: BLE001
+                log.error("shadow cycle failed: %s", type(e).__name__)
+            await asyncio.sleep(self.poll_minutes() * 60)
+
+    def _shadow_sync(self, inp: Any, strategy: Any, deadline: float) -> Any:
+        md = self.shadow_factory()
+        return shadowsvc.run_cycle(md, strategy, inp, deadline=deadline)
+
+    async def _shadow_store(self, coro, timeout: float = shadowsvc.SHADOW_STORE_TIMEOUT_S):
+        return await asyncio.wait_for(coro, timeout)
+
+    async def _shadow_compute(self, now: datetime, standin: bool) -> Any:
+        st = self.store
+        open_eps = await self._shadow_store(st.shadow_open_episodes())
+        unread = await self._shadow_store(st.shadow_ended_unread(shadowsvc.SHADOW_MAX_TRADE_READS + 1))
+        unsettled = await self._shadow_store(st.shadow_unsettled(now, shadowsvc.SHADOW_MAX_SETTLE_READS * 10))
+        new_today = await self._shadow_store(st.shadow_count_new_since(shadowsvc.day_start(now)))
+        ms = self.ms
+        cfg = {**ms.DEFAULTS, **botfiles.public_config(self.config)}
+        inp = shadowsvc.CycleInput(series=list(cfg.get("series") or []), run_budget=float(cfg["run_budget"]),
+                                   max_order=float(cfg["max_order"]), open_eps=list(open_eps or []),
+                                   ended_unread=list(unread or []), unsettled=list(unsettled or []),
+                                   new_today=int(new_today or 0), now=now, standin=standin)
+        deadline = time.monotonic() + shadowsvc.SHADOW_BUDGET_S - shadowsvc.DEADLINE_MARGIN_S
+        self._shadow_cf = self._shadow_executor.submit(self._shadow_sync, inp, ms, deadline)
+        return await asyncio.wrap_future(self._shadow_cf)
+
+    async def _shadow_refresh_summary(self, now: datetime, standin: bool) -> None:
+        """SH-2: only the fields summarize() reads, only scored episodes (yes/no result with a fill), capped."""
+        st = self.store
+        fields = shadowsvc.SUMMARY_FIELDS
+        cap, cap_open = shadowsvc.SHADOW_SUMMARY_MAX_ROWS, shadowsvc.SHADOW_SUMMARY_MAX_OPEN
+        settled = list(await self._shadow_store(st.shadow_settled(
+            now - timedelta(days=shadowsvc.SHADOW_SUMMARY_DAYS), fields=fields, limit=cap, scored_only=True)) or [])
+        open_eps = list(await self._shadow_store(st.shadow_open_episodes(fields=fields, limit=cap_open)) or [])
+        passes = await self._shadow_store(st.shadow_recent_passes(300))
+        fut = asyncio.get_running_loop().run_in_executor(
+            self._shadow_executor, functools.partial(shadow_model.summarize, settled + open_eps, now,
+                                                     passes=list(passes or []), enabled=True, standin=standin))
+        summary = await asyncio.wait_for(fut, shadowsvc.SHADOW_BUDGET_S / 3)
+        if len(settled) >= cap or len(open_eps) >= cap_open:
+            summary["status"]["truncated"] = True
+        if not self._shadow_leader_ok():
+            return                                       # SH-4: lost the lease meanwhile: write nothing
+        await self._shadow_store(st.set_shadow_summary(summary))
+        self._shadow_summary_utc = now
+
+    def _shadow_leader_ok(self) -> bool:
+        """SH-4: still the leader and not shutting down, re-checked right before every shadow write."""
+        return self.role() == "leader" and not self._shutting_down
+
+    def _shadow_summary_due(self, now: datetime, pass_doc: dict) -> bool:
+        """SH-2: refresh the cached summary when something settled, else at most every SHADOW_SUMMARY_EVERY."""
+        last = self._shadow_summary_utc
+        return (last is None or bool(pass_doc.get("settled")) or bool(pass_doc.get("voided"))
+                or now - last >= shadowsvc.SHADOW_SUMMARY_EVERY)
+
+    async def _shadow_off(self) -> None:
+        """Shadow was turned off: end the open episodes (shadow_off, at their last observation). Store only."""
+        try:
+            open_eps = await self._shadow_store(self.store.shadow_open_episodes())
+            docs = shadowsvc.end_all(open_eps or [], "shadow_off", utcnow())
+            if docs:
+                await self._shadow_store(self.store.shadow_upsert_episodes(docs))
+            self._shadow_active = False
+        except Exception as e:  # noqa: BLE001
+            log.warning("shadow close-out failed: %s", type(e).__name__)
+
+    async def shadow_cycle(self) -> dict:
+        """One shadow cycle if allowed. Reads and computes inside SHADOW_BUDGET_S (a timeout or error writes no
+        episodes), then writes the episodes in one upsert, the pass doc and the cached summary. Never raises."""
+        why = self._shadow_skip_reason()
+        if why is None and not self.shadow_enabled():
+            why = "disabled"
+            if self._shadow_active:
+                await self._shadow_off()
+        self.shadow_state["last_reason"] = why
+        if why:
+            return {"ran": False, "reason": why}
+        now = utcnow()
+        t0 = time.monotonic()
+        standin = botfiles.is_standin()
+        try:
+            res = await asyncio.wait_for(self._shadow_compute(now, standin), shadowsvc.SHADOW_BUDGET_S)
+        except Exception as e:  # noqa: BLE001   (incl. the budget timeout): nothing half-done is written
+            name = type(e).__name__
+            self.shadow_state.update(last_cycle_utc=now, last_error=name)
+            log.warning("shadow cycle discarded: %s", name)
+            if not self._shadow_leader_ok():
+                return {"ran": False, "reason": "standby"}
+            with contextlib.suppress(Exception):
+                await self._shadow_store(self.store.add_shadow_pass({
+                    "ts": now, "ok": False, "duration_s": round(time.monotonic() - t0, 3), "markets": 0,
+                    "books": 0, "quotes": 0, "new_eps": 0, "ended_eps": 0, "trade_reads": 0, "settled": 0,
+                    "truncated": False, "errors": [name]}), 5)
+            return {"ran": False, "reason": "error", "error": name}
+        if self._shutting_down:
+            return {"ran": False, "reason": "shutting_down"}
+        if not self._shadow_leader_ok():                 # SH-4: lease lost mid-cycle: no episode or pass writes
+            self.shadow_state.update(last_cycle_utc=now, last_error="standby")
+            return {"ran": False, "reason": "standby"}
+        self._shadow_active = True
+        pass_doc = dict(res.pass_doc)
+        try:
+            if res.upserts:
+                await self._shadow_store(self.store.shadow_upsert_episodes(res.upserts))
+        except Exception as e:  # noqa: BLE001
+            pass_doc["ok"] = False
+            pass_doc["errors"] = list(pass_doc.get("errors") or []) + [f"store:{type(e).__name__}"]
+        pass_doc["duration_s"] = round(time.monotonic() - t0, 3)
+        if self._shadow_leader_ok():
+            with contextlib.suppress(Exception):
+                await self._shadow_store(self.store.add_shadow_pass(pass_doc), 5)
+        if self._shadow_summary_due(now, pass_doc):
+            try:
+                await self._shadow_refresh_summary(now, standin)
+            except Exception as e:  # noqa: BLE001
+                log.warning("shadow summary refresh failed: %s", type(e).__name__)
+        self.shadow_state.update(last_cycle_utc=now, last_error=None if pass_doc["ok"] else "partial")
+        return {"ran": True, "pass": pass_doc}
 
     async def _arb_loop(self) -> None:
         while True:

@@ -99,6 +99,8 @@ class Settings:
     handover_hmac_key: str | None = None     # < 32 bytes or missing: signed handover disabled (always demo)
     deploy_status_key: str | None = None     # GET /api/deploy/status; unset -> 401
     release_token: str | None = None         # /api/release/pending*; unset -> 404 (feature invisible)
+    # Shadow mode (docs/SHADOW_CONTRACT.md): SHADOW_ENABLED env AND the cloud setting shadow_enabled. Read only.
+    shadow_enabled: bool = False
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "Settings":
@@ -143,6 +145,7 @@ class Settings:
             handover_hmac_key=g("HANDOVER_HMAC_KEY"),
             deploy_status_key=g("DEPLOY_STATUS_KEY"),
             release_token=g("RELEASE_TOKEN"),
+            shadow_enabled=_bool(g("SHADOW_ENABLED"), False),
         )
         kw.update(release_timing_from(g))
         kw["prod_keys_present"], kw["live_confirm_ok"] = live_gates_from(env if env is not None else os.environ)
