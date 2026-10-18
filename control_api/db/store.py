@@ -142,6 +142,51 @@ class Store(abc.ABC):
         """Episodes with ts >= since (optionally one env / status), newest first by ts (join time).
         `fields`: return only these keys (a projection; keeps the per-pass aggregate small in memory)."""
 
+    # ---- shadow mode (services/shadow.py). Not abstract, so older test fakes keep working.
+    async def shadow_upsert_episodes(self, docs: list[dict]) -> int:
+        """Idempotent upsert by ep_id, $set every given field. Returns the number NEW."""
+        raise NotImplementedError
+
+    async def shadow_open_episodes(self, *, fields: Iterable[str] | None = None,
+                                   limit: int | None = None) -> list[dict]:
+        """Episodes with end_ts null, oldest join first. `fields`: projection; `limit`: cap."""
+        raise NotImplementedError
+
+    async def shadow_ended_unread(self, limit: int) -> list[dict]:
+        """end_ts set and trades_read not true, oldest end first."""
+        raise NotImplementedError
+
+    async def shadow_unsettled(self, now: datetime, limit: int) -> list[dict]:
+        """result null and close_time <= now; never-checked first, then least recently checked
+        (settle_checked_ts), then oldest close: a stuck ticker rotates to the back (SH-1)."""
+        raise NotImplementedError
+
+    async def shadow_settled(self, since: datetime, *, fields: Iterable[str] | None = None,
+                             limit: int | None = None, scored_only: bool = False) -> list[dict]:
+        """result set and settled_ts >= since, oldest settle first. `scored_only`: result yes/no and a fill
+        estimate (what the summary scores). `fields`: projection. `limit`: the NEWEST `limit` (newest first)."""
+        raise NotImplementedError
+
+    async def shadow_recent(self, limit: int, state: str | None = None) -> list[dict]:
+        """Newest first by join_ts. state: open (end_ts null) | ended (end_ts set, no result) | settled (result set)."""
+        raise NotImplementedError
+
+    async def shadow_count_new_since(self, ts: datetime) -> int:
+        """Episodes with join_ts >= ts."""
+        raise NotImplementedError
+
+    async def add_shadow_pass(self, doc: dict) -> None:
+        raise NotImplementedError
+
+    async def shadow_recent_passes(self, limit: int) -> list[dict]:
+        raise NotImplementedError
+
+    async def get_shadow_summary(self) -> dict | None:
+        raise NotImplementedError
+
+    async def set_shadow_summary(self, doc: dict) -> None:
+        raise NotImplementedError
+
     # ---- market close time (services/closetime.py). Not abstract, so older test fakes keep working.
     async def set_quote_episode_close_time(self, order_id: str, close_time: datetime) -> bool:
         """Set close_time on ONE existing episode only while it has none (close_time is immutable once set).
@@ -384,6 +429,9 @@ class MemoryStore(Store):
         self._arb: list[dict] = []
         self._episodes: dict[str, dict] = {}         # order_id -> doc
         self._alerts: list[dict] = []
+        self._shadow_eps: dict[str, dict] = {}       # ep_id -> doc
+        self._shadow_passes: list[dict] = []
+        self._shadow_summary: dict | None = None
         self._push: dict[str, dict] = {}             # sub_id -> doc
         self._lease: dict | None = None              # the single runner_lease doc
         self._nonces: dict[str, datetime] = {}       # consumed handover nonce -> ts
@@ -617,6 +665,92 @@ class MemoryStore(Store):
             keep = set(fields)
             out = [{k: v for k, v in d.items() if k in keep} for d in out]
         return out
+
+    # ---- shadow mode
+    async def shadow_upsert_episodes(self, docs: list[dict]) -> int:
+        n = 0
+        async with self._lock:
+            for d in docs:
+                doc = S.prepare_shadow_episode(d)
+                old = self._shadow_eps.get(doc["ep_id"])
+                if old is None:
+                    doc.setdefault("ts", S.utcnow())
+                    self._shadow_eps[doc["ep_id"]] = self._stamp(doc)
+                    n += 1
+                else:
+                    old.update(doc)
+        return n
+
+    def _shadow_list(self, pred, key, *, reverse: bool = False, limit: int | None = None) -> list[dict]:
+        docs = [d for d in self._shadow_eps.values() if pred(d)]
+        docs.sort(key=lambda d: (key(d), d.get("\x00seq", 0)), reverse=reverse)
+        if limit is not None:
+            docs = docs[:max(0, int(limit))]
+        return [self._clean(d) for d in docs]
+
+    @staticmethod
+    def _project(docs: list[dict], fields: Iterable[str] | None) -> list[dict]:
+        if fields is None:
+            return docs
+        keep = set(fields) | {"ep_id"}
+        return [{k: v for k, v in d.items() if k in keep} for d in docs]
+
+    async def shadow_open_episodes(self, *, fields: Iterable[str] | None = None,
+                                   limit: int | None = None) -> list[dict]:
+        return self._project(self._shadow_list(lambda d: d.get("end_ts") is None,
+                                               lambda d: d.get("join_ts") or d["ts"], limit=limit), fields)
+
+    async def shadow_ended_unread(self, limit: int) -> list[dict]:
+        return self._shadow_list(lambda d: d.get("end_ts") is not None and d.get("trades_read") is not True,
+                                 lambda d: d["end_ts"], limit=limit)
+
+    async def shadow_unsettled(self, now: datetime, limit: int) -> list[dict]:
+        t = S.norm_dt(now)
+        return self._shadow_list(lambda d: d.get("result") is None and d.get("close_time") is not None
+                                 and d["close_time"] <= t,
+                                 lambda d: (d.get("settle_checked_ts") is not None,
+                                            d.get("settle_checked_ts") or d["close_time"], d["close_time"]),
+                                 limit=limit)
+
+    async def shadow_settled(self, since: datetime, *, fields: Iterable[str] | None = None,
+                             limit: int | None = None, scored_only: bool = False) -> list[dict]:
+        t = S.norm_dt(since)
+        ok = S.SHADOW_SCORED_RESULTS if scored_only else None
+        pred = (lambda d: d.get("result") is not None and d.get("settled_ts") is not None and d["settled_ts"] >= t
+                and (ok is None or (d.get("result") in ok and d.get("fill") is not None)))
+        if limit is None:
+            return self._project(self._shadow_list(pred, lambda d: d["settled_ts"]), fields)
+        return self._project(self._shadow_list(pred, lambda d: d["settled_ts"], reverse=True, limit=limit), fields)
+
+    async def shadow_recent(self, limit: int, state: str | None = None) -> list[dict]:
+        preds = {None: lambda d: True,
+                 "open": lambda d: d.get("end_ts") is None,
+                 "ended": lambda d: d.get("end_ts") is not None and d.get("result") is None,
+                 "settled": lambda d: d.get("result") is not None}
+        if state not in preds:
+            raise ValueError(f"unknown shadow state {state!r}")
+        return self._shadow_list(preds[state], lambda d: d.get("join_ts") or d["ts"], reverse=True, limit=limit)
+
+    async def shadow_count_new_since(self, ts: datetime) -> int:
+        t = S.norm_dt(ts)
+        return sum(1 for d in self._shadow_eps.values() if d.get("join_ts") is not None and d["join_ts"] >= t)
+
+    async def add_shadow_pass(self, doc: dict) -> None:
+        d = S.prepare_shadow_pass(doc)
+        async with self._lock:
+            self._shadow_passes.append(self._stamp(d))
+            if len(self._shadow_passes) > 5000:              # memory guard (Atlas uses the 30-day TTL instead)
+                self._shadow_passes = self._shadow_passes[-5000:]
+
+    async def shadow_recent_passes(self, limit: int) -> list[dict]:
+        return [self._clean(d) for d in self._newest_seq(self._shadow_passes)[:max(0, int(limit))]]
+
+    async def get_shadow_summary(self) -> dict | None:
+        return self._out(self._shadow_summary)
+
+    async def set_shadow_summary(self, doc: dict) -> None:
+        async with self._lock:
+            self._shadow_summary = S.strip_id(S.normalize(doc))
 
     # ---- UX sprint additions
     async def set_fills_fields(self, updates: dict[str, dict]) -> int:

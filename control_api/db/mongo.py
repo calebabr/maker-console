@@ -87,6 +87,16 @@ class MongoStore(Store):
                                                      name="ts_ttl")
         await self._c(S.QUOTE_EPISODES).create_index([("status", ASCENDING), ("env", ASCENDING), ("ts", DESCENDING)],
                                                      name="status_env_ts")
+        eps = self._c(S.SHADOW_EPISODES)
+        await eps.create_index([("ts", ASCENDING)], expireAfterSeconds=S.SHADOW_RETENTION_SECONDS, name="ts_ttl")
+        await eps.create_index([("end_ts", ASCENDING), ("join_ts", DESCENDING)], name="open_join")
+        await eps.create_index([("trades_read", ASCENDING), ("end_ts", ASCENDING)], name="ended_unread")
+        await eps.create_index([("result", ASCENDING), ("settle_checked_ts", ASCENDING), ("close_time", ASCENDING)],
+                               name="unsettled_rotation")
+        await eps.create_index([("settled_ts", ASCENDING)], name="settled_ts")
+        await eps.create_index([("join_ts", DESCENDING)], name="join_ts_desc")
+        await self._c(S.SHADOW_PASSES).create_index([("ts", ASCENDING)],
+                                                    expireAfterSeconds=S.SHADOW_RETENTION_SECONDS, name="ts_ttl")
         await self._c(S.ALERT_HISTORY).create_index([("ts", ASCENDING)], expireAfterSeconds=S.ALERT_RETENTION_SECONDS,
                                                     name="ts_ttl")
         await self._c(S.ALERT_HISTORY).create_index([("type", ASCENDING), ("ts", DESCENDING)], name="type_ts")
@@ -313,6 +323,77 @@ class MongoStore(Store):
             q["status"] = status
         proj = NO_ID if fields is None else {"_id": 0, **{str(f): 1 for f in fields}}
         return await self._c(S.QUOTE_EPISODES).find(q, proj).sort(NEWEST).limit(int(limit)).to_list()
+
+    # ---- shadow mode
+    async def shadow_upsert_episodes(self, docs: list[dict]) -> int:
+        ops = []
+        for d in docs:
+            doc = S.prepare_shadow_episode(d)
+            update: dict = {"$set": doc}
+            if "ts" not in doc:                              # partial update: ts is set once, when created
+                update["$setOnInsert"] = {"ts": S.utcnow()}
+            ops.append(UpdateOne({"_id": doc["ep_id"]}, update, upsert=True))
+        if not ops:
+            return 0
+        res = await self._c(S.SHADOW_EPISODES).bulk_write(ops, ordered=True)
+        return res.upserted_count
+
+    async def _shadow_find(self, q: dict, sort: list, limit: int | None,
+                           fields: Iterable[str] | None = None) -> list[dict]:
+        proj = NO_ID if fields is None else {"_id": 0, "ep_id": 1, **{str(f): 1 for f in fields}}
+        cur = self._c(S.SHADOW_EPISODES).find(q, proj).sort(sort)
+        if limit is not None:
+            if limit <= 0:
+                return []
+            cur = cur.limit(int(limit))
+        return await cur.to_list()
+
+    async def shadow_open_episodes(self, *, fields: Iterable[str] | None = None,
+                                   limit: int | None = None) -> list[dict]:
+        return await self._shadow_find({"end_ts": None}, [("join_ts", ASCENDING)], limit, fields)
+
+    async def shadow_ended_unread(self, limit: int) -> list[dict]:
+        return await self._shadow_find({"end_ts": {"$ne": None}, "trades_read": {"$ne": True}},
+                                       [("end_ts", ASCENDING)], limit)
+
+    async def shadow_unsettled(self, now: datetime, limit: int) -> list[dict]:
+        return await self._shadow_find({"result": None, "close_time": {"$ne": None, "$lte": S.norm_dt(now)}},
+                                       [("settle_checked_ts", ASCENDING), ("close_time", ASCENDING)], limit)
+
+    async def shadow_settled(self, since: datetime, *, fields: Iterable[str] | None = None,
+                             limit: int | None = None, scored_only: bool = False) -> list[dict]:
+        q: dict = {"result": {"$ne": None}, "settled_ts": {"$gte": S.norm_dt(since)}}
+        if scored_only:
+            q = {"result": {"$in": list(S.SHADOW_SCORED_RESULTS)}, "fill": {"$ne": None},
+                 "settled_ts": {"$gte": S.norm_dt(since)}}
+        if limit is None:
+            return await self._shadow_find(q, [("settled_ts", ASCENDING)], None, fields)
+        return await self._shadow_find(q, [("settled_ts", DESCENDING)], limit, fields)
+
+    async def shadow_recent(self, limit: int, state: str | None = None) -> list[dict]:
+        q = {None: {}, "open": {"end_ts": None}, "ended": {"end_ts": {"$ne": None}, "result": None},
+             "settled": {"result": {"$ne": None}}}
+        if state not in q:
+            raise ValueError(f"unknown shadow state {state!r}")
+        return await self._shadow_find(q[state], [("join_ts", DESCENDING)], limit)
+
+    async def shadow_count_new_since(self, ts: datetime) -> int:
+        return await self._c(S.SHADOW_EPISODES).count_documents({"join_ts": {"$gte": S.norm_dt(ts)}})
+
+    async def add_shadow_pass(self, doc: dict) -> None:
+        await self._c(S.SHADOW_PASSES).insert_one(S.prepare_shadow_pass(doc))
+
+    async def shadow_recent_passes(self, limit: int) -> list[dict]:
+        if limit <= 0:
+            return []
+        return await self._c(S.SHADOW_PASSES).find({}, NO_ID).sort(NEWEST).limit(int(limit)).to_list()
+
+    async def get_shadow_summary(self) -> dict | None:
+        return await self._c(S.META).find_one({"_id": S.SHADOW_SUMMARY_ID}, NO_ID)
+
+    async def set_shadow_summary(self, doc: dict) -> None:
+        body = S.strip_id(S.normalize(doc))
+        await self._c(S.META).replace_one({"_id": S.SHADOW_SUMMARY_ID}, body, upsert=True)
 
     # ---- UX sprint additions
     async def set_fills_fields(self, updates: dict[str, dict]) -> int:

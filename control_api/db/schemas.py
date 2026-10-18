@@ -29,6 +29,8 @@ AUDIT_LOG = "audit_log"
 USERS = "users"
 REVOKED_TOKENS = "revoked_tokens"
 SETTLEMENTS = "settlements"
+SHADOW_EPISODES = "shadow_episodes"
+SHADOW_PASSES = "shadow_passes"
 ARB_OPPORTUNITIES = "arb_opportunities"
 QUOTE_EPISODES = "quote_episodes"
 ALERT_HISTORY = "alert_history"
@@ -47,7 +49,8 @@ PENDING_RELEASE_TTL_SECONDS = 30 * 60     # a pending release can be approved fo
 RELEASE_DECISIONS = ("approved", "rejected")
 COLLECTIONS = (STATE, CLOUD_SETTINGS, CONFIG_VERSIONS, HEARTBEATS, JOURNAL_ROWS, ACCOUNT_SNAPSHOTS,
                FILLS, MONITOR_SUMMARIES, AUDIT_LOG, USERS, REVOKED_TOKENS, SETTLEMENTS, ARB_OPPORTUNITIES,
-               QUOTE_EPISODES, ALERT_HISTORY, PUSH_SUBSCRIPTIONS, RUNNER_LEASE, HANDOVER_NONCES, META, RELEASES)
+               QUOTE_EPISODES, ALERT_HISTORY, PUSH_SUBSCRIPTIONS, RUNNER_LEASE, HANDOVER_NONCES, META, RELEASES,
+               SHADOW_EPISODES, SHADOW_PASSES)
 
 # Alert history (UX sprint item 37): one small doc per alert the system sent (ntfy and/or web push).
 # No secrets (title/body are redacted before they get here); body capped at ALERT_BODY_MAX chars.
@@ -97,6 +100,20 @@ QUOTE_EPISODE_IMMUTABLE = ("order_id", "ts", "env", "series", "ticker", "side", 
 # time was known gets it once from Store.set_quote_episode_close_time (writes only while the field is missing).
 CLOSE_TIME = "close_time"
 
+# Shadow mode (services/shadow.py): hypothetical bids ("episodes") and one doc per cycle ("passes"), both with a
+# 30-day TTL on ts. Episode _id = ep_id (sha256 hex), so a write is an idempotent upsert. The cached summary
+# lives in the meta collection under SHADOW_SUMMARY_ID (no TTL, one doc). Worst case ~1,500 episodes/day
+# (SHADOW_DAILY_NEW_CAP) x ~1 KB = ~45 MB + indexes at 30 days; passes are ~0.3 KB x ~100/day.
+SHADOW_RETENTION_DAYS = 30
+SHADOW_RETENTION_SECONDS = SHADOW_RETENTION_DAYS * 24 * 3600
+SHADOW_SUMMARY_ID = "shadow_summary"
+SHADOW_STATES = ("open", "ended", "settled")
+SHADOW_DATE_FIELDS = ("ts", "join_ts", "last_seen_ts", "end_ts", "through_ts", "close_time", "settled_ts",
+                      "settle_checked_ts")
+# result: "yes" | "no" | "void" (SH-1: a market closed without a yes/no result; excluded from the estimate) | None
+SHADOW_RESULTS = ("yes", "no", "void")
+SHADOW_SCORED_RESULTS = ("yes", "no")
+
 # Defaults/ranges for cloud_settings (see DASHBOARD_PLAN.md "Keep-awake"). The API validates ranges;
 # the store only persists. Exposed here so backend/seed share one source.
 DEFAULT_CLOUD_SETTINGS = {
@@ -106,6 +123,7 @@ DEFAULT_CLOUD_SETTINGS = {
     "silent_alert_minutes": 30,
     "cronjob_job_id": None,
     "pinger_sync": {"ok": None, "ts": None, "error": None},
+    "shadow_enabled": False,            # shadow mode: read-only estimate of what the strategy would bid
 }
 
 # Fields the store never accepts (secrets must never reach the database).
@@ -287,6 +305,30 @@ def prepare_quote_episode(doc: dict) -> dict:
     out = prepare_ts_doc(doc, ts_fallbacks=("joined_utc",))
     out["order_id"] = str(doc["order_id"])
     return _close_time_field(out)
+
+
+def prepare_shadow_episode(doc: dict) -> dict:
+    """shadow_episodes doc: normalised copy keyed on ep_id (str, required). Date fields become aware UTC
+    datetimes (an explicit null stays null: end_ts / settled_ts null is meaningful). `ts` (the TTL clock) is
+    taken from ts, else join_ts; when neither is given it is left out so a partial update never moves it."""
+    if not doc.get("ep_id"):
+        raise ValueError("shadow episode without ep_id")
+    out = normalize(dict(doc))
+    out.pop("_id", None)
+    out["ep_id"] = str(doc["ep_id"])
+    for f in SHADOW_DATE_FIELDS:
+        if out.get(f) is not None:
+            out[f] = _safe_to_utc(out[f])
+    if out.get("ts") is None:
+        out.pop("ts", None)
+        if out.get("join_ts") is not None:
+            out["ts"] = out["join_ts"]
+    return out
+
+
+def prepare_shadow_pass(doc: dict) -> dict:
+    """shadow_passes doc: normalised copy with ts (given, else now)."""
+    return prepare_ts_doc(doc)
 
 
 def prepare_alert(doc: dict) -> dict:
