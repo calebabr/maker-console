@@ -19,6 +19,7 @@ const DEFAULT_SCHEMA = {
   keepalive_minutes: { type: 'integer', unit: 'minutes', min: 1, max: 14, help: 'Self-ping: the service calls its own /healthz.' },
   pinger_minutes: { type: 'integer', unit: 'minutes', min: 1, max: 14, help: 'External cron-job.org job calling POST /api/tick.' },
   pinger_enabled: { type: 'bool', help: 'Enable the external pinger.' },
+  shadow_enabled: { type: 'bool', label: 'Shadow Estimate', help: 'Simulate the strategy from public market data. No orders are placed. Results appear under More, Shadow estimate.' },
   silent_alert_minutes: { type: 'integer', unit: 'minutes', min: 15, max: 240, help: 'ntfy alert if no heartbeat for this long.' },
 };
 const INTERVAL_KEYS = ['keepalive_minutes', 'pinger_minutes'];
