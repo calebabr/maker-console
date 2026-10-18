@@ -79,7 +79,7 @@ describe('More page', () => {
     const nav = await screen.findByRole('navigation', { name: 'More pages' });
     const links = within(nav).getAllByRole('link');
     expect(links.map((l) => l.getAttribute('href'))).toEqual([
-      '/health', '/settings', '/account', '/alerts', '/mode', '/server', '/logs', '/arb', '/terminology',
+      '/health', '/settings', '/account', '/alerts', '/mode', '/server', '/logs', '/arb', '/shadow', '/terminology',
     ]);
     expect(links.map((l) => within(l).getByText(/./, { selector: '.menu-label' }).textContent)).toEqual(
       MORE_ROUTES.map((r) => r.label),
@@ -117,7 +117,7 @@ describe('sidebar (>= 1024 px)', () => {
     const links = within(side).getAllByRole('link');
     expect(links.map((l) => l.textContent)).toEqual([
       'Overview', 'Analytics', 'Activity', 'Markets',
-      'Health', 'Settings', 'Account', 'Alerts', 'Mode', 'Server', 'Logs', 'Arbitrage', 'Terminology',
+      'Health', 'Settings', 'Account', 'Alerts', 'Mode', 'Server', 'Logs', 'Arbitrage', 'Shadow Estimate', 'Terminology',
     ]);
     expect(within(side).getByRole('link', { name: 'Overview' })).toHaveClass('active');
     expect(within(side).getByRole('button', { name: /sign out/i })).toBeInTheDocument();

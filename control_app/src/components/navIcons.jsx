@@ -18,6 +18,7 @@ const ICONS = {
   '/server': IconServer,
   '/logs': IconLogs,
   '/arb': IconArb,
+  '/shadow': IconAnalytics,
   '/terminology': IconBook,
 };
 

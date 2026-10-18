@@ -56,6 +56,7 @@ const CLOUD_SCHEMA = {
   keepalive_minutes: { type: 'integer', unit: 'minutes', min: 1, max: 14, help: 'Self-ping interval (service calls its own /healthz).' },
   pinger_minutes: { type: 'integer', unit: 'minutes', min: 1, max: 14, help: 'External cron-job.org job calling POST /api/tick.' },
   pinger_enabled: { type: 'bool', help: 'Enable the external cron-job.org pinger.' },
+  shadow_enabled: { type: 'bool', label: 'Shadow Estimate', help: 'Simulate the strategy from public market data. No orders are placed.' },
   silent_alert_minutes: { type: 'integer', unit: 'minutes', min: 15, max: 240, help: 'Send an ntfy alert if no heartbeat for this long.' },
 };
 
@@ -253,7 +254,7 @@ function initialState() {
     journal: seedJournal(),
     summary,
     report: reportText(summary),
-    cloud: { keepalive_minutes: 10, pinger_minutes: 5, pinger_enabled: true, silent_alert_minutes: 30 },
+    cloud: { keepalive_minutes: 10, pinger_minutes: 5, pinger_enabled: true, silent_alert_minutes: 30, shadow_enabled: true },
     pinger: { configured: true, job_id: 5813377, synced: true, last_sync_utc: iso(now() - 2 * 60 * MIN), error: null },
     keepalive: { last_ping_utc: iso(now() - 3 * MIN), ok: true, error: null },
     // Release process (docs/RELEASE_CONTRACT.md section 3). Scenario names: standby, release-expired,
@@ -527,6 +528,49 @@ function validateConfig(next) {
     if (bad.length) errs.push(`unknown series: ${bad.join(', ')}`);
   }
   return errs;
+}
+
+const SHADOW_NOTES = [
+  'Our own orders would move the queue; the model ignores that impact.',
+  'Queue changes between checks are hidden, so fills are shown as a range.',
+  'Cash limits are not modelled in v1.',
+  'Outages and rejected orders are not modelled.',
+  'Small sample: the range is wide until many episodes settle.',
+];
+
+function shadowSummary() {
+  if (!S.cloud.shadow_enabled) {
+    return { enabled: false, standin: true, status: { days_covered: 0, settled_episodes: 0, central_fills: 0, too_early: true, last_pass_ts: null, pass_ok_pct: null, truncated: false }, headline: null, by_series: [], by_cell: [], daily: [], fee_mode: 'maker', caveats: SHADOW_NOTES };
+  }
+  const day0 = Date.UTC(2026, 9, 1);
+  const daily = [];
+  let lo = 0, mid = 0, hi = 0;
+  for (let i = 0; i < 14; i++) {
+    lo += 0.2 + (i % 3) * 0.1; mid += 0.5 + (i % 4) * 0.15; hi += 0.9 + (i % 3) * 0.2;
+    daily.push({ day: new Date(day0 + i * 86400000).toISOString().slice(0, 10), cum_lo: +lo.toFixed(2), cum_mid: +mid.toFixed(2), cum_hi: +hi.toFixed(2) });
+  }
+  const zero = { pnl: { lo: 3.6, mid: 9.2, hi: 16.8, ci90: [2.1, 17.4] }, roi: { lo: 0.006, mid: 0.012, hi: 0.019, ci90: [0.004, 0.02] }, fill_rate: { lo: 0.18, mid: 0.31, hi: 0.44 }, peak_capital: 412 };
+  return {
+    enabled: true,
+    standin: true,
+    status: { days_covered: 14, settled_episodes: 58, central_fills: 41.5, too_early: false, last_pass_ts: iso(now() - 4 * MIN), pass_ok_pct: 0.98, truncated: false },
+    headline: { pnl: { lo: 3.1, mid: 8.4, hi: 15.9, ci90: [1.6, 16.5] }, roi: { lo: 0.005, mid: 0.011, hi: 0.018, ci90: [0.003, 0.019] }, fill_rate: zero.fill_rate, peak_capital: zero.peak_capital },
+    headline_zero_fee: zero,
+    by_series: SERIES.slice(0, 3).map((s, i) => ({ series: s, episodes: 20 - i * 4, fills_mid: 14 - i * 3, pnl: { lo: 1 + i, mid: 3 + i, hi: 6 + i } })),
+    by_cell: [
+      { cell: ['DEMO-CELL-1'], episodes: 30, fills_mid: 20, pnl: { lo: 1.2, mid: 4.1, hi: 8 } },
+      { cell: ['DEMO-CELL-2'], episodes: 28, fills_mid: 21.5, pnl: { lo: 1.9, mid: 4.3, hi: 7.9 } },
+    ],
+    daily,
+    fee_mode: 'maker',
+    caveats: SHADOW_NOTES,
+  };
+}
+
+function shadowEpisodes() {
+  return Array.from({ length: 8 }, (_, i) => ({
+    id: `ep-${i + 1}`, ticker: `${SERIES[0]}-26OCT${10 + i}-DEMO`, state: i < 6 ? 'settled' : 'open', price: 0.4, count: 5, fills_mid: 3, pnl_mid: i < 6 ? 0.3 : null,
+  }));
 }
 
 function cloudResponse() {
@@ -824,6 +868,11 @@ async function route(method, url, headers, body) {
     return reply(200, cloudResponse());
   }
 
+  if (method === 'GET' && p === '/api/shadow/summary') return reply(200, shadowSummary());
+  if (method === 'GET' && p === '/api/shadow/episodes') {
+    const limit = Math.min(500, parseInt(q.get('limit') || '50', 10) || 50);
+    return reply(200, { episodes: shadowEpisodes().slice(0, limit) });
+  }
   if (method === 'GET' && p === '/api/arb') return reply(200, arbResponse());
   if (method === 'GET' && p === '/api/arb/opportunities') {
     const limit = Math.min(1000, parseInt(q.get('limit') || '100', 10) || 100);

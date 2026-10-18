@@ -5,7 +5,7 @@ import { login, nav } from './helpers.js';
 // past the 16 px gutters. `.shell` uses overflow-x: clip, so document scrollWidth alone cannot see a clipped
 // overflow; this also measures every element's box (skipping ones inside their own horizontal scroller).
 
-const PAGES = ['Overview', 'Analytics', 'Activity', 'Markets', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Arbitrage', 'Terminology'];
+const PAGES = ['Overview', 'Analytics', 'Activity', 'Markets', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Arbitrage', 'Shadow Estimate', 'Terminology'];
 
 async function audit(page) {
   return page.evaluate(() => {

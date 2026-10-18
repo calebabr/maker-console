@@ -374,6 +374,10 @@ export const api = {
   // Server / keep-awake
   getCloud: () => request('GET', '/api/cloud'),
   putCloud: (patch, code) => request('PUT', '/api/cloud', { body: patch, code }),
+  // Shadow estimate (docs/SHADOW_CONTRACT.md): simulated, read only, no orders. Never 2FA.
+  getShadowSummary: () => request('GET', '/api/shadow/summary'),
+  getShadowEpisodes: ({ limit = 50, state } = {}) =>
+    request('GET', `/api/shadow/episodes?limit=${encodeURIComponent(limit)}${state ? `&state=${encodeURIComponent(state)}` : ''}`),
   syncPinger: (code) => request('POST', '/api/cloud/pinger/sync', { code }),
 
   // Release approval (docs/RELEASE_CONTRACT.md section 3). Never cached: a stale approval card would mislead.

@@ -21,6 +21,7 @@ import Mode from './pages/Mode.jsx';
 import Server from './pages/Server.jsx';
 import Logs from './pages/Logs.jsx';
 import Arbitrage from './pages/Arbitrage.jsx';
+import Shadow from './pages/Shadow.jsx';
 import Terminology from './pages/Terminology.jsx';
 import Analytics from './pages/Analytics.jsx';
 import More from './pages/More.jsx';
@@ -53,6 +54,7 @@ function SignedIn() {
               <Route path="/server" element={<Server />} />
               <Route path="/logs" element={<Logs />} />
               <Route path="/arb" element={<Arbitrage />} />
+              <Route path="/shadow" element={<Shadow />} />
               <Route path="/terminology" element={<Terminology />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/more" element={<More />} />

@@ -21,6 +21,7 @@ export const ROUTE_TITLES = [
   { path: '/server', title: 'Server' },
   { path: '/logs', title: 'Logs' },
   { path: '/arb', title: 'Arbitrage' },
+  { path: '/shadow', title: 'Shadow Estimate' },
   { path: '/terminology', title: 'Terminology' },
 ];
 
@@ -43,6 +44,7 @@ export const MORE_ROUTES = [
   { path: '/server', label: 'Server', blurb: 'Keep-awake pings and the external pinger' },
   { path: '/logs', label: 'Logs', blurb: 'Server log and audit trail' },
   { path: '/arb', label: 'Arbitrage', blurb: 'The bracket arbitrage scanner' },
+  { path: '/shadow', label: 'Shadow Estimate', blurb: 'Simulated results of the strategy, no orders' },
   { path: '/terminology', label: 'Terminology', blurb: 'Plain-language glossary' },
 ];
 

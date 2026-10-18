@@ -20,6 +20,8 @@ CLOUD_FIELDS = {
                        "help": "Enable the external cron-job.org job."},
     "silent_alert_minutes": {"type": "integer", "unit": "minutes", "min": 15, "max": 240,
                              "help": "Alert if no heartbeat for this long."},
+    "shadow_enabled": {"type": "boolean", "unit": None, "min": None, "max": None,
+                       "help": "Shadow mode: record what the strategy would bid (read only, places no orders)."},
 }
 
 
