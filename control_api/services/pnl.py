@@ -107,6 +107,11 @@ def realised_by_source(fills: Iterable[dict], settlements: Iterable[dict], *, si
         key = "you" if src == "you" else (strat or "maker")
         sums[key] = sums.get(key, 0.0) + p
         n += 1
+    return _package(sums, n)
+
+
+def _package(sums: dict[str, float], n: int) -> dict:
+    from .strategies import bucket_ids
     out: dict = {k: (round(sums[k], 2) if k in sums else None) for k in bucket_ids()}
     for k in sums:                                  # a strategy id no longer in the registry still counts
         out.setdefault(k, round(sums[k], 2))
@@ -115,6 +120,32 @@ def realised_by_source(fills: Iterable[dict], settlements: Iterable[dict], *, si
     out["total"] = round(sum(sums.values()), 2) if sums else None
     out["settled_fills"] = n
     return out
+
+
+def realised_for_fills(fills: Iterable[dict], settlements: Iterable[dict], *, env: str | None = None) -> dict:
+    """Same output as realised_by_source, but attributed by FILL date: the caller passes only the fills that belong
+    to the window (a period), and a fill counts once its market has a yes/no settlement whenever that happened.
+    A fill's P&L follows the fill, not the settlement date (Sprint 2A-1 period attribution)."""
+    from .strategies import fill_label
+    res = {}
+    for s in settlements:
+        t, r = s.get("ticker"), s.get("market_result") or s.get("result")
+        if t and r in ("yes", "no"):
+            res[t] = r
+    sums: dict[str, float] = {}
+    n = 0
+    for f in fills:
+        if env and f.get("env") and f.get("env") != env:
+            continue
+        r = res.get(f.get("ticker") or f.get("market_ticker"))
+        p = fill_pnl(f, r) if r else None
+        if p is None:
+            continue
+        src, strat = fill_label(f)
+        key = "you" if src == "you" else (strat or "maker")
+        sums[key] = sums.get(key, 0.0) + p
+        n += 1
+    return _package(sums, n)
 
 
 FILL_FIELDS = ("fill_id", "ts", "ticker", "market_ticker", "side", "outcome_side", "yes_price_dollars",
@@ -135,6 +166,18 @@ async def by_source_since(store, since: datetime, *, env: str | None = None, unt
         return realised_by_source([], [], since=since, until=until, env=env), [], []
     fills = await store.list_fills(since=since - FILL_LOOKBACK, limit=50000, fields=FILL_FIELDS)
     return realised_by_source(fills, settlements, since=since, until=until, env=env), settlements, fills
+
+
+async def by_source_for_fills(store, since: datetime, until: datetime | None = None, *,
+                              env: str | None = None) -> dict:
+    """Realised P&L by source of the fills filled in [since, until), whenever their markets settled. Bounded,
+    projected reads. Raises on store errors (callers wrap it)."""
+    fills = await store.list_fills(since=since, until=until, limit=50000, fields=FILL_FIELDS)
+    if not fills:
+        return realised_for_fills([], [], env=env)
+    settlements = await store.list_settlements(since=since, limit=20000,
+                                               fields=("ticker", "market_result", "result", "ts"))
+    return realised_for_fills(fills, settlements, env=env)
 
 
 async def compute(store, now: datetime, *, taker: bool = False, env: str | None = None) -> dict | None:

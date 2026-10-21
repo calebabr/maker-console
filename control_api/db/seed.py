@@ -213,6 +213,25 @@ async def seed(store: Store, *, now: datetime | None = None, rng_seed: int = 7) 
                                "ua": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)"})
     counts["audit_log"] = len(audit)
 
+    # periods and cash flows: one marker 10 days ago (starts "Demo Period 2"), a deposit and a withdrawal.
+    # Fixed ids, so re-seeding is a no-op for these (a duplicate id raises ValueError, which is skipped).
+    n_period = n_flow = 0
+    try:
+        await store.add_period({"id": "seed-p2", "name": "Demo Period 2", "started_at": now - timedelta(days=10),
+                                "note": "Risk gate on", "created_by": "owner"})
+        n_period += 1
+    except ValueError:
+        pass
+    for fid, kind, amount, days, note in (("seed-cf1", "deposit", 100.0, 20, "Initial demo funding"),
+                                          ("seed-cf2", "withdrawal", 25.0, 4, None)):
+        try:
+            await store.add_cash_flow({"id": fid, "ts": now - timedelta(days=days), "kind": kind,
+                                       "amount": amount, "note": note, "created_by": "owner"})
+            n_flow += 1
+        except ValueError:
+            pass
+    counts["periods"], counts["cash_flows"] = n_period, n_flow
+
     # analytics (GET /api/analytics/*): ~90 days of in-cell maker fills, a few taker fills, quote episodes,
     # fill quality and executed arb sets. Separate RNG, so the sections above are unchanged.
     for k, v in (await _seed_analytics(store, now, cfg, rng_seed)).items():

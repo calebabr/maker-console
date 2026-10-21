@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Card from '../components/Card.jsx';
 import FoldCard from '../components/FoldCard.jsx';
@@ -6,6 +6,7 @@ import StatusCard from '../components/StatusCard.jsx';
 import StatusWidget from '../components/StatusWidget.jsx';
 import SinceCard from '../components/SinceCard.jsx';
 import SourcePnl from '../components/SourcePnl.jsx';
+import PeriodSelect from '../components/PeriodSelect.jsx';
 import Sparkline from '../components/Sparkline.jsx';
 import PnlStats from '../components/PnlStats.jsx';
 import FillQuality from '../components/FillQuality.jsx';
@@ -69,8 +70,35 @@ export default function Overview() {
   const strategies = useResource(() => api.getStrategies(), '/api/strategies');
   const positions = useResource(() => getPositions(), '/api/account/positions');
   const edge = useResource(() => api.analyticsSummary({ days: 30 }), '/api/analytics/summary?days=30');
+  const periods = useResource(() => api.getPeriods(), '/api/periods');
+  const [period, setPeriod] = useState('all');
+  const [bySource, setBySource] = useState(null);
   const [busy, setBusy] = useState(null);
   const cardRef = useRef(null);
+
+  // The At Risk numbers come from /api/status (polled), the Bot/You split from the positions list: refetch the
+  // positions on every status refresh so the two never disagree for up to a whole session.
+  const reloadPositions = positions.reload;
+  useEffect(() => {
+    if (updatedAt && !stale) reloadPositions();
+  }, [updatedAt, stale, reloadPositions]);
+
+  // A chosen period swaps "today" for that period's realised P&L by source (attributed by fill date).
+  useEffect(() => {
+    if (period === 'all') {
+      setBySource(null);
+      return undefined;
+    }
+    let alive = true;
+    api
+      .getPnlBySource({ period })
+      .then((r) => alive && setBySource((r && r.by_source) || null))
+      .catch(() => alive && setBySource(null));
+    return () => {
+      alive = false;
+    };
+  }, [period]);
+  const periodList = (periods.data && periods.data.periods) || [];
 
   const a = status && status.account;
   const limit = riskLimit(status);
@@ -183,7 +211,13 @@ export default function Overview() {
               <p className="hint error-text">Fill sync failed {formatAgo(status.fills_sync.last_utc)}: {String(status.fills_sync.error)}</p>
             )}
             <h3 className="subhead">By Source</h3>
-            <SourcePnl pnlToday={status.pnl_today} strategies={strategies.data} positions={positions.data} />
+            {periodList.length > 1 && <PeriodSelect periods={periodList} value={period} onChange={setPeriod} />}
+            <SourcePnl
+              pnlToday={period === 'all' ? status.pnl_today : bySource}
+              strategies={strategies.data}
+              positions={positions.data}
+              totalLabel={period === 'all' ? 'Total Today' : 'Total'}
+            />
             {equity.length > 1 && (
               <>
                 <Sparkline

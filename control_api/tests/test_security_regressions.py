@@ -89,6 +89,7 @@ def _expected_2fa():
         ("POST", "/api/auth/logout-all"),
         ("PUT", "/api/alerts/settings"), ("POST", "/api/config/undo"),
         ("POST", "/api/release/pending/{release_id}/approve"),
+        ("POST", "/api/periods"), ("POST", "/api/cash-flows"), ("DELETE", "/api/cash-flows/{flow_id}"),
     }
 
 

@@ -667,3 +667,6 @@ html, body { overscroll-behavior-y: contain; }
   .ptr-arrow { transition: none; }
   .ptr-spinner.spin { animation: none; border-right-color: var(--accent); }
 }
+
+.pill-demo { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.row-demo { border-left: 2px solid var(--accent); padding-left: 8px; }

@@ -42,6 +42,8 @@ Database name: `kalshi_control` (`MONGODB_DB`). The URI comes only from `setting
 | `runner_lease` | Single doc `_id:"leader"`: `holder, version, generation, expires_at, acquired_at, handover`. Changed only by filtered `find_one_and_update` (renew if holder matches; take over if expired with `$inc generation`) or a unique-`_id` insert, never read-modify-write. `generation` rises only when the holder changes or the lease is created. | none |
 | `handover_nonces` | `{nonce, ts}`: a consumed signed-handover nonce (replay guard). `consume_handover` is one insert. | unique `nonce`; TTL 1 h on `ts` |
 | `meta` | Single doc `_id:"schema"`: `version` (int, `SCHEMA_VERSION = 1`), `updated_utc`. | none |
+| `periods` | `{id, name (1-60), started_at, note? (<= 200), created_by}`. Append-only performance-period markers; a marker is the period that STARTS at `started_at`. Period 1 (`id "p1"`) is implicit: never stored, and the id is reserved. `list_periods()` returns the stored markers oldest first. Additive change, so `SCHEMA_VERSION` stays 1. | unique `id`; `started_at` asc; no TTL |
+| `cash_flows` | `{id, ts, kind deposit\|withdrawal, amount (0 < x <= 100000), note? (<= 200), created_by}`. Deposits and withdrawals are recorded beside P&L, never netted into it. `list_cash_flows(since, until)` is `since <= ts < until`, newest first; `delete_cash_flow(id)` undoes a typo. | unique `id`; `ts` desc; no TTL |
 | `releases` | `{id, version, commit, summary, ci, status pending\|approved\|rejected, created_at, expires_at (+30 min), by?, at?}`. `resolve_pending_release` is one filtered `find_one_and_update` (pending and unexpired only). | unique `id`; TTL 30 d on `created_at` |
 
 `row_hash(row)` is the sha1 of the 9 CSV fields: each value is passed through `str()`, a missing field becomes `''`, and the values are joined with `\x1f` in CSV column order. A row read twice from the CSV always hashes the same, so `add_journal_rows` is idempotent and returns only the count of new rows. `upsert_fills` returns the count of **new** fills; fills that already exist are updated in place.
@@ -58,6 +60,7 @@ These numbers are uncompressed and include indexes. WiredTiger compression makes
 | fills | ~400 B | tens/day | <3 MB |
 | settlements | ~300 B | ~10/day | <1 MB |
 | arb_opportunities | ~700 B | a few/day (sightings are collapsed, so a stale book that is re-seen every 15 s keeps one doc) | <2 MB; worst case, if the book changes every poll: 5,760/day, which is 4 MB/day, about 180 MB at the 45-day TTL |
+| periods, cash_flows | ~250 B | a handful per month (no TTL) | <0.1 MB/yr |
 | audit_log | ~300 B | <100/day (no TTL) | ~5 MB/yr |
 | config_versions, monitor_summaries, others | KB | rare | <1 MB |
 

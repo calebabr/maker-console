@@ -125,3 +125,15 @@ async def test_monitor_summary_last(store):
 
 async def test_ping(store):
     assert await store.ping() is True
+
+
+async def test_memory_state_stamp_strictly_increases_within_one_millisecond(monkeypatch):
+    """Two state writes in the same millisecond must carry different stamps: the runner tells a changed state doc by
+    its stamp, so a tie would hide a Stop written by another instance (seen on a fast Linux CI runner)."""
+    from control_api.db import schemas as S
+    fixed = S.utcnow()
+    monkeypatch.setattr(S, "utcnow", lambda: fixed)
+    store = MemoryStore()
+    a = await store.set_state(by="owner", desired="running")
+    b = await store.set_state(by="owner", desired="stopped")
+    assert b["updated_utc"] > a["updated_utc"]

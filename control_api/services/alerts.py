@@ -38,6 +38,7 @@ _TITLE_TYPES = (
     ("Trading pass error", "error"), ("No heartbeat", "error"), ("Monitor failed", "error"),
     ("Self-ping failed", "error"), ("Pinger sync failed", "error"),
     ("Arbitrage executed", "fill"),
+    ("Order errors", "error"), ("Trading paused by Kalshi", "error"),
 )
 
 

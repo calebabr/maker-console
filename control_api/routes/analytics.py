@@ -31,7 +31,9 @@ from ..auth.deps import current_user
 from ..auth.ratelimit import get_limiter
 from ..services import analytics as an
 from ..services import botfiles
+from ..services import periods as per
 from ..services import strategies as strat
+from .periods import window_for
 
 router = APIRouter(prefix="/api")
 STORE_TIMEOUT_S = 10.0
@@ -190,14 +192,33 @@ async def _journal_map(request: Request, start: datetime, now: datetime) -> tupl
     return {k: v[0] for k, v in m.items()}, jm["truncated"]
 
 
-async def _build(request: Request, env: str, days: int) -> tuple[dict, list[dict]]:
+async def _period(request: Request, days: int) -> tuple[int, dict | None]:
+    """(days, period) for the optional `period=<id|current|all>` filter (default all = unchanged behaviour). With a
+    period the rolling `days` is replaced by the smallest allowed value that reaches back to the period start, and
+    the figures are attributed by FILL date inside [started_at, ended_at)."""
+    p = await window_for(request, request.query_params.get("period"))
+    if p is None:
+        return days, None
+    return per.cover_days(p["started_at"], datetime.now(timezone.utc), an.DAYS_ALLOWED), p
+
+
+def _pkey(period: dict | None) -> tuple | None:
+    return None if period is None else (period["id"], per.iso(period["started_at"]), per.iso(period["ended_at"]))
+
+
+async def _build(request: Request, env: str, days: int, period: dict | None = None
+                 ) -> tuple[dict, list[dict]]:
     """Bounded, projected reads -> (summary, trade rows), computed on the dedicated executor. Runs under the gate."""
     store = request.app.state.store
     cells, series = _context(request)
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     start = since - an.LOOKBACK
-    fills, t1 = _capped(await _read(store.list_fills(since=start, limit=an.MAX_FILLS + 1,
+    until = None
+    if period is not None:                                    # fill-date attribution: no look-back needed
+        since = start = per.lookback_start(period["started_at"], now)
+        until = period["ended_at"]
+    fills, t1 = _capped(await _read(store.list_fills(since=start, until=until, limit=an.MAX_FILLS + 1,
                                                      fields=an.FILL_FIELDS)), an.MAX_FILLS)
     settl, t2 = _capped(await _read(store.list_settlements(since=start, limit=an.MAX_SETTLEMENTS + 1,
                                                            fields=an.SETTLEMENT_FIELDS)), an.MAX_SETTLEMENTS)
@@ -211,7 +232,8 @@ async def _build(request: Request, env: str, days: int) -> tuple[dict, list[dict
     def build() -> tuple[dict, list[dict]]:
         rows = an.trade_rows(fills, settl, eps, cells=cells, series_list=series, env=env, jcells=jcells)
         return an.summary(rows, eps, arbs, days=days, env=env, now=now, cells=cells, truncated=truncated,
-                          expectations=an.load_expectations(), jcells=jcells, series_list=series), rows
+                          expectations=an.load_expectations(), jcells=jcells, series_list=series,
+                          period=period), rows
     return await asyncio.get_running_loop().run_in_executor(_pool(), build)
 
 
@@ -233,9 +255,10 @@ def _pick(res: tuple[dict, list[dict]], want: str):
     return res[0] if want == "summary" else res[1]
 
 
-async def _dataset(request: Request, env: str, days: int, want: str):
-    """Cached summary (want="summary") or trade rows (want="rows") for (env, days); at most one build at a time."""
-    st, key = _state(request), (env, days)
+async def _dataset(request: Request, env: str, days: int, want: str, period: dict | None = None):
+    """Cached summary (want="summary") or trade rows (want="rows") for (env, days[, period]); at most one build at
+    a time."""
+    st, key = _state(request), (env, days, _pkey(period))
 
     def cached():
         hit = _cache(request).get(key) if want == "summary" else st["rows"].get(key)
@@ -263,7 +286,7 @@ async def _dataset(request: Request, env: str, days: int, want: str):
         st["inflight"][key] = fut
         t0 = _clock()
         try:
-            res = await _build(request, env, days)
+            res = await _build(request, env, days, period)
         except BaseException as e:
             fut.set_exception(e if isinstance(e, HTTPException) else HTTPException(503, "store_unavailable"))
             fut.exception()                                   # mark retrieved (no "never retrieved" warning)
@@ -283,7 +306,8 @@ async def analytics_summary(request: Request, user: dict = Depends(current_user)
     q = request.query_params
     days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
-    return await _dataset(request, env, days, "summary")
+    days, period = await _period(request, days)
+    return await _dataset(request, env, days, "summary", period)
 
 
 def _filters(request: Request) -> tuple[int, str, dict]:
@@ -316,9 +340,13 @@ def _filters(request: Request) -> tuple[int, str, dict]:
 
 
 async def _hits(request: Request, days: int, env: str, flt: dict) -> list[dict]:
-    rows = await _dataset(request, env, days, "rows")
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    return an.filter_trades(rows, since=since, **flt)         # a filter over cached rows (no store read)
+    days, period = await _period(request, days)
+    rows = await _dataset(request, env, days, "rows", period)
+    since, until = datetime.now(timezone.utc) - timedelta(days=days), None
+    if period is not None:                                    # attributed by fill date inside the period
+        since = period["started_at"] or datetime(1970, 1, 1, tzinfo=timezone.utc)
+        until = period["ended_at"]
+    return an.filter_trades(rows, since=since, until=until, **flt)   # a filter over cached rows (no store read)
 
 
 @router.get("/analytics/trades")
@@ -341,8 +369,9 @@ async def analytics_my_trades(request: Request, user: dict = Depends(current_use
     days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
     limit = _int("limit", q.get("limit"), 100, 1, 200)
-    rows = await _dataset(request, env, days, "rows")
-    return an.my_trades(rows, days=days, env=env, now=datetime.now(timezone.utc), limit=limit)
+    days, period = await _period(request, days)
+    rows = await _dataset(request, env, days, "rows", period)
+    return an.my_trades(rows, days=days, env=env, now=datetime.now(timezone.utc), limit=limit, period=period)
 
 
 NOTE_MAX = 200

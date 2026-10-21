@@ -49,6 +49,29 @@ It never raises. Start and arb-enable refuse with 409 `stop_in_progress` while S
 - `arb_max_contracts` <= `MAX_ARB_CONTRACTS`.
 A partial fill or an order error mid-set trips `ARB_KILL_SWITCH` ("legging"); the loop persists `arb_desired=stopped`, sends an urgent alert, and re-enabling needs `ack_legging`. Stop cannot interrupt a set already executing (cutting it off would itself create legging risk). A NO-arb holds its legs until the event settles, so capital is locked until settlement, and arb positions reduce maker headroom.
 
+**Account risk gate (arbitrage).** Every arbitrage execution, live or demo, passes `services/riskgate.check_arb` just before sending. `ceiling = max_open_frac x (cash + open exposure)`. A set is refused if: total exposure (maker + arbitrage) plus its cost exceeds the ceiling; the series' exposure plus its cost exceeds `arb_series_cap_frac` of the ceiling; this scan's spend exceeds `arb_scan_cap`; or today's (UTC) spend exceeds `arb_day_cap`. The gate fails closed: unreadable positions, unknown day spend, or any missing or non-finite input refuses the set. A refusal is logged as `executed = "skipped: gate <reason>"` and shown on the Arbitrage page. Day spend is kept in memory and, after a restart or leadership change, rebuilt from the store's executed arbitrage opportunities for the current UTC day (a server-side sum with no row limit); it never goes below what memory already holds. Repeated identical `skipped:` results are stored at most once per event and reason per hour. The strategy applies its own concentration limit on the maker side.
+
+| Arb setting | Default | Range |
+|---|---|---|
+| `arb_scan_cap` ($ per scan) | 15 | 1-100 |
+| `arb_day_cap` ($ per UTC day) | 45 | 1-500 |
+| `arb_series_cap_frac` (share of the ceiling, arbitrage only) | 0.35 | 0.05-0.9 |
+| `arb_demo_execute` | off | on/off |
+
+All four change only with fresh 2FA.
+
+**Arbitrage demo-execute.** With `arb_demo_execute` on, arbitrage running, `arb_mode` demo and the maker mode demo, sets that pass the gate are executed on the Kalshi DEMO exchange (client from `kalshi_factory("demo")`); scans read demo books. Opportunity docs carry `mode = "demo-execute"`, and the Arbitrage page and P&L label them demo (`pnl_demo_execute`), never mixed into live figures. Hard refusals, each re-checked immediately before sending and under the budget lock: never when the maker mode is live; never unless the client's base URL is a known demo URL (checked on the client, not only the mode name); never with live keys (a demo key id equal to the production key id is refused); never when stopped, stopping, shutting down, after a Stop since the scan, not the leader, or with the arb kill switch present. The legging kill switch is unchanged. The setting lives with the arb settings (versioned with the config), not in the state doc, because it never touches real money.
+
+**Order-error alerts.** After each trading pass the runner reads the strategy's write report. If any cancel or place failed it sends ONE grouped alert ("Order errors: N cancel, M place", high priority), at most one per 30 minutes; suppressed repeats are counted into the next alert. A "trading paused" report from Kalshi gets its own alert at most once an hour. The pass itself still counts as ok. Alert text holds counts and mode only. The latest report is in `/api/status` as `write_report`.
+
+**Start reloads config.** `POST /api/bot/start` re-reads and re-validates the stored config and clears a stale invalid-config error before setting desired=running. If the config is still invalid, Start returns 409 `invalid_config: <reasons>` and the bot stays stopped. Stop never reads config and is unaffected.
+
+**Shadow retry.** If a shadow cycle is skipped for a transient reason (not leader yet, lock busy, upstream read error), the loop retries within 60 s instead of waiting a full interval; a completed cycle sleeps the full interval.
+
+**Lease expiry.** The lease expiry shown by status follows each renew (it previously showed "due now").
+
+**Periods and cash flows.** Collections `periods` and `cash_flows` (see `control_api/db/README.md`). Period 1 ("Demo Period 1", id `p1`) is implicit: it starts at the beginning of data and ends at the first marker; each marker starts the next period. Money in or out is recorded as a cash-flow event beside P&L, never netted into it. Attribution is by FILL date: a fill in Period 1 that settles in Period 2 counts toward Period 1, and open positions stay with the period of their fill. Period reads are filters only; Stop never touches them. Store methods: `add_period`, `list_periods`, `add_cash_flow`, `list_cash_flows(since, until)`, `delete_cash_flow`, plus `arb_spend_since` (server-side sum of executed arbitrage spend).
+
 **Live gates snapshot (S-19).** Whether production keys and `KALSHI_LIVE_CONFIRM` are present is read once at startup into `Settings.prod_keys_present` / `live_confirm_ok`. `Runner.live_allowed()` reads only that snapshot, so a demo pass (which temporarily swaps env variables) can never make the gate look open. Arb execution re-checks it immediately before `arb_scanner.execute`. Changing the env on Render restarts the service, so the snapshot cannot go stale.
 
 **Fill quality.** After each pass's fills sync, `Runner.evaluate_fill_quality()` scores up to 8 maker fills (65 minutes to 3 days old) using the public `GET /markets/trades` endpoint (no keys, host fixed by environment, at most 24 calls per pass, under a total time budget). Results (`trade_through`, `move_60m_c`) are stored on the fill doc via `set_fill_fields`, and the aggregate (cached per pass) is returned in `/api/status` and `/api/markets` next to the optional market baseline (from the private benchmark file; null without it). Read-only, never raises, and not on the Stop path.

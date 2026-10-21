@@ -23,6 +23,10 @@ const ARB_SCHEMA = {
   arb_min_profit: { type: 'number', unit: 'USD per set, after fees', min: 0.01, max: 10, step: 0.01, help: 'Ignore opportunities that clear less than this after taker fees.' },
   arb_poll_seconds: { type: 'integer', unit: 'seconds', min: 5, max: 60, help: 'Scan interval. Faster catches more short windows but uses more of the read rate limit.' },
   arb_series: { type: 'list', unit: 'series tickers', options: ARB_SERIES, help: 'Bracket events to scan.' },
+  arb_scan_cap: { type: 'number', unit: 'USD per scan', min: 1, max: 100, help: 'Most money one scan may spend in demo-execute.' },
+  arb_day_cap: { type: 'number', unit: 'USD per day', min: 1, max: 500, help: 'Most money arbitrage may spend per UTC day in demo-execute.' },
+  arb_series_cap_frac: { type: 'number', unit: 'fraction of the open-exposure ceiling', min: 0.05, max: 0.9, step: 0.01, help: 'Most one series may hold in open exposure.' },
+  arb_demo_execute: { type: 'bool', label: 'Demo Execute', help: 'Place found sets on the Kalshi demo account. Never live.' },
 };
 
 const CONFIG_SCHEMA = {
@@ -255,6 +259,8 @@ function initialState() {
     summary,
     report: reportText(summary),
     cloud: { keepalive_minutes: 10, pinger_minutes: 5, pinger_enabled: true, silent_alert_minutes: 30, shadow_enabled: true },
+    periods: [],
+    cashFlows: [],
     pinger: { configured: true, job_id: 5813377, synced: true, last_sync_utc: iso(now() - 2 * 60 * MIN), error: null },
     keepalive: { last_ping_utc: iso(now() - 3 * MIN), ok: true, error: null },
     // Release process (docs/RELEASE_CONTRACT.md section 3). Scenario names: standby, release-expired,
@@ -267,7 +273,7 @@ function initialState() {
     lastCode: null,
     resting: 9,
     arb: {
-      settings: { enabled: true, live: false, arb_max_contracts: 100, arb_min_profit: 0.05, arb_series: [...ARB_SERIES], arb_poll_seconds: 15 },
+      settings: { enabled: true, live: false, arb_max_contracts: 100, arb_min_profit: 0.05, arb_series: [...ARB_SERIES], arb_poll_seconds: 15, arb_scan_cap: 15, arb_day_cap: 45, arb_series_cap_frac: 0.35, arb_demo_execute: false },
       kill_switch: false,
       kill_reason: null,
       last_error: null,
@@ -573,6 +579,15 @@ function shadowEpisodes() {
   }));
 }
 
+// Period 1 is implicit ("p1", starts at the beginning of data); each marker starts the next period.
+function periodsResponse() {
+  const marks = S.periods;
+  const periods = [{ id: 'p1', name: 'Demo Period 1', started_at: null, ended_at: marks[0] ? marks[0].started_at : null, note: null, implicit: true }];
+  marks.forEach((m, i) => periods.push({ ...m, ended_at: marks[i + 1] ? marks[i + 1].started_at : null, implicit: false }));
+  periods.forEach((p, i) => { p.current = i === periods.length - 1; });
+  return { periods, cash_flows: S.cashFlows };
+}
+
 function cloudResponse() {
   tickKeepalive();
   return {
@@ -873,6 +888,49 @@ async function route(method, url, headers, body) {
     const limit = Math.min(500, parseInt(q.get('limit') || '50', 10) || 50);
     return reply(200, { episodes: shadowEpisodes().slice(0, limit) });
   }
+  if (method === 'GET' && p === '/api/periods') return reply(200, periodsResponse());
+  if (method === 'POST' && p === '/api/periods') {
+    const bad = check2fa(headers);
+    if (bad) return bad;
+    const name = String((body && body.name) || '').trim();
+    if (!name || name.length > 60) return reply(400, { detail: ['name must be 1-60 characters'] });
+    const id = `mp${S.periods.length + 1}`;
+    S.periods.push({ id, name, started_at: iso(now()), note: (body && body.note) || null });
+    audit('period.create', true, { name });
+    return reply(200, { ...periodsResponse(), created: id });
+  }
+  if (method === 'POST' && p === '/api/cash-flows') {
+    const bad = check2fa(headers);
+    if (bad) return bad;
+    const b = body || {};
+    if (!['deposit', 'withdrawal'].includes(b.kind) || !(b.amount > 0 && b.amount <= 100000)) {
+      return reply(400, { detail: ['kind must be deposit or withdrawal and amount between 0 and 100000'] });
+    }
+    const id = `cf${S.cashFlows.length + 1}`;
+    S.cashFlows.push({ id, ts: iso(now()), kind: b.kind, amount: b.amount, note: b.note || null, created_by: 'owner' });
+    audit('cash_flow.create', true, { kind: b.kind, amount: b.amount });
+    return reply(200, { ...periodsResponse(), created: id });
+  }
+  if (method === 'DELETE' && p.startsWith('/api/cash-flows/')) {
+    const bad = check2fa(headers);
+    if (bad) return bad;
+    const id = decodeURIComponent(p.slice('/api/cash-flows/'.length));
+    const n = S.cashFlows.length;
+    S.cashFlows = S.cashFlows.filter((f) => f.id !== id);
+    if (S.cashFlows.length === n) return reply(404, { detail: 'cash_flow_not_found' });
+    audit('cash_flow.delete', true, { id });
+    return reply(200, { ...periodsResponse(), deleted: id });
+  }
+  if (method === 'GET' && /^\/api\/periods\/[^/]+\/summary$/.test(p)) {
+    return reply(200, {
+      fills: 24, settled: 18, wins: 16, losses: 2, pnl: 6.4, money_spent: 96.0, settled_cost: 72.0,
+      return_on_settled_cost: 0.0889, return_on_all_cost: 0.0667, open_at_risk: 24.0,
+      cash_flows: { deposits: 0, withdrawals: 0, net: 0, items: [] },
+    });
+  }
+  if (method === 'GET' && p === '/api/pnl/by-source') {
+    return reply(200, { period: null, env: 'demo', by_source: { maker: 5.1, arb: 0.9, you: 0.4, bot: 6.0, total: 6.4, settled_fills: 18 } });
+  }
   if (method === 'GET' && p === '/api/arb') return reply(200, arbResponse());
   if (method === 'GET' && p === '/api/arb/opportunities') {
     const limit = Math.min(1000, parseInt(q.get('limit') || '100', 10) || 100);
@@ -897,6 +955,8 @@ async function route(method, url, headers, body) {
       else if (sc.type === 'list') {
         if (!Array.isArray(v) || !v.length) errs.push(`${k} must list at least one series`);
         else if (v.some((x) => !ARB_SERIES.includes(x))) errs.push(`${k}: unknown series`);
+      } else if (sc.type === 'bool') {
+        if (typeof v !== 'boolean') errs.push(`${k} must be true/false`);
       } else if (typeof v !== 'number' || v < sc.min || v > sc.max || (sc.type === 'integer' && !Number.isInteger(v))) {
         errs.push(`${k} must be between ${sc.min} and ${sc.max}`);
       }
