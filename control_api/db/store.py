@@ -129,6 +129,11 @@ class Store(abc.ABC):
                                      executed_only: bool = False) -> list[dict]:
         """Newest first by ts (first seen). executed_only drops 'log-only' docs."""
 
+    @abc.abstractmethod
+    async def arb_spend_since(self, since: datetime, mode: str) -> float:
+        """Sum of `cost` over arb opportunity docs with ts >= since, doc mode == mode and executed starting with
+        FILLED, PARTIAL or ERROR (skipped / log-only excluded). No row limit."""
+
     # ---- queue-position telemetry (one doc per maker order: a "quote episode")
     @abc.abstractmethod
     async def upsert_quote_episodes(self, docs: Iterable[dict]) -> int:
@@ -213,6 +218,30 @@ class Store(abc.ABC):
     async def list_alerts(self, *, type: str | None = None, limit: int = 50,
                           before: datetime | None = None) -> list[dict]:
         """Alerts newest first, optionally one type and only ts < before (paging)."""
+        raise NotImplementedError
+
+    # ---- performance periods and cash flows (Sprint 2A-1). Not abstract, so older test fakes keep working.
+    async def add_period(self, doc: dict) -> dict:
+        """Append one period marker (schemas.prepare_period; append-only, never edited). Returns the stored doc.
+        Raises ValueError on a bad name/note/started_at, the reserved id "p1", or a duplicate id. Period 1 is
+        implicit and is NOT stored."""
+        raise NotImplementedError
+
+    async def list_periods(self) -> list[dict]:
+        """Stored markers, oldest first by started_at (ties: insertion order). Excludes the implicit p1."""
+        raise NotImplementedError
+
+    async def add_cash_flow(self, doc: dict) -> dict:
+        """Append one deposit/withdrawal (schemas.prepare_cash_flow). Returns the stored doc. Raises ValueError
+        on a bad kind, an amount outside 0 < x <= 100000, a bad note/ts, or a duplicate id."""
+        raise NotImplementedError
+
+    async def list_cash_flows(self, *, since: datetime | None = None, until: datetime | None = None) -> list[dict]:
+        """Cash flows with since <= ts < until, newest first (ties: newest insertion first)."""
+        raise NotImplementedError
+
+    async def delete_cash_flow(self, id: str) -> bool:
+        """Remove one cash flow (typo undo). True if it existed."""
         raise NotImplementedError
 
     async def save_push_subscription(self, doc: dict) -> bool:
@@ -429,6 +458,8 @@ class MemoryStore(Store):
         self._arb: list[dict] = []
         self._episodes: dict[str, dict] = {}         # order_id -> doc
         self._alerts: list[dict] = []
+        self._periods: dict[str, dict] = {}          # id -> doc
+        self._cash_flows: dict[str, dict] = {}       # id -> doc
         self._shadow_eps: dict[str, dict] = {}       # ep_id -> doc
         self._shadow_passes: list[dict] = []
         self._shadow_summary: dict | None = None
@@ -630,6 +661,11 @@ class MemoryStore(Store):
                 and (not executed_only or d["executed"] != S.ARB_LOG_ONLY)]
         return [self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]]
 
+    async def arb_spend_since(self, since: datetime, mode: str) -> float:
+        return sum(float(d.get("cost") or 0) for d in self._arb
+                   if _since_ok(d, since) and d.get("mode") == mode
+                   and str(d.get("executed", "")).startswith(S.ARB_SPEND_PREFIXES))
+
     # ---- queue-position telemetry
     async def upsert_quote_episodes(self, docs: Iterable[dict]) -> int:
         n = 0
@@ -777,6 +813,34 @@ class MemoryStore(Store):
         b = S.norm_dt(before) if before is not None else None
         docs = [d for d in self._alerts if (type is None or d["type"] == type) and (b is None or d["ts"] < b)]
         return [self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]]
+
+    async def add_period(self, doc: dict) -> dict:
+        d = S.prepare_period(doc)
+        async with self._lock:
+            if d["id"] in self._periods:
+                raise ValueError("period id already exists")
+            self._periods[d["id"]] = self._stamp(d)
+        return self._clean(d)
+
+    async def list_periods(self) -> list[dict]:
+        docs = sorted(self._periods.values(), key=lambda d: (d["started_at"], d.get("\x00seq", 0)))
+        return [self._clean(d) for d in docs]
+
+    async def add_cash_flow(self, doc: dict) -> dict:
+        d = S.prepare_cash_flow(doc)
+        async with self._lock:
+            if d["id"] in self._cash_flows:
+                raise ValueError("cash flow id already exists")
+            self._cash_flows[d["id"]] = self._stamp(d)
+        return self._clean(d)
+
+    async def list_cash_flows(self, *, since: datetime | None = None, until: datetime | None = None) -> list[dict]:
+        docs = [d for d in self._cash_flows.values() if _window_ok(d, since, until)]
+        return [self._clean(d) for d in self._newest_seq(docs)]
+
+    async def delete_cash_flow(self, id: str) -> bool:
+        async with self._lock:
+            return self._cash_flows.pop(str(id), None) is not None
 
     async def save_push_subscription(self, doc: dict) -> bool:
         d = S.prepare_push_subscription(doc)

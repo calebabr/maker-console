@@ -100,6 +100,11 @@ class MongoStore(Store):
         await self._c(S.ALERT_HISTORY).create_index([("ts", ASCENDING)], expireAfterSeconds=S.ALERT_RETENTION_SECONDS,
                                                     name="ts_ttl")
         await self._c(S.ALERT_HISTORY).create_index([("type", ASCENDING), ("ts", DESCENDING)], name="type_ts")
+        # periods / cash_flows: small and permanent, so no TTL
+        await self._c(S.PERIODS).create_index([("id", ASCENDING)], unique=True, name="id_unique")
+        await self._c(S.PERIODS).create_index([("started_at", ASCENDING)], name="started_at")
+        await self._c(S.CASH_FLOWS).create_index([("id", ASCENDING)], unique=True, name="id_unique")
+        await self._c(S.CASH_FLOWS).create_index([("ts", DESCENDING)], name="ts_desc")
         await self._c(S.PUSH_SUBSCRIPTIONS).create_index([("sub_id", ASCENDING)], unique=True, name="sub_id_unique")
         await self._c(S.PUSH_SUBSCRIPTIONS).create_index([("slot", ASCENDING)], unique=True, sparse=True,
                                                          name="slot_unique")
@@ -286,6 +291,14 @@ class MongoStore(Store):
             q["executed"] = {"$ne": S.ARB_LOG_ONLY}
         return await self._c(S.ARB_OPPORTUNITIES).find(q, NO_ID).sort(NEWEST).limit(int(limit)).to_list()
 
+    async def arb_spend_since(self, since: datetime, mode: str) -> float:
+        # served by the ts index (ts_ttl); the prefix regex is anchored
+        pipe = [{"$match": {"ts": {"$gte": S.norm_dt(since)}, "mode": str(mode),
+                            "executed": {"$regex": "^(" + "|".join(S.ARB_SPEND_PREFIXES) + ")"}}},
+                {"$group": {"_id": None, "total": {"$sum": "$cost"}}}]
+        rows = await (await self._c(S.ARB_OPPORTUNITIES).aggregate(pipe)).to_list()
+        return float(rows[0]["total"]) if rows else 0.0
+
     # ---- queue-position telemetry
     async def upsert_quote_episodes(self, docs: Iterable[dict]) -> int:
         ops = []
@@ -425,6 +438,32 @@ class MongoStore(Store):
         if before is not None:
             q["ts"] = {"$lt": S.norm_dt(before)}
         return await self._c(S.ALERT_HISTORY).find(q, NO_ID).sort(NEWEST).limit(int(limit)).to_list()
+
+    async def add_period(self, doc: dict) -> dict:
+        d = S.prepare_period(doc)
+        try:
+            await self._c(S.PERIODS).insert_one(dict(d))
+        except DuplicateKeyError:
+            raise ValueError("period id already exists") from None
+        return d
+
+    async def list_periods(self) -> list[dict]:
+        return await self._c(S.PERIODS).find({}, NO_ID).sort([("started_at", ASCENDING), ("_id", ASCENDING)]).to_list()
+
+    async def add_cash_flow(self, doc: dict) -> dict:
+        d = S.prepare_cash_flow(doc)
+        try:
+            await self._c(S.CASH_FLOWS).insert_one(dict(d))
+        except DuplicateKeyError:
+            raise ValueError("cash flow id already exists") from None
+        return d
+
+    async def list_cash_flows(self, *, since: datetime | None = None, until: datetime | None = None) -> list[dict]:
+        return await self._c(S.CASH_FLOWS).find(_window(since, until), NO_ID).sort(NEWEST).to_list()
+
+    async def delete_cash_flow(self, id: str) -> bool:
+        res = await self._c(S.CASH_FLOWS).delete_one({"id": str(id)})
+        return res.deleted_count > 0
 
     async def save_push_subscription(self, doc: dict) -> bool:
         d = S.prepare_push_subscription(doc)

@@ -34,6 +34,8 @@ SHADOW_PASSES = "shadow_passes"
 ARB_OPPORTUNITIES = "arb_opportunities"
 QUOTE_EPISODES = "quote_episodes"
 ALERT_HISTORY = "alert_history"
+PERIODS = "periods"
+CASH_FLOWS = "cash_flows"
 PUSH_SUBSCRIPTIONS = "push_subscriptions"
 # Release process (Sprint 1): leader lease, signed-handover replay guard, schema marker, pending releases.
 RUNNER_LEASE = "runner_lease"
@@ -50,7 +52,16 @@ RELEASE_DECISIONS = ("approved", "rejected")
 COLLECTIONS = (STATE, CLOUD_SETTINGS, CONFIG_VERSIONS, HEARTBEATS, JOURNAL_ROWS, ACCOUNT_SNAPSHOTS,
                FILLS, MONITOR_SUMMARIES, AUDIT_LOG, USERS, REVOKED_TOKENS, SETTLEMENTS, ARB_OPPORTUNITIES,
                QUOTE_EPISODES, ALERT_HISTORY, PUSH_SUBSCRIPTIONS, RUNNER_LEASE, HANDOVER_NONCES, META, RELEASES,
-               SHADOW_EPISODES, SHADOW_PASSES)
+               SHADOW_EPISODES, SHADOW_PASSES, PERIODS, CASH_FLOWS)
+
+# Performance periods and cash flows (Sprint 2A-1). Both small, permanent (no TTL), append-style.
+# Period 1 is IMPLICIT (id "p1", from the start of data to the first marker) and is never stored: a stored marker
+# is the period that STARTS at its started_at. "p1" is reserved. Additive change: SCHEMA_VERSION stays 1.
+IMPLICIT_PERIOD_ID = "p1"
+PERIOD_NAME_MAX = 60
+PERIOD_NOTE_MAX = 200
+CASH_FLOW_KINDS = ("deposit", "withdrawal")
+CASH_FLOW_MAX = 100000.0
 
 # Alert history (UX sprint item 37): one small doc per alert the system sent (ntfy and/or web push).
 # No secrets (title/body are redacted before they get here); body capped at ALERT_BODY_MAX chars.
@@ -85,6 +96,7 @@ ARB_DEDUPE_SECONDS = 120
 ARB_RETENTION_DAYS = 45
 ARB_RETENTION_SECONDS = ARB_RETENTION_DAYS * 24 * 3600
 ARB_LOG_ONLY = "log-only"
+ARB_SPEND_PREFIXES = ("FILLED", "PARTIAL", "ERROR")   # executed values that count as money spent
 
 # Queue-position telemetry (control_api/services/queuepos.py): one doc per maker order ("quote episode").
 # 45-day TTL on ts (= when the order joined the book). Worst case ~1,200 episodes/day (queuepos.DAILY_NEW_CAP)
@@ -297,6 +309,63 @@ def prepare_arb_opportunity(op: Any) -> dict:
     return doc
 
 
+def _opt_note(value: Any) -> str | None:
+    if value is None:
+        return None
+    note = str(value).strip()
+    if len(note) > PERIOD_NOTE_MAX:
+        raise ValueError(f"note must be at most {PERIOD_NOTE_MAX} characters")
+    return note or None
+
+
+def prepare_period(doc: dict) -> dict:
+    """periods doc: {id, name, started_at, note, created_by}. name 1-60 chars (trimmed), note <= 200 or None,
+    started_at aware UTC (default now), id uuid hex unless given ("p1" is reserved for the implicit first period).
+    Raises ValueError."""
+    import uuid
+    name = str(doc.get("name") or "").strip()
+    if not 1 <= len(name) <= PERIOD_NAME_MAX:
+        raise ValueError(f"name must be 1-{PERIOD_NAME_MAX} characters")
+    if doc.get("started_at") is None:
+        started = utcnow()
+    else:
+        started = _safe_to_utc(doc["started_at"])
+        if started is None:
+            raise ValueError("started_at is not a valid time")
+    pid = str(doc.get("id") or uuid.uuid4().hex)[:40]
+    if pid == IMPLICIT_PERIOD_ID:
+        raise ValueError(f"period id {IMPLICIT_PERIOD_ID!r} is reserved for the implicit first period")
+    return {"id": pid, "name": name, "started_at": started, "note": _opt_note(doc.get("note")),
+            "created_by": str(doc.get("created_by") or "")[:64]}
+
+
+def prepare_cash_flow(doc: dict) -> dict:
+    """cash_flows doc: {id, ts, kind, amount, note, created_by}. kind deposit|withdrawal, amount a finite float
+    with 0 < x <= 100000 (never a bool), ts aware UTC (default now). Raises ValueError."""
+    import math
+    import uuid
+    kind = doc.get("kind")
+    if kind not in CASH_FLOW_KINDS:
+        raise ValueError(f"kind must be one of {CASH_FLOW_KINDS}")
+    raw = doc.get("amount")
+    try:
+        if isinstance(raw, bool):
+            raise TypeError
+        amount = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("amount must be a number") from None
+    if not math.isfinite(amount) or not 0 < amount <= CASH_FLOW_MAX:
+        raise ValueError(f"amount must be greater than 0 and at most {CASH_FLOW_MAX:g}")
+    if doc.get("ts") is None:
+        ts = utcnow()
+    else:
+        ts = _safe_to_utc(doc["ts"])
+        if ts is None:
+            raise ValueError("ts is not a valid time")
+    return {"id": str(doc.get("id") or uuid.uuid4().hex)[:40], "ts": ts, "kind": kind, "amount": amount,
+            "note": _opt_note(doc.get("note")), "created_by": str(doc.get("created_by") or "")[:64]}
+
+
 def prepare_quote_episode(doc: dict) -> dict:
     """quote_episodes doc: normalised copy with order_id (str, required) and ts (join time; from ts, else
     joined_utc, else now)."""
@@ -387,6 +456,10 @@ FILL_DOC = {"fill_id": "str", "ts": "datetime", "close_time": "datetime? (market
             "...": "Kalshi fill fields"}
 ALERT_DOC = {"id": "uuid hex", "ts": "datetime (TTL 90 d)", "type": "|".join(ALERT_TYPES), "title": "str <= 120",
              "body": "str <= 200", "priority": "str", "channels": "[ntfy|push]"}
+PERIOD_DOC = {"id": "str (unique)", "name": "str 1-60", "started_at": "datetime (indexed; no TTL)",
+              "note": "str <= 200 | None", "created_by": "str"}
+CASH_FLOW_DOC = {"id": "str (unique)", "ts": "datetime (indexed; no TTL)", "kind": "deposit|withdrawal",
+                 "amount": "float, 0 < x <= 100000", "note": "str <= 200 | None", "created_by": "str"}
 PUSH_SUBSCRIPTION_DOC = {"sub_id": "sha256(endpoint) (unique)", "endpoint": "https URL (sensitive)",
                          "p256dh": "b64url (sensitive)", "auth": "b64url (sensitive)", "ua": "str",
                          "created_utc": "datetime"}
