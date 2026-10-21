@@ -510,7 +510,11 @@ class MemoryStore(Store):
         async with self._lock:
             cur = {**S.DEFAULT_STATE, **(self._state or {})}
             cur.update(upd)
-            cur["updated_utc"] = S.utcnow()
+            now = S.utcnow()
+            prev = (self._state or {}).get("updated_utc")
+            if prev is not None and now <= prev:         # ms precision: two writes in one ms must still differ,
+                now = prev + timedelta(milliseconds=1)   # because the runner detects a changed doc by this stamp
+            cur["updated_utc"] = now
             cur["updated_by"] = by
             self._state = {k: cur[k] for k in S.STATE_FIELDS}
             return _state_out(self._state)
