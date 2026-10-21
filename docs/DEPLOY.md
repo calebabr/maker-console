@@ -202,6 +202,16 @@ Start in **demo** mode. Do not create a production Kalshi key until step 15 is d
     - **Adding or upgrading a Python package:** edit `control_api/requirements.in`, regenerate both locks with the command in the header of the `.in` files (needs `uv`; Python 3.11 target), commit `requirements.txt` and `requirements-dev.txt`. Never hand-edit them. Installs always use `pip install --require-hashes --only-binary :all: --no-deps -r ...`.
     - Atlas pauses after 30 days inactive: log in and Resume.
 
+## Starting a new demo period
+
+Use this for a clean performance window (for example Period 2).
+1. App > Settings: set **Poll Minutes** to **10** and Save (fresh 2FA). It must stay 14 or lower.
+2. App > Server (or Account) > **Mark new period**: enter a name and optional note, confirm with fresh 2FA. A second marker within 5 minutes is refused (typo guard).
+3. Record any money you add or take out as a **cash-flow event** (deposit or withdrawal, amount, date, optional note) with fresh 2FA. A typo can be deleted and re-added. These show beside P&L, never inside it.
+4. Make **no deposits or withdrawals during the period**, so returns stay comparable.
+5. Use the period selector (All / each period) on P&L and By Source. Fills count in the period they were filled, even if they settle later.
+6. Start the bot as usual (Start re-reads and validates the saved config). To stop at any time: the app's Stop button; last resort, suspend the service in Render (see below).
+
 ## Emergency stop without the app
 
 Use if the app, Vercel or your phone login is unavailable.
