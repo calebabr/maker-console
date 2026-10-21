@@ -99,6 +99,13 @@ def iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
+def _state_stamp(st: dict | None) -> tuple:
+    """What identifies a stored state doc version. updated_utc alone can tie (ms precision, two writes in one
+    millisecond), which would hide a Stop written by another instance; the control fields cannot."""
+    st = st or {}
+    return tuple(st.get(k) for k in ("updated_utc", "updated_by", "desired", "mode", "arb_desired", "arb_mode"))
+
+
 def _where(e: BaseException) -> str:
     """Exception type plus the innermost file:line, never the message (messages can echo secrets)."""
     tb = e.__traceback__
@@ -653,7 +660,7 @@ class Runner:
         # S-54: `seen` stays the updated_utc of OUR READ. Our own writes below change the doc, so the next sync
         # (lease tick, or _pre_order_fence before the first pass) re-reads it and adopts a Stop that another instance
         # wrote between our read and our write.
-        seen = st.get("updated_utc")
+        seen = _state_stamp(st)
         if self._live_downgraded:
             log.warning("live state in store not restored after restart: %s now demo", self._live_downgraded)
             kw = {"mode": "demo"} if "maker" in self._live_downgraded else {}
@@ -731,7 +738,7 @@ class Runner:
             return
         if not st or gen != self._stop_gen or ep != self._start_epoch or self._stopping:
             return
-        u = st.get("updated_utc")
+        u = _state_stamp(st)
         if u == self._state_seen_utc:
             return
         self._state_seen_utc = u
@@ -756,7 +763,7 @@ class Runner:
             desired = "stopped"
         self.desired, self.arb_desired = desired, arb_desired
         self.mode, self.arb_mode = st.get("mode", "demo"), st.get("arb_mode", "demo")
-        self._state_seen_utc = st.get("updated_utc")
+        self._state_seen_utc = _state_stamp(st)
 
     # ---- lifecycle
     async def start(self) -> None:
@@ -942,7 +949,7 @@ class Runner:
         # S-21 (owner decision): LIVE is never restored from the store, and the arb kill-switch rule: both are applied
         # (and persisted) only when this instance becomes LEADER (_become_leader), because a standby must not write
         # the state the running leader trades on. Until then a standby mirrors the store and never trades.
-        self._state_seen_utc = st.get("updated_utc")
+        self._state_seen_utc = _state_stamp(st)
         await self._check_schema()                   # R4: newer stored schema -> standby (alerted)
         config_ok = await self._load_config()
         try:

@@ -200,3 +200,14 @@ async def test_s59_pending_stop_unwritable_alerts(settings, bot_paths, kalshi, d
     await a.stop(by="owner")
     await a.shutdown()
     assert any("not persisted" in t for t, _, _ in a.alerter.sent)
+
+
+def test_state_stamp_differs_when_a_stop_ties_the_timestamp():
+    """Two writes in one millisecond share updated_utc; a Stop must still read as a changed doc."""
+    from control_api.runner import _state_stamp
+    t = datetime(2026, 10, 21, 18, 0, 0, tzinfo=timezone.utc)
+    running = {"updated_utc": t, "updated_by": "owner", "desired": "running", "mode": "demo",
+               "arb_desired": "stopped", "arb_mode": "demo"}
+    stopped = {**running, "desired": "stopped"}
+    assert _state_stamp(running) != _state_stamp(stopped)
+    assert _state_stamp(running) == _state_stamp(dict(running)) and _state_stamp(None) == _state_stamp({})
