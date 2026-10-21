@@ -11,6 +11,7 @@ import functools
 import io
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -29,6 +30,7 @@ from .services import closetime as ctsvc
 from .services import fillquality as fq
 from .services import pnl as pnlsvc
 from .services import queuepos as qp
+from .services import riskgate
 from .services import alerts as alertsvc
 from .services import strategies as strat
 from .services import shadow as shadowsvc
@@ -71,6 +73,14 @@ CANCEL_TIMEOUT_S = 25.0             # same bound as Stop's own cancel
 # Kalshi can each hold one for up to CANCEL_TIMEOUT_S and a new tap still gets a thread.
 STOP_WORKERS = 4
 ARB_SCAN_TIMEOUT_S = 120.0          # an arb scan is abandoned after this (its thread stays on the 1-worker arb pool)
+ARB_SENT_PREFIXES = ("FILLED", "PARTIAL", "ERROR")   # executed values whose cost counts toward the day's arb spend
+ARB_SKIP_PERSIST_EVERY = timedelta(hours=1)          # a repeated skip (same event + reason kind) is stored once/hour
+ARB_SKIP_SEEN_MAX = 2000
+# grouped order-error alerts from the strategy's write_errors:/trading_paused lines (one per pass, throttled)
+ORDER_ERROR_ALERT_EVERY = timedelta(minutes=30)
+PAUSED_ALERT_EVERY = timedelta(hours=1)
+SHADOW_RETRY_S = 60                 # a shadow cycle skipped for a transient reason retries after at most this
+SHADOW_TRANSIENT = ("standby", "pass_running", "busy", "stop_running", "error")
 # S-25: queue-position, fill-quality and fills-sync Kalshi reads run on their own small pool with a short client,
 # never on the default executor that Stop's cancel uses.
 TELEMETRY_WORKERS = 2
@@ -247,6 +257,47 @@ def telemetry_public_factory(env: str):
                         timeout=TELEMETRY_CLIENT_TIMEOUT_S)
 
 
+_WRITE_ERRORS_RE = re.compile(r"^write_errors:\s*cancel=(\d{1,6})\s+place=(\d{1,6})\s+paused=([01])\s*$", re.M)
+_SERIES_CAPPED_RE = re.compile(r"^series_capped:\s*([A-Za-z0-9_.\-]{1,40})\s+exposure=(\S{1,20})\s+cap=(\S{1,20})\s*$",
+                               re.M)
+_PAUSED_RE = re.compile(r"^trading_paused\b", re.M)
+_CAP_SKIPPED_RE = re.compile(r"^series_cap_skipped:", re.M)
+
+
+def _float_or_none(s: str) -> float | None:
+    try:
+        f = float(s.lstrip("$"))
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and abs(f) != float("inf") else None
+
+
+def parse_write_report(out: str | None) -> dict:
+    """The strategy's write-path summary from one pass's captured stdout: the LAST `write_errors:` line (cancel and
+    place failure counts, paused flag), every `series_capped:` line, a `trading_paused` line and a
+    `series_cap_skipped:` line. Missing lines mean zero / none. Pure; never raises."""
+    rep = {"cancel": 0, "place": 0, "paused": False, "series_capped": [], "series_cap_skipped": False}
+    if not isinstance(out, str) or not out:
+        return rep
+    m = None
+    for m in _WRITE_ERRORS_RE.finditer(out):
+        pass
+    if m is not None:
+        rep["cancel"], rep["place"] = int(m.group(1)), int(m.group(2))
+        rep["paused"] = m.group(3) == "1"
+    if _PAUSED_RE.search(out):
+        rep["paused"] = True
+    seen = set()
+    for s in _SERIES_CAPPED_RE.finditer(out):
+        if s.group(1) in seen or len(seen) >= 50:
+            continue
+        seen.add(s.group(1))
+        rep["series_capped"].append({"series": s.group(1), "exposure": _float_or_none(s.group(2)),
+                                     "cap": _float_or_none(s.group(3))})
+    rep["series_cap_skipped"] = bool(_CAP_SKIPPED_RE.search(out))
+    return rep
+
+
 class FenceBlocked(RuntimeError):
     """The lease is not confirmed (standby, expired, lost or unknown): nothing may be sent to Kalshi."""
 
@@ -257,6 +308,13 @@ class StopInProgress(RuntimeError):
 
 class RunnerDisabled(RuntimeError):
     """RUNNER_ENABLED=false: nothing can start trading (S-10)."""
+
+
+class ConfigInvalid(RuntimeError):
+    """Start refused: the stored config still fails validation (S-12). str() is the plain-English reason."""
+
+
+INVALID_CONFIG_PREFIXES = ("stored config failed validation", "monitor wrote an invalid config")
 
 
 class Runner:
@@ -327,6 +385,15 @@ class Runner:
         self.arb_scans = 0
         self.arb_found = 0
         self.arb_recent: deque = deque(maxlen=200)   # in-memory copy, used if the store is unreachable
+        # risk gate: today's arb spend per kind ("live" / "demo-execute"): {date, amount, mark}; see _arb_day_state
+        self._arb_day: dict[str, dict] = {}
+        self._arb_budget_lock = threading.Lock()
+        self._arb_skip_seen: dict[tuple[str, str], datetime] = {}   # (event, reason kind) -> last stored skip
+        # strategy write-path results of the last pass (write_errors: / series_capped: / trading_paused lines)
+        self.last_write_report: dict | None = None
+        self._order_alert_utc: datetime | None = None
+        self._order_alert_suppressed = 0
+        self._paused_alert_utc: datetime | None = None
         # UX sprint: fill sources, today P&L cache, alert history + web push, daily summary
         self._maker_oids: dict[str, None] = {}       # journal maker order ids (insertion ordered, bounded)
         self.source_backfill: dict | None = None
@@ -1139,6 +1206,7 @@ class Runner:
                 if took > self.pass_budget_s:
                     log.warning("order step took %.1f s (budget %.0f s)", took, self.pass_budget_s)
                 self.logs.add(out)
+                await self._handle_write_report(out, mode)     # grouped order-error alerts; the pass stays ok
                 if rc:
                     raise RuntimeError(f"maker_strategy exited {rc}")
             except FenceBlocked as e:
@@ -1177,6 +1245,45 @@ class Runner:
             self._start_close_time(mode)        # same pattern; runs after the queue evaluation above
         if ok and (self.last_monitor_utc is None or utcnow() - self.last_monitor_utc > MONITOR_EVERY):
             await self.run_monitor("weekly")
+
+    async def _handle_write_report(self, out: str | None, mode: str, now: datetime | None = None) -> dict:
+        """After a pass: record the strategy's write-path summary and send at most ONE grouped order-error alert
+        (throttled to one per ORDER_ERROR_ALERT_EVERY; suppressed passes are counted into the next alert) and a
+        separate 'trading paused' alert at most once per PAUSED_ALERT_EVERY. Plain text, no order ids or secrets.
+        A pass with order errors is still an ok pass. Never raises."""
+        now = now or utcnow()
+        rep = parse_write_report(out)
+        try:
+            self.last_write_report = {**rep, "utc": iso(now), "mode": mode}
+            if rep["series_capped"]:
+                log.warning("series capped this pass: %s", ", ".join(s["series"] for s in rep["series_capped"]))
+            n_err = rep["cancel"] + rep["place"]
+            if n_err > 0:
+                last = self._order_alert_utc
+                if last is None or now - last >= ORDER_ERROR_ALERT_EVERY:
+                    body = (f"The last trading pass ({mode}) could not cancel {rep['cancel']} and could not place "
+                            f"{rep['place']} order(s). The pass kept going; a market whose cancel failed got no "
+                            "replacement order.")
+                    if self._order_alert_suppressed:
+                        body += (f" {self._order_alert_suppressed} more pass(es) had order errors since the last "
+                                 "alert.")
+                    self._order_alert_utc, self._order_alert_suppressed = now, 0
+                    with contextlib.suppress(Exception):
+                        await self.alerter.send(f"Order errors: {rep['cancel']} cancel, {rep['place']} place", body,
+                                                priority="high")
+                else:
+                    self._order_alert_suppressed += 1
+            if rep["paused"]:
+                last = self._paused_alert_utc
+                if last is None or now - last >= PAUSED_ALERT_EVERY:
+                    self._paused_alert_utc = now
+                    with contextlib.suppress(Exception):
+                        await self.alerter.send("Trading paused by Kalshi",
+                                                f"Kalshi reported trading is paused ({mode}). The last pass stopped "
+                                                "placing new orders; cancels were still tried.", priority="high")
+        except Exception as e:  # noqa: BLE001
+            log.warning("write report handling failed: %s", type(e).__name__)
+        return rep
 
     async def _sync_journal(self, mode: str | None = None) -> int:
         if self._tail is None:
@@ -1977,11 +2084,21 @@ class Runner:
     async def _shadow_loop(self) -> None:
         await asyncio.sleep(self.poll_minutes() * 30)        # offset by half an interval from the passes
         while True:
+            res: dict | None = None
             try:
-                await self.shadow_cycle()
+                res = await self.shadow_cycle()
             except Exception as e:  # noqa: BLE001
                 log.error("shadow cycle failed: %s", type(e).__name__)
-            await asyncio.sleep(self.poll_minutes() * 60)
+            await asyncio.sleep(self._shadow_next_sleep_s(res))
+
+    def _shadow_next_sleep_s(self, res: dict | None) -> float:
+        """Seconds until the next shadow cycle: the full poll interval after a completed cycle (or a skip that will
+        not clear soon, such as disabled), at most SHADOW_RETRY_S after a transient skip (not leader yet, a pass or
+        an earlier worker busy, Stop running, an upstream read error) or an exception."""
+        full = float(self.poll_minutes() * 60)
+        if res is None or (not res.get("ran") and res.get("reason") in SHADOW_TRANSIENT):
+            return min(full, float(SHADOW_RETRY_S))
+        return full
 
     def _shadow_sync(self, inp: Any, strategy: Any, deadline: float) -> Any:
         md = self.shadow_factory()
@@ -2119,12 +2236,52 @@ class Runner:
                 and not self._stopping and self.live_allowed() and not self.arb_kill_switch()
                 and not self._shutting_down and self._fence_ok(min_remaining_s=FENCE_MARGIN_S))   # R1 fence
 
-    def _arb_execute_sync(self, scanner: Any, op: Any, gen: int) -> str:
-        if not self._arb_live_ok(gen):
+    def _arb_demo_wanted(self) -> bool:
+        """Demo-execute is asked for: arb in demo, the maker in demo, and the arb_demo_execute setting on."""
+        return (self.arb_mode == "demo" and self.mode == "demo"
+                and self.arb_settings().get("arb_demo_execute") is True)
+
+    def _arb_demo_ok(self, gen: int) -> bool:
+        """Same re-checks as _arb_live_ok, for demo-execute. Never true while the maker or arb is LIVE."""
+        return (self.settings.runner_enabled and self.arb_desired == "running" and self._arb_demo_wanted()
+                and gen == self._stop_gen and not self._stopping and not self.arb_kill_switch()
+                and not self._shutting_down and self._fence_ok(min_remaining_s=FENCE_MARGIN_S))   # R1 fence
+
+    @staticmethod
+    def _demo_keys_ok() -> bool:
+        """Demo keys are set, and they are not the production key id (a key pasted into both fields)."""
+        kid, pk = mode_keys("demo")
+        prod_kid, _ = mode_keys("live")
+        return bool(kid and pk) and kid != prod_kid
+
+    def arb_exec_kind(self) -> str | None:
+        """How this scan's opportunities would be handled: "live", "demo-execute", or None (log-only)."""
+        if self.arb_mode == "live" and self.live_allowed():
+            return "live"
+        if self._arb_demo_wanted():
+            return "demo-execute"
+        return None
+
+    def _arb_execute_sync(self, scanner: Any, op: Any, gen: int, kind: str = "live",
+                          budget: dict | None = None) -> str:
+        """One opportunity through the gates, then arb_scanner.execute. kind: "live" (prod) or "demo-execute"
+        (demo exchange only). `budget` holds this scan's spend and today's spend state (risk gate)."""
+        demo = kind == "demo-execute"
+        ok_now = self._arb_demo_ok if demo else self._arb_live_ok
+        if kind not in ("live", "demo-execute") or not ok_now(gen):
             return "skipped: stopped"
-        client = self.kalshi_factory("live")
-        if client is None:
-            return "skipped: no prod keys"
+        if demo:
+            if not self._demo_keys_ok():
+                return "skipped: no demo keys"
+            client = self.kalshi_factory("demo")
+            if client is None:
+                return "skipped: no demo keys"
+            if not arbsvc.demo_base_ok(client):
+                return "skipped: not the demo exchange"       # asserted on the client, not on the mode name
+        else:
+            client = self.kalshi_factory("live")
+            if client is None:
+                return "skipped: no prod keys"
         try:
             cash = float((client.get_balance() or {}).get("balance") or 0) / 100.0
         except Exception as e:  # noqa: BLE001
@@ -2133,13 +2290,34 @@ class Runner:
             frac = float(self.config.get("max_open_frac") or 0.5)
         except (TypeError, ValueError):
             frac = 0.5
-        cap = cash * min(frac, float(self.settings.max_open_frac))
+        frac = min(frac, float(self.settings.max_open_frac))
+        cap = cash * frac
         if op.cost > cap:
             return f"skipped: cost {op.cost:.2f} > cap {cap:.2f}"
-        if not self._arb_live_ok(gen):
-            return "skipped: stopped"
-        if not (live_allowed_settings(self.settings) and all(mode_keys("live"))):
-            return "skipped: live not allowed"           # S-19: second live check right before execution
+        # account risk gate (services/riskgate.py): ceiling, series cap, scan cap, day cap. Fails closed.
+        try:
+            body = client.get_positions() if callable(getattr(client, "get_positions", None)) else None
+            by_series = riskgate.exposure_by_series((body or {}).get("market_positions")
+                                                    if isinstance(body, dict) else None)
+        except Exception:  # noqa: BLE001
+            return "skipped: gate positions unreadable"
+        if budget is None or budget.get("day") is None:
+            return "skipped: gate day spend unknown"
+        with self._arb_budget_lock:
+            day = budget["day"]
+            ok, why = riskgate.check_arb(op.cost, riskgate.series_of(op.event), by_series, cash, frac,
+                                         budget["scan"], day["amount"], arbsvc.gate_caps(self.arb_settings()))
+            if not ok:
+                return f"skipped: gate {why}"
+            if not ok_now(gen):
+                return "skipped: stopped"
+            if demo:
+                if not (self.mode == "demo" and arbsvc.demo_base_ok(client)):
+                    return "skipped: not the demo exchange"
+            elif not (live_allowed_settings(self.settings) and all(mode_keys("live"))):
+                return "skipped: live not allowed"       # S-19: second live check right before execution
+            budget["scan"] += float(op.cost)             # reserved before sending (a partial set still counts)
+            day["amount"] = round(day["amount"] + float(op.cost), 6)
         try:
             return str(scanner.execute(client, op))       # arb_scanner trips its own kill switch on a partial set
         except Exception as e:  # noqa: BLE001
@@ -2152,18 +2330,72 @@ class Runner:
                 pass
             return f"ERROR {type(e).__name__}"
 
-    def _arb_scan_sync(self, cfg: dict, live: bool, gen: int, data_env: str) -> list[tuple[Any, str]]:
+    def _arb_scan_sync(self, cfg: dict, live: Any, gen: int, data_env: str,
+                       budget: dict | None = None) -> list[tuple[Any, str]]:
+        """live: True/"live" (prod), "demo-execute" (demo exchange), or False/None (log-only)."""
+        kind = "live" if live is True else (live if live in ("live", "demo-execute") else None)
         scanner = arbsvc.scanner()
         pub = self.public_factory(data_env)
         if pub is not None:
             pub = ctsvc.RecordingPublic(pub, self.close_times, data_env)   # market close times at no extra call
-        # client=None: scan_once itself never executes; live execution goes through the gated path above
+        # client=None: scan_once itself never executes; execution goes through the gated path above
         ops = scanner.scan_once(pub, None, list(cfg["arb_series"]), float(cfg["arb_max_contracts"]),
                                 float(cfg["arb_min_profit"]))
-        return [(op, self._arb_execute_sync(scanner, op, gen) if live else "log-only") for op in ops]
+        if kind is not None and budget is None:
+            budget = {"scan": 0.0, "day": None}          # no day state: the gate refuses (fail closed)
+        return [(op, self._arb_execute_sync(scanner, op, gen, kind, budget) if kind else "log-only") for op in ops]
+
+    async def _arb_day_state(self, kind: str) -> dict | None:
+        """Today's (UTC) arb spend for `kind`, in memory. Rebuilt from the store's executed opportunities the first
+        time it is needed after a restart or a leadership change (so a deploy never resets it); a rebuild never goes
+        below the in-memory amount. None if the store cannot be read (the gate then refuses)."""
+        now = utcnow()
+        today = now.date().isoformat()
+        mark = (self.lease.generation, self.lease.transitions)
+        cur = self._arb_day.get(kind)
+        if cur is not None and cur["date"] == today and cur["mark"] == mark:
+            return cur
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            # S2A1-1: a server-side sum with no row limit (sent sets only), so skip docs can never push them out
+            spent = float(await asyncio.wait_for(self.store.arb_spend_since(midnight, kind), 5))
+        except Exception as e:  # noqa: BLE001
+            log.warning("arb day spend rebuild failed: %s", type(e).__name__)
+            return None
+        if not math.isfinite(spent) or spent < 0:
+            log.warning("arb day spend rebuild returned an unusable value")
+            return None
+        if cur is not None and cur["date"] == today:
+            spent = max(spent, float(cur["amount"]))
+        state = {"date": today, "amount": round(spent, 6), "mark": mark}
+        self._arb_day[kind] = state
+        return state
+
+    def _arb_skip_persist_ok(self, event: Any, executed: str, now: datetime) -> bool:
+        """S2A1-1: a `skipped: ...` result is stored at most once per (event, reason kind) per ARB_SKIP_PERSIST_EVERY,
+        so a stale book seen on every scan cannot flood the store (or push real sets out of a rebuild). Everything
+        else (log-only, FILLED, PARTIAL, ERROR) is always handed to the store. In memory only, bounded."""
+        if not str(executed).startswith("skipped:"):
+            return True
+        kind = re.sub(r"[-+]?\$?\d[\d.,]*", "#", str(executed))[:120]     # numbers out: one key per reason kind
+        key = (str(event)[:80], kind)
+        seen = self._arb_skip_seen
+        last = seen.get(key)
+        if last is not None and now - last < ARB_SKIP_PERSIST_EVERY:
+            return False
+        if len(seen) >= ARB_SKIP_SEEN_MAX:
+            cutoff = now - ARB_SKIP_PERSIST_EVERY
+            for k in [k for k, t in seen.items() if t < cutoff]:
+                del seen[k]
+            while len(seen) >= ARB_SKIP_SEEN_MAX:
+                del seen[next(iter(seen))]                   # oldest inserted first
+        seen.pop(key, None)
+        seen[key] = now
+        return True
 
     async def arb_scan(self) -> dict:
-        """One arbitrage scan if arb is on. Log-only unless arb_mode=live AND the env allows live."""
+        """One arbitrage scan if arb is on. Log-only unless arb_mode=live AND the env allows live, or demo-execute
+        is on in demo (demo exchange only). Every execution passes the account risk gate first."""
         if self.arb_desired == "running" and self.arb_kill_switch():
             await self._arb_tripped()
         why = self._arb_skip_reason()
@@ -2171,14 +2403,18 @@ class Runner:
             return {"scanned": False, "reason": why}
         async with self.arb_lock:
             gen = self._stop_gen
-            live = self.arb_mode == "live" and self.live_allowed()
+            kind = self.arb_exec_kind()
+            live = kind == "live"
             data_env = "live" if live else self.mode
+            budget = None
+            if kind is not None:
+                budget = {"scan": 0.0, "day": await self._arb_day_state(kind)}
             self.arb_running_scan = True
             try:
                 # CA-2: own 1-worker pool. A scan abandoned at the timeout keeps that worker until it ends, so the
                 # next scan queues behind it (and times out) instead of taking another thread from the default pool.
                 fut = asyncio.get_running_loop().run_in_executor(
-                    self._arb_executor, self._arb_scan_sync, self.arb_settings(), live, gen, data_env)
+                    self._arb_executor, self._arb_scan_sync, self.arb_settings(), kind, gen, data_env, budget)
                 results = await asyncio.wait_for(fut, timeout=ARB_SCAN_TIMEOUT_S)
                 self.arb_last_error = None
             except Exception as e:  # noqa: BLE001
@@ -2191,18 +2427,20 @@ class Runner:
             self.arb_scans += 1
             self.arb_found += len(results)
             for op, executed in results:
-                doc = arbsvc.opportunity_doc(op, executed, "live" if live else "log-only")
+                doc = arbsvc.opportunity_doc(op, executed, kind or "log-only")
                 doc["ts"] = utcnow()
                 self.arb_recent.appendleft(doc)
-                try:
-                    await asyncio.wait_for(self.store.add_arb_opportunity(dict(doc)), timeout=5)
-                except Exception as e:  # noqa: BLE001
-                    log.error("arb log write failed: %s", type(e).__name__)
+                if self._arb_skip_persist_ok(op.event, executed, doc["ts"]):
+                    try:
+                        await asyncio.wait_for(self.store.add_arb_opportunity(dict(doc)), timeout=5)
+                    except Exception as e:  # noqa: BLE001
+                        log.error("arb log write failed: %s", type(e).__name__)
                 if executed.startswith(("PARTIAL", "ERROR")):
                     await self.alerter.send("Arbitrage legging risk: arb kill switch tripped",
                                             f"{op.event}: {executed}", priority="urgent")
                 elif executed.startswith("FILLED"):
-                    await self.alerter.send("Arbitrage executed", f"{op.event} {op.kind} profit ${op.profit}")
+                    where = " (demo exchange)" if kind == "demo-execute" else ""
+                    await self.alerter.send("Arbitrage executed", f"{op.event} {op.kind} profit ${op.profit}{where}")
             if self.arb_kill_switch() and self.arb_desired == "running":
                 await self._arb_tripped()
             return {"scanned": True, "found": len(results)}
@@ -2264,7 +2502,9 @@ class Runner:
         return {"state": self.arb_state(), "running": self.arb_running_scan, "kill_switch": self.arb_kill_switch(),
                 "kill_reason": arbsvc.kill_reason(self.arb_kill_path), "last_scan_utc": iso(self.arb_last_scan_utc),
                 "last_error": self.arb_last_error, "live_allowed": self.live_allowed(), "scans": self.arb_scans,
-                "found": self.arb_found}
+                "found": self.arb_found,
+                # demo-execute (additive): true while sets would be placed on the DEMO exchange
+                "demo_execute": self.arb_state() != "stopped" and self.arb_exec_kind() == "demo-execute"}
 
     # ---- controls
     async def stop(self, by: str) -> dict:
@@ -2399,6 +2639,15 @@ class Runner:
         gen = self._stop_gen
         if self._stopping:
             raise StopInProgress("stop_in_progress")
+        # reload the config from the store (the owner may have fixed it since the last load). A config that still
+        # fails validation keeps the bot stopped with the reason; a good one clears a stale "invalid config" error.
+        # Stop never goes through here.
+        if not await self._load_config():
+            raise ConfigInvalid(f"invalid_config: {self.last_error or 'stored config failed validation'}"[:400])
+        if isinstance(self.last_error, str) and self.last_error.startswith(INVALID_CONFIG_PREFIXES):
+            self.last_error = None
+        if gen != self._stop_gen or self._stopping:
+            raise StopInProgress("stopped_during_start")
         kw ={"arb_desired": "stopped"} if self.arb_desired == "stopped" else {}   # keep the store's arb state honest
         try:
             await self.store.set_state(by=by, desired="running", **kw)
@@ -2499,5 +2748,7 @@ class Runner:
                 "live_allowed": self.live_allowed(), "live_block_reason": self.live_block_reason(),
                 "arb": {"state": self.arb_state(), "last_scan_utc": iso(self.arb_last_scan_utc)},
                 "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error},
+                # last pass's write-path summary (additive): cancel/place failures, paused, capped series
+                "write_report": self.last_write_report,
                 # R4 version handshake + R1 lease (additive fields)
                 **ver.handshake(), **self.lease_status(), "instance_id": self.instance_id}

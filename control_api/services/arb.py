@@ -11,15 +11,25 @@ import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import botfiles
 
-ARB_FIELDS = ("arb_max_contracts", "arb_min_profit", "arb_series", "arb_poll_seconds")
+ARB_FIELDS = ("arb_max_contracts", "arb_min_profit", "arb_series", "arb_poll_seconds", "arb_scan_cap", "arb_day_cap",
+              "arb_series_cap_frac", "arb_demo_execute")
 DEFAULT_MAX_CONTRACTS = 5          # small on purpose: a NO-arb set of N brackets costs about (N-1) x contracts $
 DEFAULT_MIN_PROFIT = 0.25
 DEFAULT_POLL_SECONDS = 15
 POLL_MIN, POLL_MAX = 5, 60         # plan: 5-60 s (Kalshi read rate limit, Render's 0.1 CPU)
 MIN_PROFIT_MIN, MIN_PROFIT_MAX = 0.01, 100.0
+# risk gate (services/riskgate.py; owner decision 2026-10-21): spend caps per scan and per UTC day, and the share of
+# the open-exposure ceiling one series may hold. arb_demo_execute: execute on the DEMO exchange (play money only).
+DEFAULT_SCAN_CAP, SCAN_CAP_MIN, SCAN_CAP_MAX = 15.0, 1.0, 100.0
+DEFAULT_DAY_CAP, DAY_CAP_MIN, DAY_CAP_MAX = 45.0, 1.0, 500.0
+DEFAULT_SERIES_CAP_FRAC, SERIES_CAP_FRAC_MIN, SERIES_CAP_FRAC_MAX = 0.35, 0.05, 0.9
+_RANGES = {"arb_scan_cap": (SCAN_CAP_MIN, SCAN_CAP_MAX, "USD per scan"),
+           "arb_day_cap": (DAY_CAP_MIN, DAY_CAP_MAX, "USD per UTC day"),
+           "arb_series_cap_frac": (SERIES_CAP_FRAC_MIN, SERIES_CAP_FRAC_MAX, "share of the open-exposure ceiling")}
 EXPECTATION = ("Bracket arbitrage is rare and small at a small balance. Opportunities last seconds, so a "
                "15-second poll catches only some. The maker strategy is the main earner.")
 
@@ -33,7 +43,18 @@ def scanner():
 
 def defaults() -> dict:
     return {"arb_max_contracts": DEFAULT_MAX_CONTRACTS, "arb_min_profit": DEFAULT_MIN_PROFIT,
-            "arb_series": list(scanner().DEFAULT_SERIES), "arb_poll_seconds": DEFAULT_POLL_SECONDS}
+            "arb_series": list(scanner().DEFAULT_SERIES), "arb_poll_seconds": DEFAULT_POLL_SECONDS,
+            "arb_scan_cap": DEFAULT_SCAN_CAP, "arb_day_cap": DEFAULT_DAY_CAP,
+            "arb_series_cap_frac": DEFAULT_SERIES_CAP_FRAC, "arb_demo_execute": False}
+
+
+_GATE_DEFAULTS = {"arb_scan_cap": DEFAULT_SCAN_CAP, "arb_day_cap": DEFAULT_DAY_CAP,
+                  "arb_series_cap_frac": DEFAULT_SERIES_CAP_FRAC}
+
+
+def gate_caps(cfg: dict) -> dict:
+    """The risk-gate caps from effective arb settings (services/riskgate.check_arb's `caps`)."""
+    return {k: cfg.get(k, d) for k, d in _GATE_DEFAULTS.items()}
 
 
 def current(config: dict | None) -> dict:
@@ -60,11 +81,24 @@ def schema(settings: Any) -> dict:
         "arb_poll_seconds": {"type": "integer", "unit": "seconds", "min": POLL_MIN, "max": POLL_MAX,
                              "help": "How often to scan (keeps under Kalshi's read rate limit).",
                              "editable": True},
+        "arb_scan_cap": {"type": "number", "unit": "USD per scan", "min": SCAN_CAP_MIN, "max": SCAN_CAP_MAX,
+                         "help": "Most money one scan may put into arbitrage sets.", "editable": True},
+        "arb_day_cap": {"type": "number", "unit": "USD per UTC day", "min": DAY_CAP_MIN, "max": DAY_CAP_MAX,
+                        "help": "Most money arbitrage may spend in one UTC day.", "editable": True},
+        "arb_series_cap_frac": {"type": "number", "unit": "share of the open-exposure ceiling",
+                                "min": SERIES_CAP_FRAC_MIN, "max": SERIES_CAP_FRAC_MAX,
+                                "help": "Largest share of the open-exposure ceiling one series may hold before an "
+                                        "arbitrage set is refused (counts all open positions; applies to "
+                                        "arbitrage only).", "editable": True},
+        "arb_demo_execute": {"type": "boolean", "unit": "demo exchange only",
+                             "help": "In demo mode, place the sets on the Kalshi DEMO exchange (play money) "
+                                     "instead of only logging them. Never touches real money.", "editable": True},
     }
 
 
 def ceilings(settings: Any) -> dict:
-    return {"arb_max_contracts": int(settings.max_arb_contracts), "arb_poll_seconds": POLL_MAX}
+    return {"arb_max_contracts": int(settings.max_arb_contracts), "arb_poll_seconds": POLL_MAX,
+            "arb_scan_cap": SCAN_CAP_MAX, "arb_day_cap": DAY_CAP_MAX, "arb_series_cap_frac": SERIES_CAP_FRAC_MAX}
 
 
 def _whole(v: Any) -> bool:
@@ -111,9 +145,38 @@ def validate(cur: dict, update: dict, settings: Any) -> dict:
                 errs.append(f"arb_series: only these series are allowed {sorted(allowed)}")
             else:
                 out[k] = list(v)
+        elif k in _RANGES:
+            lo, hi, unit = _RANGES[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+                errs.append(f"{k}: must be a number")
+            elif not lo <= float(v) <= hi:
+                errs.append(f"{k}: {unit}, must be {lo:g}-{hi:g}")
+            else:
+                out[k] = round(float(v), 4)
+        elif k == "arb_demo_execute":
+            if not isinstance(v, bool):
+                errs.append("arb_demo_execute: must be true/false")
+            else:
+                out[k] = v
     if errs:
         raise ValueError(errs)
     return out
+
+
+def demo_base_ok(client: Any) -> bool:
+    """True only if the client's base URL is one of the Kalshi DEMO exchange URLs and none of the production ones.
+    Checked on the client actually used to send, not on a mode name. A client without a base URL is refused."""
+    base = str(getattr(client, "base_url", "") or "").strip().rstrip("/").lower()
+    if not base:
+        return False
+    botfiles.ensure_bot_path()
+    from config import BASE_URLS
+    demo = {str(BASE_URLS[k]).rstrip("/").lower() for k in ("demo", "demo_alt") if k in BASE_URLS}
+    prod = {str(BASE_URLS[k]).rstrip("/").lower() for k in ("prod", "prod_alt") if k in BASE_URLS}
+    if base not in demo or base in prod:
+        return False
+    host = urlsplit(base).hostname or ""
+    return ".demo." in f".{host}" or host.startswith("demo-")      # belt and braces: the host names the demo
 
 
 def kill_reason(path: Path) -> str | None:

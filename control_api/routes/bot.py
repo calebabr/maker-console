@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from ..auth.audit import audit
 from ..auth.deps import current_user, current_user_stop, require_fresh_2fa
-from ..runner import RunnerDisabled, StopInProgress
+from ..runner import ConfigInvalid, RunnerDisabled, StopInProgress
 from ..services import benchmarks as bench
 from ..services import botfiles
 from ..services import strategies as strat
@@ -80,6 +80,10 @@ async def stop(request: Request, user: dict = Depends(current_user_stop)) -> dic
 async def start(request: Request, user: dict = Depends(require_fresh_2fa)) -> dict:
     try:
         res = await _runner(request).start_trading(by=user.get("username", "user"))
+    except ConfigInvalid as e:
+        # the reloaded stored config still fails validation: stay stopped, say why ("invalid_config: ...")
+        await audit(request, "bot.start", ok=False, user=user, details={"error": "invalid_config"})
+        raise HTTPException(409, str(e)) from e
     except (StopInProgress, RunnerDisabled, PermissionError) as e:
         # Stop always wins a race; RUNNER_ENABLED=false is final; LIVE on the stand-in: strategy_not_installed
         await audit(request, "bot.start", ok=False, user=user, details={"error": str(e)})

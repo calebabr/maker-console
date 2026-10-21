@@ -24,15 +24,10 @@ def _iso(doc: dict) -> dict:
     return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in doc.items()}
 
 
-async def arb_pnl(request: Request) -> dict | None:
-    """Arb P&L = sum of the guaranteed profit of FILLED arb sets, by time executed (d7 / d30)."""
-    store = request.app.state.store
-    now = datetime.now(timezone.utc)
-    try:
-        docs = await store.list_arb_opportunities(since=now - timedelta(days=30), limit=100000, executed_only=True)
-    except Exception:  # noqa: BLE001
-        return None
-    filled = [d for d in docs if str(d.get("executed", "")).startswith("FILLED") and isinstance(d.get("ts"), datetime)]
+DEMO_EXECUTE = "demo-execute"
+
+
+def _pnl_of(filled: list[dict], now: datetime) -> dict | None:
     if not filled:
         return None
     d7 = sum(float(d.get("profit") or 0) for d in filled if d["ts"] >= now - timedelta(days=7))
@@ -40,13 +35,35 @@ async def arb_pnl(request: Request) -> dict | None:
     return {"d7": round(d7, 2), "d30": round(d30, 2), "sets": len(filled)}
 
 
+async def arb_pnls(request: Request) -> tuple[dict | None, dict | None]:
+    """(live, demo-execute) arb P&L = sum of the guaranteed profit of FILLED arb sets, by time executed (d7 / d30).
+    Demo-execute sets (play money on the demo exchange) are never counted in the live figure."""
+    store = request.app.state.store
+    now = datetime.now(timezone.utc)
+    try:
+        docs = await store.list_arb_opportunities(since=now - timedelta(days=30), limit=100000, executed_only=True)
+    except Exception:  # noqa: BLE001
+        return None, None
+    filled = [d for d in docs if str(d.get("executed", "")).startswith("FILLED") and isinstance(d.get("ts"), datetime)]
+    live = [d for d in filled if d.get("mode") != DEMO_EXECUTE]
+    demo = [d for d in filled if d.get("mode") == DEMO_EXECUTE]
+    pd = _pnl_of(demo, now)
+    return _pnl_of(live, now), ({**pd, "demo": True} if pd else None)
+
+
+async def arb_pnl(request: Request) -> dict | None:
+    """Live arb P&L only (unchanged shape)."""
+    return (await arb_pnls(request))[0]
+
+
 async def arb_view(request: Request) -> dict:
     r = request.app.state.runner
     s = request.app.state.settings
     cfg = r.arb_settings()
+    pnl_live, pnl_demo = await arb_pnls(request)
     return {"settings": {"enabled": r.arb_desired == "running", "live": r.arb_mode == "live", **cfg},
             "schema": arbsvc.schema(s), "ceilings": arbsvc.ceilings(s), "status": r.arb_status(),
-            "pnl": await arb_pnl(request), "expectation": arbsvc.EXPECTATION}
+            "pnl": pnl_live, "pnl_demo_execute": pnl_demo, "expectation": arbsvc.EXPECTATION}
 
 
 @router.get("/arb")

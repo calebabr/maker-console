@@ -44,6 +44,9 @@ class FakeTrader:
     def get_balance(self):
         return {"balance": self.cash_cents}
 
+    def get_positions(self, **kw):
+        return {"market_positions": []}
+
     def create_order(self, *, ticker, side, count, price, client_order_id, **kw):
         if self.fail:
             raise RuntimeError("exchange error")
@@ -73,8 +76,12 @@ async def test_get_arb_defaults_log_only_off(arb_env):
     b = r.json()
     assert b["settings"]["enabled"] is False and b["settings"]["live"] is False
     assert b["status"]["state"] == "stopped" and b["status"]["live_allowed"] is False
-    assert set(b["schema"]) == {"arb_max_contracts", "arb_min_profit", "arb_series", "arb_poll_seconds"}
-    assert b["pnl"] is None and "expectation" in b
+    assert set(b["schema"]) == {"arb_max_contracts", "arb_min_profit", "arb_series", "arb_poll_seconds",
+                                "arb_scan_cap", "arb_day_cap", "arb_series_cap_frac", "arb_demo_execute"}
+    s = b["settings"]
+    assert s["arb_scan_cap"] == 15 and s["arb_day_cap"] == 45 and s["arb_series_cap_frac"] == 0.35
+    assert s["arb_demo_execute"] is False and b["status"]["demo_execute"] is False
+    assert b["pnl"] is None and b["pnl_demo_execute"] is None and "expectation" in b
 
 
 async def test_put_arb_requires_fresh_2fa(arb_env):

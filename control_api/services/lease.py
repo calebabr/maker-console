@@ -18,7 +18,7 @@ import logging
 import socket
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 log = logging.getLogger("control_api.lease")
@@ -103,6 +103,7 @@ class LeaseManager:
         if self.role != LEADER or self.generation is None:
             return False
         started = self._clock()
+        sent_wall = self._wall() if self._wall is not None else datetime.now(timezone.utc)
         try:
             ok = await self._call(self.store.renew_lease(self.instance_id, self.generation, self.ttl_s,
                                                          **self._now_kw()))
@@ -119,6 +120,11 @@ class LeaseManager:
         self.last_error = None
         # the renew may have been slow: count the lease from when we SENT it (conservative)
         self.last_renew_mono = started
+        # the store moved expires_at to (its now + TTL) but renew_lease returns only a bool: mirror it from the send
+        # time (never later than the stored value), so /status shows the renewed expiry, not the acquire-time one
+        exp = sent_wall + timedelta(seconds=self.ttl_s)
+        self.expires_at = exp.replace(microsecond=exp.microsecond // 1000 * 1000)   # stores keep milliseconds
+        self.holder = self.instance_id
         return True
 
     async def step(self) -> bool:
@@ -141,6 +147,8 @@ class LeaseManager:
             self.last_error = f"release: {type(e).__name__}"
             log.warning("lease release failed: %s", type(e).__name__)
             ok = False
+        if ok:
+            self.expires_at = self._wall() if self._wall is not None else datetime.now(timezone.utc)
         self._become_standby("released")
         return ok
 
