@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth.deps import current_user
 from ..services import strategies as strat
+from .periods import window_for
 
 router = APIRouter(prefix="/api")
 
@@ -40,6 +41,24 @@ def _since(since: datetime | None) -> datetime | None:
     return max(since.astimezone(timezone.utc), datetime.now(timezone.utc) - timedelta(days=180))
 
 
+async def _period_bounds(request: Request, period: str | None, s: datetime | None
+                         ) -> tuple[dict | None, datetime | None, datetime | None]:
+    """(period, since, until) once an optional `period=<id|current|all>` filter is applied to `since`."""
+    p = await window_for(request, period)
+    if p is None:
+        return None, s, None
+    start = _since(p["started_at"]) if p["started_at"] else None
+    if start is not None:
+        s = max(s, start) if s else start
+    return p, s, p["ended_at"]
+
+
+def _before(rows: list[dict], until: datetime | None) -> list[dict]:
+    if until is None:
+        return rows
+    return [r for r in rows if not isinstance(r.get("ts"), datetime) or r["ts"] < until]
+
+
 def _after(rows: list[dict], since: datetime | None) -> list[dict]:
     """Rows strictly after `since` (the store's `since` is inclusive)."""
     if since is None:
@@ -67,26 +86,36 @@ def _fill_row(f: dict) -> dict:
 @router.get("/activity")
 async def activity(request: Request, limit: int = Query(100, ge=1, le=1000),
                    since: datetime | None = Query(None), source: str | None = Query(None, pattern="^(bot|you)$"),
-                   user: dict = Depends(current_user)) -> dict:
+                   period: str | None = Query(None), user: dict = Depends(current_user)) -> dict:
     """Journal items (the bot's own events, labelled bot/maker) plus, additively for Y4, recent fills with their
-    source/strategy and recent settlements with the sources that traded them. `since` keeps rows after it."""
+    source/strategy and recent settlements with the sources that traded them. `since` keeps rows after it.
+    `period=<id|current|all>` (default all) keeps the rows of one period: journal rows and fills by their own
+    time, settlements by the period their FILL was in (a fill's settlement follows the fill)."""
     store = request.app.state.store
-    s = _since(since)
-    rows = _after(await _call(store.list_journal(since=s, limit=limit)), s)
+    pinfo, s, until = await _period_bounds(request, period, _since(since))
+    rows = _before(_after(await _call(store.list_journal(since=s, limit=limit)), s), until)
     items = [dict(_iso(r), source=strat.BOT, strategy="maker") for r in rows]
-    fills = _after(await _soft(store.list_fills(since=s, limit=limit, fields=FILL_VIEW)), s)
+    fills = _after(await _soft(store.list_fills(since=s, until=until, limit=limit, fields=FILL_VIEW)), s)
     frows = [_fill_row(f) for f in fills]
     if source:
         frows = [f for f in frows if f["source"] == source]
-    setts = _after(await _soft(store.list_settlements(since=s, limit=min(limit, 200),
+    in_period: set[str] | None = None
+    if pinfo is not None:                       # settlements of fills filled in the period (fill-date attribution)
+        pf = await _soft(store.list_fills(since=s, until=until, limit=20000, fields=("ticker", "market_ticker")))
+        in_period = {str(f.get("ticker") or f.get("market_ticker")) for f in pf}
+    setts = _after(await _soft(store.list_settlements(since=s, limit=2000 if pinfo else min(limit, 200),
                                                       fields=("ticker", "market_result", "result", "ts", "revenue"))),
                    s)
+    if in_period is not None:
+        setts = [x for x in setts if str(x.get("ticker")) in in_period][:min(limit, 200)]
     srows = []
     if setts:
         tss = [x["ts"] for x in setts if isinstance(x.get("ts"), datetime)]
         lo = min(tss) - timedelta(days=35) if tss else None
+        if pinfo is not None and s is not None:
+            lo = min(lo, s) if lo else s
         lab = strat.ticker_sources(await _soft(store.list_fills(
-            since=lo, limit=20000, fields=("ticker", "market_ticker", "is_taker", "source", "strategy"))))
+            since=lo, until=until, limit=20000, fields=("ticker", "market_ticker", "is_taker", "source", "strategy"))))
         for x in setts:
             srcs = sorted(lab.get(str(x.get("ticker")), set()))
             if source and source not in srcs:
@@ -95,17 +124,23 @@ async def activity(request: Request, limit: int = Query(100, ge=1, le=1000),
                           "ts": x["ts"].isoformat() if isinstance(x.get("ts"), datetime) else x.get("ts"),
                           "revenue": x.get("revenue"), "sources": srcs,
                           "source": strat.YOU if srcs == [strat.YOU] else (strat.BOT if srcs else None)})
-    return {"items": items, "fills": frows, "settlements": srows,
-            "since": s.isoformat() if s else None}
+    out = {"items": items, "fills": frows, "settlements": srows,
+           "since": s.isoformat() if s else None}
+    if pinfo is not None:
+        out["period"] = {"id": pinfo["id"], "name": pinfo["name"]}
+    return out
 
 
 @router.get("/history")
 async def history(request: Request, days: int = Query(30, ge=1, le=180), since: datetime | None = Query(None),
-                  user: dict = Depends(current_user)) -> dict:
-    """Account snapshots (whole-account balances; they can't be split by source). `since` overrides `days`."""
-    s = _since(since)
+                  period: str | None = Query(None), user: dict = Depends(current_user)) -> dict:
+    """Account snapshots (whole-account balances; they can't be split by source). `since` overrides `days`.
+    `period=<id|current|all>` (default all) keeps the snapshots dated inside that period and overrides `days`."""
+    pinfo, s, until = await _period_bounds(request, period, _since(since))
     since = s or datetime.now(timezone.utc) - timedelta(days=days)
-    snaps = _after(await _call(request.app.state.store.list_account_snapshots(since=since)), s)
+    if pinfo is not None and s is None:                 # period 1 starts at the beginning of data
+        since = datetime.now(timezone.utc) - timedelta(days=180)
+    snaps = _before(_after(await _call(request.app.state.store.list_account_snapshots(since=since)), s), until)
     snaps = list(reversed(snaps))                                  # store returns newest first
     return {"snapshots": [{"ts": s["ts"].isoformat() if isinstance(s.get("ts"), datetime) else s.get("ts"),
                            "cash": s.get("cash"), "exposure": s.get("exposure"), "headroom": s.get("headroom")}

@@ -25,7 +25,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
     from .auth.routes import router as auth_router
     from .db import get_store
     from . import version as ver
-    from .routes import alerts, analytics, arb, bot, cloud, config, data, deploy_status, release, shadow, ux
+    from .routes import alerts, analytics, arb, bot, cloud, config, data, deploy_status, periods, release, shadow, ux
     from .runner import Runner
     from .services import keepalive as ka
     from .services.cronjob import CronJobClient
@@ -75,7 +75,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
         return {"ok": True, **ver.handshake(), "role": runner.role(), "lease_generation": runner.lease.generation}
 
     app.include_router(auth_router)
-    for mod in (bot, config, data, cloud, arb, analytics, ux, alerts, deploy_status, release, shadow):
+    for mod in (bot, config, data, cloud, arb, analytics, ux, alerts, deploy_status, release, shadow, periods):
         app.include_router(mod.router)
     return app
 

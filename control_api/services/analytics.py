@@ -428,11 +428,13 @@ def public_trade(row: dict) -> dict:
 TRADE_FILTERS = ("series", "side", "kind", "status", "band", "cell", "result", "source", "strategy")
 
 
-def filter_trades(rows: list[dict], *, since: datetime, **flt: Any) -> list[dict]:
-    """Rows with fill time >= since and every given (non-None) filter equal; `cell="none"` = no cell."""
+def filter_trades(rows: list[dict], *, since: datetime, until: datetime | None = None,
+                  **flt: Any) -> list[dict]:
+    """Rows with since <= fill time < until (until optional) and every given (non-None) filter equal;
+    `cell="none"` = no cell."""
     out = []
     for r in rows:
-        if r["_ts"] < since:
+        if r["_ts"] < since or (until is not None and r["_ts"] >= until):
             continue
         ok = True
         for k in TRADE_FILTERS:
@@ -751,12 +753,28 @@ def trades_csv(trades: list[dict]) -> str:
     return buf.getvalue()
 
 
+def _in(ts: datetime | None, start: datetime | None, end: datetime | None) -> bool:
+    return ts is not None and (start is None or ts >= start) and (end is None or ts < end)
+
+
 def summary(rows: list[dict], episodes: list[dict], arb_docs: list[dict], *, days: int, env: str,
             now: datetime, cells: Any, truncated: bool = False, expectations: dict | None = None,
-            jcells: dict[str, str] | None = None, series_list: Iterable[str] = ()) -> dict:
+            jcells: dict[str, str] | None = None, series_list: Iterable[str] = (),
+            period: dict | None = None) -> dict:
+    """`period` ({id, name, started_at, ended_at}; datetimes or None) switches to period mode: only fills filled
+    inside [started_at, ended_at) count (attribution by FILL date) and each one is settled whenever its market
+    settled, instead of the rolling `days` window by settlement date."""
     lo = now - timedelta(days=days)
+    p0 = p1 = None
+    if period is not None:
+        p0, p1 = period.get("started_at"), period.get("ended_at")
+        lo = max(p0, now - timedelta(days=max(DAYS_ALLOWED))) if p0 else now - timedelta(days=max(DAYS_ALLOWED))
+        rows = [r for r in rows if _in(r["_ts"], p0, p1)]
+        episodes = [e for e in episodes if _in(_ts(e.get("ts")), p0, p1)]
+        arb_docs = [d for d in arb_docs if _in(_ts(d.get("ts")), p0, p1)]
     rows = [r for r in rows if r.get("source") != "you"]   # Y1: manual trades are never a bot statistic
-    settled = [r for r in rows if r["_settled"] is not None and lo <= r["_settled"] <= now]
+    settled = [r for r in rows if r["_settled"] is not None and (period is not None or lo <= r["_settled"])
+               and r["_settled"] <= now]
     maker = [r for r in settled if r["kind"] == "maker"]
     n = len(settled)
     wins = sum(1 for r in settled if r["result"] == "win")
@@ -775,7 +793,7 @@ def summary(rows: list[dict], episodes: list[dict], arb_docs: list[dict], *, day
         g["markets"] = len(_clusters(cell_rows.get(g["key"], [])))
         g["expected_win_rate"], g["expected_roi"] = expectation_for(g["cell"], exp)
         g["verdict"], g["verdict_reason"] = verdict(g, g["markets"], g["expected_win_rate"], g["expected_roi"])
-    return {
+    out = {
         "env": env, "days": days, "generated_utc": iso(now), "truncated": bool(truncated),
         "totals": {"settled_fills": n, "contracts": _r(sum(r["count"] for r in settled), 2), "cost": round(cost, 2),
                    "pnl": round(pnl, 2), "roi": _r(pnl / cost, 4) if cost > 0 else None,
@@ -793,6 +811,10 @@ def summary(rows: list[dict], episodes: list[dict], arb_docs: list[dict], *, day
         "calibration": calibration(maker, cells),
         "fill_rate": fill_rate(episodes, lo=lo, env=env, cells=cells, jcells=jcells or {}, series_list=series_list),
     }
+    if period is not None:
+        out["period"] = {"id": period.get("id"), "name": period.get("name"), "started_at": iso(p0),
+                         "ended_at": iso(p1)}
+    return out
 
 
 def _totals(settled: list[dict], open_n: int) -> dict:
@@ -805,15 +827,22 @@ def _totals(settled: list[dict], open_n: int) -> dict:
             "open_fills": open_n}
 
 
-def my_trades(rows: list[dict], *, days: int, env: str, now: datetime, limit: int = 200) -> dict:
+def my_trades(rows: list[dict], *, days: int, env: str, now: datetime, limit: int = 200,
+              period: dict | None = None) -> dict:
     """The owner's own trades (source "you", Y5) beside the bot: totals, daily P&L curve, newest trades with notes.
-    Manual rows never feed the bot summary (summary() drops them); bot totals here are for the side-by-side line."""
+    Manual rows never feed the bot summary (summary() drops them); bot totals here are for the side-by-side line.
+    `period` (see summary) attributes by fill date instead of the rolling settlement window."""
     lo = now - timedelta(days=days)
+    if period is not None:
+        p0, p1 = period.get("started_at"), period.get("ended_at")
+        lo = max(p0, now - timedelta(days=max(DAYS_ALLOWED))) if p0 else now - timedelta(days=max(DAYS_ALLOWED))
+        rows = [r for r in rows if _in(r["_ts"], p0, p1)]
     mine = [r for r in rows if r.get("source") == "you"]
     bot = [r for r in rows if r.get("source") != "you"]
 
     def settled(rs):
-        return [r for r in rs if r["_settled"] is not None and lo <= r["_settled"] <= now]
+        return [r for r in rs if r["_settled"] is not None and (period is not None or lo <= r["_settled"])
+                and r["_settled"] <= now]
     ms, bs = settled(mine), settled(bot)
     curve = [{"date": p["date"], "pnl": p["pnl"], "cum_pnl": p["cum_pnl"], "drawdown": p["drawdown"]}
              for p in pnl_curve(ms, lo.date(), now.date())]
