@@ -6,7 +6,7 @@ import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
 import { useResource } from '../hooks/useResource.js';
 import { api } from '../services/api.js';
-import ChangeDiff, { formatSettingValue, settingLabel } from '../components/ChangeDiff.jsx';
+import ChangeDiff, { formatSettingValue, plainText, settingLabel } from '../components/ChangeDiff.jsx';
 import DisplayCard from '../components/DisplayCard.jsx';
 import PushCard from '../components/PushCard.jsx';
 import PushDevicesCard from '../components/PushDevicesCard.jsx';
@@ -24,6 +24,12 @@ export const MAX_POLL_MINUTES = 14;
 const READ_ONLY = ['cells'];
 // Series options come from the API's config schema (the installed strategy); none are built into the app.
 const DEFAULT_SERIES = [];
+
+// A nested object (or a list of objects) has no single text box: it is shown read-only, never edited as text.
+const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+export function isComplex(v) {
+  return isObj(v) || (Array.isArray(v) && v.some(isObj));
+}
 
 function kindOf(spec, value) {
   const t = String((spec && spec.type) || '').toLowerCase();
@@ -105,7 +111,7 @@ export default function Settings() {
     return keys;
   }, [schema, config]);
 
-  const editable = (k) => !READ_ONLY.includes(k) && !(schema[k] && schema[k].editable === false);
+  const editable = (k) => !READ_ONLY.includes(k) && !(schema[k] && schema[k].editable === false) && !(config && isComplex(config[k]));
 
   // Parse + validate the draft -> { patch, errors }
   const { patch, errors } = useMemo(() => {
@@ -242,7 +248,7 @@ export default function Settings() {
                   {(value || []).map((row, i) => (
                     <tr key={i}>
                       {(Array.isArray(row) ? row : [row]).map((c, j) => (
-                        <td key={j}>{String(c)}</td>
+                        <td key={j}>{plainText(c)}</td>
                       ))}
                     </tr>
                   ))}
@@ -250,7 +256,7 @@ export default function Settings() {
               </table>
             </div>
           ) : (
-            <div className="readonly-value">{Array.isArray(value) ? value.join(', ') : String(value ?? '—')}</div>
+            <div className="readonly-value">{plainText(value)}</div>
           )}
           {help}
         </div>

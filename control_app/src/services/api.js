@@ -387,9 +387,20 @@ export const api = {
 
   // Bracket arbitrage (DASHBOARD_PLAN.md "Strategies run by the app")
   getArb: () => request('GET', '/api/arb'),
-  // patch: any of {enabled, live, confirm:"LIVE", ack_legging, arb_max_contracts, arb_min_profit, arb_series, arb_poll_seconds}
+  // patch: any of {enabled, live, confirm:"LIVE", ack_legging, arb_max_contracts, arb_min_profit, arb_series, arb_poll_seconds, arb_scan_cap, arb_day_cap, arb_series_cap_frac, arb_demo_execute}
   putArb: (patch, code) => request('PUT', '/api/arb', { body: patch, code }),
   getArbOpportunities: (limit = 100) => request('GET', `/api/arb/opportunities?limit=${enc(limit)}`),
+
+  // Periods and cash flows (Sprint 2A-1). Reads need a login; every write needs fresh 2FA.
+  // Period ids are passed verbatim ("p1" is the implicit first period).
+  getPeriods: () => request('GET', '/api/periods'),
+  createPeriod: (name, note, code) =>
+    request('POST', '/api/periods', { body: note ? { name, note } : { name }, code, cache: false }),
+  addCashFlow: (flow, code) => request('POST', '/api/cash-flows', { body: flow, code, cache: false }),
+  deleteCashFlow: (id, code) => request('DELETE', `/api/cash-flows/${enc(id)}`, { code, cache: false }),
+  getPeriodSummary: (id, { env, source } = {}) =>
+    request('GET', `/api/periods/${enc(id)}/summary${query({ env, source })}`, { cache: false }),
+  getPnlBySource: ({ period, env } = {}) => request('GET', `/api/pnl/by-source${query({ period, env })}`, { cache: false }),
 
   // Analytics (docs/ANALYTICS_CONTRACT.md). Read-only, normal session, no 2FA.
   // env omitted -> the server uses the current bot mode; 'all' = demo + live.

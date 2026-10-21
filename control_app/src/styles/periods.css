@@ -1,0 +1,13 @@
+.period-select { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; }
+.period-select-label { color: var(--muted); font-size: 0.8125rem; }
+.period-select select { flex: 1; min-width: 0; max-width: 100%; }
+.period-timeline, .flow-list { list-style: none; margin: 0; padding: 0; }
+.period-timeline li, .flow-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.9375rem; }
+.period-timeline .period-when, .flow-list .flow-when { color: var(--muted); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+.period-summary dl { margin: 0; }
+.period-summary .sum-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.9375rem; }
+.period-summary .sum-row dt { color: var(--muted); }
+.period-summary .sum-row dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.period-form { display: grid; gap: 8px; margin-top: 12px; }
+.period-form .row { display: flex; gap: 8px; }
+.period-form .row > * { flex: 1; min-width: 0; }

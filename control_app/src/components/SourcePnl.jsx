@@ -30,7 +30,7 @@ export function riskBySource(positions) {
  * so a new strategy shows up with no change here) plus one split bar of $ at risk, Bot vs You.
  * Manual trades ("You") are shown here only; they never count in bot statistics.
  */
-export default function SourcePnl({ pnlToday, strategies, positions }) {
+export default function SourcePnl({ pnlToday, strategies, positions, totalLabel = 'Total Today' }) {
   const list = Array.isArray(strategies) && strategies.length ? strategies : FALLBACK;
   const bySrc = pnlToday || {};
   const risk = riskBySource(positions);
@@ -50,7 +50,7 @@ export default function SourcePnl({ pnlToday, strategies, positions }) {
         ))}
         <li className="src-total">
           <span className="src-swatch" aria-hidden="true" />
-          <span className="src-name">Total Today</span>
+          <span className="src-name">{totalLabel}</span>
           <span className={`src-val ${pnlClass(bySrc.total)}`}>{formatMoney(bySrc.total, { sign: true })}</span>
         </li>
       </ul>

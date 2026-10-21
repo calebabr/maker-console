@@ -21,7 +21,10 @@ export const POLL_MS = 30000;
 const OPP_LIMIT = 50;
 // Series options come from the API's arb schema (the installed scanner); no ticker list is built into the app.
 export const ARB_SERIES = [];
-const FIELDS = ['arb_max_contracts', 'arb_min_profit', 'arb_poll_seconds', 'arb_series'];
+const FIELDS = [
+  'arb_max_contracts', 'arb_min_profit', 'arb_poll_seconds', 'arb_series',
+  'arb_scan_cap', 'arb_day_cap', 'arb_series_cap_frac', 'arb_demo_execute',
+];
 const DEFAULT_SCHEMA = {
   arb_max_contracts: {
     type: 'number', unit: 'contracts per leg', min: 1, max: 100,
@@ -38,6 +41,22 @@ const DEFAULT_SCHEMA = {
   arb_series: {
     type: 'list', unit: 'series tickers',
     help: 'Bracket events to scan. Each event has mutually exclusive brackets.',
+  },
+  arb_scan_cap: {
+    type: 'number', unit: 'USD per scan', min: 1, max: 100,
+    help: 'Most money one scan may spend on sets in demo-execute. Sets over this are skipped.',
+  },
+  arb_day_cap: {
+    type: 'number', unit: 'USD per day', min: 1, max: 500,
+    help: 'Most money arbitrage may spend per UTC day in demo-execute.',
+  },
+  arb_series_cap_frac: {
+    type: 'number', unit: 'fraction of the open-exposure ceiling', min: 0.05, max: 0.9, step: 0.01,
+    help: 'Most one series may hold in open exposure, as a share of the account ceiling.',
+  },
+  arb_demo_execute: {
+    type: 'bool', label: 'Demo Execute',
+    help: 'Place the sets it finds as real orders on the Kalshi demo account (play money). Never on live.',
   },
 };
 
@@ -76,6 +95,7 @@ function kindOf(spec) {
   const t = String((spec && spec.type) || '').toLowerCase();
   if (['int', 'integer'].includes(t)) return 'int';
   if (['list', 'array', 'multiselect'].includes(t)) return 'list';
+  if (['bool', 'boolean'].includes(t)) return 'bool';
   return 'number';
 }
 
@@ -84,9 +104,18 @@ function toDraft(settings) {
   for (const k of FIELDS) {
     if (!(k in (settings || {}))) continue;
     const v = settings[k];
-    d[k] = Array.isArray(v) ? [...v] : v == null ? '' : String(v);
+    d[k] = Array.isArray(v) ? [...v] : typeof v === 'boolean' ? v : v == null ? '' : String(v);
   }
   return d;
+}
+
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const showVal = (v) => (Array.isArray(v) ? v.join(', ') : typeof v === 'boolean' ? (v ? 'On' : 'Off') : String(v));
+
+/** "skipped: gate total exposure over the limit" -> the plain reason, or null when this is not a gate skip. */
+export function gateReason(executed) {
+  const m = /^skipped:\s*gate\s*(.*)$/i.exec(String(executed || ''));
+  return m ? m[1].trim() || 'risk limit' : null;
 }
 
 function executedPill(executed) {
@@ -94,6 +123,8 @@ function executedPill(executed) {
   if (e.startsWith('FILLED')) return { cls: 'pill-ok', text: 'Filled' };
   if (e.startsWith('PARTIAL')) return { cls: 'pill-danger', text: 'Partial fill' };
   if (e === 'log-only') return { cls: 'pill-muted', text: 'Logged only' };
+  if (gateReason(e) !== null) return { cls: 'pill-warn', text: 'Skipped by risk limit' };
+  if (e.startsWith('ERROR')) return { cls: 'pill-danger', text: 'Error' };
   return { cls: 'pill-muted', text: e };
 }
 
@@ -149,7 +180,9 @@ export default function Arbitrage() {
       const spec = schema[k] || {};
       const kind = kindOf(spec);
       let v = draft[k];
-      if (kind === 'list') {
+      if (kind === 'bool') {
+        v = !!v;
+      } else if (kind === 'list') {
         if (!Array.isArray(v) || !v.length) errs[k] = 'Pick at least one';
       } else {
         if (v === '' || v == null) {
@@ -289,8 +322,7 @@ export default function Arbitrage() {
             {Object.entries(patch).map(([k, v]) => (
               <li key={k}>
                 <strong>{humanize(k.replace(/^arb_/, ''))}</strong>:{' '}
-                {Array.isArray(settings[k]) ? settings[k].join(', ') : String(settings[k])} →{' '}
-                {Array.isArray(v) ? v.join(', ') : String(v)}
+                {showVal(settings[k])} → {showVal(v)}
               </li>
             ))}
           </ul>
@@ -344,6 +376,17 @@ export default function Arbitrage() {
           {help}
           {errors[k] && <span className="error-text">{errors[k]}</span>}
         </fieldset>
+      );
+    }
+    if (kind === 'bool') {
+      return (
+        <div className="field" key={k}>
+          <label className="check">
+            <input type="checkbox" checked={!!draft[k]} onChange={(ev) => setField(k, ev.target.checked)} />
+            {label}
+          </label>
+          {help}
+        </div>
       );
     }
     const hiList = [spec.max, ceilings[k]].filter((x) => typeof x === 'number');
@@ -469,6 +512,10 @@ export default function Arbitrage() {
                 <dd>{liveAllowed ? 'yes' : 'no'}</dd>
               </div>
               <div>
+                <dt>Demo orders</dt>
+                <dd data-testid="demo-exec-state">{st.demo_execute ? 'on' : 'off'}</dd>
+              </div>
+              <div>
                 <dt>Kill switch<HelpIcon term="kill-switch" /></dt>
                 <dd className={st.kill_switch ? 'neg' : ''}>{st.kill_switch ? 'SET' : 'off'}</dd>
               </div>
@@ -482,6 +529,13 @@ export default function Arbitrage() {
 
           <Card title={<>Profit &amp; loss<HelpIcon term="realised-pnl" /></>} subtitle="Executed arbitrage sets only.">
             <PnlStats pnl={data.pnl} big={false} emptyText="No executed sets yet." />
+            {data.pnl_demo_execute && (
+              <div data-testid="demo-pnl">
+                <h3 className="subhead">Demo Orders (Play Money)</h3>
+                <PnlStats pnl={data.pnl_demo_execute} big={false} emptyText="No demo sets yet." />
+                {isNum(data.pnl_demo_execute.sets) && <p className="hint">{data.pnl_demo_execute.sets} demo sets. Never part of the live figure above.</p>}
+              </div>
+            )}
             <p className="hint">{expectation}</p>
           </Card>
         </>
@@ -499,8 +553,10 @@ export default function Arbitrage() {
           {items.map((o, i) => {
             const ex = executedPill(o.executed);
             const when = o.ts || o.utc;
+            const demoExec = o.mode === 'demo-execute';
+            const why = gateReason(o.executed);
             return (
-              <li key={`${when}-${o.event}-${i}`} className="row-item">
+              <li key={`${when}-${o.event}-${i}`} className={`row-item ${demoExec ? 'row-demo' : ''}`} data-mode={o.mode || undefined}>
                 <div className="row-top">
                   <span className="mono">{o.event || '?'}</span>
                   <span className="muted small">{dateTime(when)}</span>
@@ -511,8 +567,10 @@ export default function Arbitrage() {
                   <span className={Number(o.profit) > 0 ? 'pos' : ''}>{money(Number(o.profit), { sign: true })}</span>
                   <span className="muted">cost {money(Number(o.cost))}</span>
                   {o.seen_count > 1 && <span className="muted">seen {o.seen_count}×</span>}
+                  {demoExec && <span className="pill pill-demo" data-testid="demo-exec-badge">Demo order</span>}
                   <span className={`pill ${ex.cls}`}>{ex.text}</span>
                 </div>
+                {why && <div className="muted small" data-testid="gate-reason">Not placed: {why}</div>}
               </li>
             );
           })}
