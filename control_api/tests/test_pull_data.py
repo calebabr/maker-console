@@ -12,7 +12,7 @@ from control_api.tools import pull_data
 
 FILES = ["state.json", "journal.csv", "account_snapshots.csv", "fills.csv", "fill_pnl.csv", "settlements.csv",
          "heartbeats.csv", "quote_episodes.csv", "arb_opportunities.csv", "audit.csv", "monitor_summaries.json",
-         "config_versions.json", "SUMMARY.md", "DATA_DICTIONARY.md"]
+         "config_versions.json", "periods.json", "cash_flows.json", "SUMMARY.md", "DATA_DICTIONARY.md"]
 LEAKS = ["password_hash", "totp", "argon2", "s3cr3t-value", "-----begin", "eyjhbgcioijiuzi1nij9", "mongodb+srv://",
          "203.0.113.24", "iphone", "hunter2", "tick-tok-123", "private_key", "jwt_secret"]
 
@@ -56,6 +56,10 @@ async def _rich_store(now):
     await store.add_heartbeat({"ts": now - timedelta(minutes=1), "ok": False,
                                "error": "connect mongodb+srv://u:pw@host failed; secret=s3cr3t-value",
                                "private_key_hint": "-----BEGIN RSA PRIVATE KEY-----x-----END RSA PRIVATE KEY-----"})
+    await store.add_period({"id": "pd-2", "name": "Demo Period 2", "started_at": now - timedelta(days=1),
+                            "note": "after Sprint 2A-1", "created_by": "owner"})
+    await store.add_cash_flow({"id": "cf-1", "ts": now - timedelta(days=3), "kind": "deposit", "amount": 50.0,
+                               "note": "top up", "created_by": "owner"})
     await store.save_cloud_settings({"pinger_minutes": 5, "webhook_secret_hint": "s3cr3t-value"}, by="t")
     # users / revoked tokens exist but must never be read
     await store.save_user({"username": "owner", "password_hash": "$argon2id$v=19$xyz", "totp_secret_enc": "gAAA"})
@@ -103,6 +107,8 @@ def test_every_collection_exported_read_only_and_scrubbed(tmp_path):
         assert counts[name] > 0, name
     assert counts["monitor_summaries.json"] == 2                       # seed's + ours; the 200-day-old one excluded
     assert counts["config_versions.json"] == 2
+    assert counts["periods.json"] == 2 and counts["cash_flows.json"] == 3          # seed's + ours
+    assert "Demo Period 2" in [p["name"] for p in json.loads((out / "periods.json").read_text(encoding="utf-8"))]
     assert not any("user" in c or "revoke" in c for c in store.calls)
     st = json.loads((out / "state.json").read_text(encoding="utf-8"))
     assert st["cloud_settings"]["pinger_minutes"] == 5 and "webhook_secret_hint" not in st["cloud_settings"]

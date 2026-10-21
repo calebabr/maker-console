@@ -205,6 +205,9 @@ async def collect(store, days: int) -> dict:
         "config_versions": await store.list_config_versions(limit=10_000),
         "heartbeats": await store.list_heartbeats(since=since, limit=BIG),
     }
+    for name in ("periods", "cash_flows"):                  # all history (tiny, permanent); absent on an older store
+        lister = getattr(store, f"list_{name}", None)
+        data[name] = list(await lister()) if lister is not None else []
     data["fills"] = [f for f in data["fills_lookback"] if (_ts(f) or since) >= since]
     return data
 
@@ -609,6 +612,12 @@ FILES_DOC = {
                                "report_text. Seed data stores the summary fields at the top level.", {}),
     "config_versions.json": ("Every config version (all history, not windowed), newest first: version, ts (" + TS +
                              "), by (owner | monitor | seed), before, after (full config).", {}),
+    "periods.json": ("Demo-period markers (all history, oldest first; a JSON list): id, name, started_at (" + TS +
+                     "), note, created_by. Period 1 is implicit: it runs from the start of the data to the first "
+                     "marker. A fill belongs to the period it was filled in, even if it settles later.", {}),
+    "cash_flows.json": ("Deposit and withdrawal events (all history, newest first; a JSON list): id, ts (" + TS +
+                        "), kind (deposit | withdrawal), amount (USD, positive), note, created_by. They are shown "
+                        "beside P&L and never netted into it.", {}),
     "audit.csv": ("Control actions (login, 2fa, start, stop, config changes...), ts in the window. IP and user agent "
                   "are NOT exported.", {
         "ts": TS + ".", "user": "Username.", "action": "Action name (e.g. bot.start, config.update).",
@@ -697,7 +706,7 @@ def write_all(data: dict, out: Path, days: int, source: str) -> dict:
         headers[fname] = write_csv(out / fname, tables[name], AUDIT_KEYS if name == "audit" else None,
                                    FLATTEN.get(name, ()))
         counts[fname] = len(tables[name])
-    for name in ("monitor_summaries", "config_versions"):
+    for name in ("monitor_summaries", "config_versions", "periods", "cash_flows"):
         (out / f"{name}.json").write_text(json.dumps(clean(data[name]), indent=2), encoding="utf-8")
         counts[f"{name}.json"] = len(data[name])
 
