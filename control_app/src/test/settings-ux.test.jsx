@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -220,13 +220,20 @@ function row(msAgo, over) {
 }
 
 describe('Activity', () => {
-  const ITEMS = [
-    row(10 * 60 * 1000, { ticker: 'KXFEDDECISION-26DEC-H25', source: 'you', strategy: null, note: 'manual' }),
-    row(2 * HOUR, { event: 'quote' }),
-    row(26 * HOUR, { strategy: 'arb', ticker: 'KXDEMOC-26OCT14-B88.5' }),
-    row(27 * HOUR, { event: 'settle', source: 'you', strategy: null, ticker: 'KXNBAGAME-26OCT13NYKBOS-NYK', note: 'manual trade settled' }),
-    row(75 * HOUR, { event: 'cancel' }),
-  ];
+  let ITEMS;
+  beforeEach(() => {
+    // a fixed clock (mid-afternoon local time) so the day headings do not depend on when the suite runs
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 9, 14, 14, 0, 0));
+    ITEMS = [
+      row(10 * 60 * 1000, { ticker: 'KXFEDDECISION-26DEC-H25', source: 'you', strategy: null, note: 'manual' }),
+      row(2 * HOUR, { event: 'quote' }),
+      row(26 * HOUR, { strategy: 'arb', ticker: 'KXDEMOC-26OCT14-B88.5' }),
+      row(27 * HOUR, { event: 'settle', source: 'you', strategy: null, ticker: 'KXNBAGAME-26OCT13NYKBOS-NYK', note: 'manual trade settled' }),
+      row(75 * HOUR, { event: 'cancel' }),
+    ];
+  });
+  afterEach(() => { vi.useRealTimers(); });
   const routes = () => ({ 'GET /api/status': STATUS, 'GET /api/activity': { items: ITEMS }, 'GET /api/strategies': [200, STRATEGIES] });
 
   it('groups rows by day: Today, Yesterday, then a dated heading', async () => {
