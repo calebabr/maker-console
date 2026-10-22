@@ -126,6 +126,41 @@ SHADOW_DATE_FIELDS = ("ts", "join_ts", "last_seen_ts", "end_ts", "through_ts", "
 SHADOW_RESULTS = ("yes", "no", "void")
 SHADOW_SCORED_RESULTS = ("yes", "no")
 
+# Sprint 2A-3 additive episode fields. Old episodes lack them; reads fill the defaults (a partial write never
+# resets a stored value, so the defaults are applied on read only).
+SHADOW_EPISODE_DEFAULTS = {"through_vol": None, "capped": False, "cap_reason": None, "interval": 10,
+                           "fee_mode": None}
+SHADOW_INTERVALS_ALLOWED = (5, 7, 10)
+SHADOW_CAP_REASON_MAX = 200
+
+
+def shadow_with_defaults(doc: dict, fields=None) -> dict:
+    """Copy of an episode with the missing 2A-3 fields defaulted (only the requested ones under a projection)."""
+    out = dict(doc)
+    for k, v in SHADOW_EPISODE_DEFAULTS.items():
+        if (fields is None or k in fields) and k not in out:
+            out[k] = v
+    return out
+
+
+def _check_shadow_fields(out: dict) -> None:
+    tv = out.get("through_vol")
+    if "through_vol" in out and tv is not None:
+        if isinstance(tv, bool) or not isinstance(tv, (int, float)) or tv != tv or tv < 0:
+            raise ValueError("through_vol must be a number >= 0 or null")
+    if "capped" in out and not isinstance(out["capped"], bool):
+        raise ValueError("capped must be true/false")
+    for k in ("cap_reason", "fee_mode"):
+        if out.get(k) is not None:
+            if not isinstance(out[k], str):
+                raise ValueError(f"{k} must be text or null")
+            out[k] = out[k][:SHADOW_CAP_REASON_MAX]
+    if "interval" in out:
+        iv = out["interval"]
+        if isinstance(iv, bool) or not isinstance(iv, int) or not 1 <= iv <= 1440:
+            raise ValueError("interval must be whole minutes")
+
+
 # Defaults/ranges for cloud_settings (see DASHBOARD_PLAN.md "Keep-awake"). The API validates ranges;
 # the store only persists. Exposed here so backend/seed share one source.
 DEFAULT_CLOUD_SETTINGS = {
@@ -136,6 +171,8 @@ DEFAULT_CLOUD_SETTINGS = {
     "cronjob_job_id": None,
     "pinger_sync": {"ok": None, "ts": None, "error": None},
     "shadow_enabled": False,            # shadow mode: read-only estimate of what the strategy would bid
+    "shadow_capital": 150,              # capital the shadow estimate assumes (20-100000)
+    "shadow_intervals": [10],           # shadow cadences in minutes (subset of {5, 7, 10}, max 3)
 }
 
 # Fields the store never accepts (secrets must never reach the database).
@@ -392,6 +429,7 @@ def prepare_shadow_episode(doc: dict) -> dict:
         out.pop("ts", None)
         if out.get("join_ts") is not None:
             out["ts"] = out["join_ts"]
+    _check_shadow_fields(out)
     return out
 
 

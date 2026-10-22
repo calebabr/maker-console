@@ -22,6 +22,11 @@ CLOUD_FIELDS = {
                              "help": "Alert if no heartbeat for this long."},
     "shadow_enabled": {"type": "boolean", "unit": None, "min": None, "max": None,
                        "help": "Shadow mode: record what the strategy would bid (read only, places no orders)."},
+    "shadow_capital": {"type": "number", "unit": "dollars", "min": 20, "max": 100000,
+                       "help": "Capital the shadow estimate assumes, so it does not depend on the account."},
+    "shadow_intervals": {"type": "int_list", "unit": "minutes", "allowed": [5, 7, 10], "max_items": 3,
+                         "min": None, "max": None,
+                         "help": "Shadow cadences to compare (5, 7 and/or 10 minutes); needs SHADOW_VARIANTS."},
 }
 
 
@@ -43,6 +48,23 @@ def validate_cloud(update: dict) -> dict:
                 errs.append(f"{k}: must be true/false")
             else:
                 out[k] = v
+            continue
+        if spec["type"] == "number":
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v in (float("inf"), float("-inf")):
+                errs.append(f"{k}: must be a number")
+            elif not spec["min"] <= v <= spec["max"]:
+                errs.append(f"{k}: {spec['unit']}, must be {spec['min']}-{spec['max']}")
+            else:
+                out[k] = v
+            continue
+        if spec["type"] == "int_list":
+            ok = (isinstance(v, list) and 1 <= len(v) <= spec["max_items"]
+                  and all(isinstance(x, int) and not isinstance(x, bool) and x in spec["allowed"] for x in v)
+                  and len(set(v)) == len(v))
+            if ok:
+                out[k] = sorted(v)
+            else:
+                errs.append(f"{k}: up to {spec['max_items']} distinct values from {spec['allowed']}")
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or int(v) != v:
             errs.append(f"{k}: must be a whole number")
