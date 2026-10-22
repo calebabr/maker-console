@@ -3,6 +3,7 @@ import Card from './Card.jsx';
 import Time from './Time.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
 import { api } from '../services/api.js';
+import CollapsibleList from './CollapsibleList.jsx';
 
 /**
  * Registered phones / browsers (S-33). The API only exposes the push-service host (for example
@@ -65,28 +66,32 @@ export default function PushDevicesCard() {
         </p>
       )}
       {list.length > 0 && (
-        <ul aria-label="Registered push devices" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-          {list.map((d, i) => (
-            <li
-              key={`${d.host}-${d.created_utc}-${i}`}
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                gap: 12,
-                padding: '10px 0',
-                borderTop: i ? '1px solid var(--border)' : 'none',
-                minWidth: 0,
-              }}
-            >
-              <span className="mono" style={{ overflowWrap: 'anywhere' }}>
-                {d.host || 'Unknown'}
-              </span>
-              <span className="muted small" style={{ whiteSpace: 'nowrap' }}>
-                Added <Time value={d.created_utc} withDate />
-              </span>
-            </li>
-          ))}
-        </ul>
+        <CollapsibleList items={list} pageKey="push-devices" label="devices">
+          {(vis) => (
+            <ul aria-label="Registered push devices" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              {vis.map((d, i) => (
+                <li
+                  key={`${d.host}-${d.created_utc}-${i}`}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    padding: '10px 0',
+                    borderTop: i ? '1px solid var(--border)' : 'none',
+                    minWidth: 0,
+                  }}
+                >
+                  <span className="mono" style={{ overflowWrap: 'anywhere' }}>
+                    {d.host || 'Unknown'}
+                  </span>
+                  <span className="muted small" style={{ whiteSpace: 'nowrap' }}>
+                    Added <Time value={d.created_utc} withDate />
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CollapsibleList>
       )}
       <button
         type="button"

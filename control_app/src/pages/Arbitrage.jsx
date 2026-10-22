@@ -10,6 +10,7 @@ import { useResource } from '../hooks/useResource.js';
 import { usePageVisible } from '../hooks/usePageVisible.js';
 import { api } from '../services/api.js';
 import { ago, dateTime, humanize, money, num } from '../utils/format.js';
+import CollapsibleList from '../components/CollapsibleList.jsx';
 
 // Bracket arbitrage (DASHBOARD_PLAN.md "Strategies run by the app").
 //   GET  /api/arb               -> {settings, schema?, ceilings?, status, pnl, expectation?}
@@ -549,32 +550,36 @@ export default function Arbitrage() {
         <ErrorNotice error={opps.error} onRetry={reloadOpps} />
         {opps.loading && !opps.data && <Loading />}
         {opps.data && !items.length && <p className="muted">None found yet.</p>}
-        <ul className="rows">
-          {items.map((o, i) => {
-            const ex = executedPill(o.executed);
-            const when = o.ts || o.utc;
-            const demoExec = o.mode === 'demo-execute';
-            const why = gateReason(o.executed);
-            return (
-              <li key={`${when}-${o.event}-${i}`} className={`row-item ${demoExec ? 'row-demo' : ''}`} data-mode={o.mode || undefined}>
-                <div className="row-top">
-                  <span className="mono">{o.event || '?'}</span>
-                  <span className="muted small">{dateTime(when)}</span>
-                </div>
-                <div className="row-meta">
-                  <span>{o.kind === 'YES' ? 'Buy every YES' : o.kind === 'NO' ? 'Buy every NO' : String(o.kind || '')}</span>
-                  <span>× {num(Number(o.contracts), 0)}</span>
-                  <span className={Number(o.profit) > 0 ? 'pos' : ''}>{money(Number(o.profit), { sign: true })}</span>
-                  <span className="muted">cost {money(Number(o.cost))}</span>
-                  {o.seen_count > 1 && <span className="muted">seen {o.seen_count}×</span>}
-                  {demoExec && <span className="pill pill-demo" data-testid="demo-exec-badge">Demo order</span>}
-                  <span className={`pill ${ex.cls}`}>{ex.text}</span>
-                </div>
-                {why && <div className="muted small" data-testid="gate-reason">Not placed: {why}</div>}
-              </li>
-            );
-          })}
-        </ul>
+        <CollapsibleList items={items} pageKey="arbitrage-opps" label="opportunities">
+          {(vis) => (
+            <ul className="rows">
+              {vis.map((o, i) => {
+                const ex = executedPill(o.executed);
+                const when = o.ts || o.utc;
+                const demoExec = o.mode === 'demo-execute';
+                const why = gateReason(o.executed);
+                return (
+                  <li key={`${when}-${o.event}-${i}`} className={`row-item ${demoExec ? 'row-demo' : ''}`} data-mode={o.mode || undefined}>
+                    <div className="row-top">
+                      <span className="mono">{o.event || '?'}</span>
+                      <span className="muted small">{dateTime(when)}</span>
+                    </div>
+                    <div className="row-meta">
+                      <span>{o.kind === 'YES' ? 'Buy every YES' : o.kind === 'NO' ? 'Buy every NO' : String(o.kind || '')}</span>
+                      <span>× {num(Number(o.contracts), 0)}</span>
+                      <span className={Number(o.profit) > 0 ? 'pos' : ''}>{money(Number(o.profit), { sign: true })}</span>
+                      <span className="muted">cost {money(Number(o.cost))}</span>
+                      {o.seen_count > 1 && <span className="muted">seen {o.seen_count}×</span>}
+                      {demoExec && <span className="pill pill-demo" data-testid="demo-exec-badge">Demo order</span>}
+                      <span className={`pill ${ex.cls}`}>{ex.text}</span>
+                    </div>
+                    {why && <div className="muted small" data-testid="gate-reason">Not placed: {why}</div>}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </CollapsibleList>
       </Card>
 
       {settings && fields.length > 0 && (
