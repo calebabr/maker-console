@@ -329,7 +329,7 @@ export const api = {
 
   // Status & control
   healthz: () => request('GET', '/healthz', { auth: false, cache: false }),
-  status: () => request('GET', '/api/status'),
+  status: ({ period } = {}) => request('GET', `/api/status${query({ period })}`, period ? { cache: false } : undefined),
   stop: () => request('POST', '/api/bot/stop'), // never needs 2FA
   start: (code) => request('POST', '/api/bot/start', { code }),
   runOnce: () => request('POST', '/api/bot/run-once'),
@@ -375,7 +375,7 @@ export const api = {
   getCloud: () => request('GET', '/api/cloud'),
   putCloud: (patch, code) => request('PUT', '/api/cloud', { body: patch, code }),
   // Shadow estimate (docs/SHADOW_CONTRACT.md): simulated, read only, no orders. Never 2FA.
-  getShadowSummary: () => request('GET', '/api/shadow/summary'),
+  getShadowSummary: ({ period } = {}) => request('GET', `/api/shadow/summary${query({ period })}`),
   getShadowEpisodes: ({ limit = 50, state } = {}) =>
     request('GET', `/api/shadow/episodes?limit=${encodeURIComponent(limit)}${state ? `&state=${encodeURIComponent(state)}` : ''}`),
   syncPinger: (code) => request('POST', '/api/cloud/pinger/sync', { code }),
