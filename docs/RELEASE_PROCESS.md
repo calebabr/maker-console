@@ -161,3 +161,5 @@ After the public/private split, the public `tradingControlApp` repo could use Gi
   - **Small changes** (docs, copy, small UI, tests, contained fixes) may go to `main` with all tests passing locally.
 - **New strategies or markets:** validated in the private repo → owner approves → demo → small live. Strategy code and research stay in the private repo.
 - **Agents** never merge PRs or run releases.
+
+**Releasing a change that only touches the private strategy.** The release builds the public tip and overlays the private repository's main at build time, so a private-only change needs a new public commit to give the release workflow a new SHA to approve. Make a small public commit (a docs line is enough), wait for CI, then release that SHA as usual.
