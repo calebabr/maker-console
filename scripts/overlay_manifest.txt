@@ -17,6 +17,8 @@ required kalshi_bot/markets.py
 # maker_monitor, arb_scanner -> markets.taker_fee, config, kalshi_client). The old taker-bot modules (bot, data, gate,
 # journal, recalibrate, risk, strategy_*) are NOT overlaid: nothing here imports them.
 optional control_api/data/cell_expectations.json
+optional control_api/data/fee_schedule.json
+optional control_api/data/shadow_limits.json
 tests    kalshi_bot/tests/
 # These three private tests cover the old taker-bot modules (gate, journal, data) that are not overlaid, so they
 # cannot import here. They run in the private repo only (77/77 there).
