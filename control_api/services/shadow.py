@@ -16,12 +16,17 @@ shadow pool) and returns the documents to write; it never touches the store, the
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import json
+import math
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
@@ -49,7 +54,10 @@ SHADOW_SUMMARY_MAX_OPEN = 3_000
 SHADOW_SUMMARY_EVERY = timedelta(minutes=30)   # SH-2: cached summary refresh (sooner when something settled)
 # SH-2: the only episode fields summarize() reads (a projection keeps memory and Atlas transfer small)
 SUMMARY_FIELDS = ("result", "fill", "price", "count", "cost", "side", "settled_ts", "join_ts", "end_ts",
-                  "close_time", "series", "cell")
+                  "close_time", "series", "cell",
+                  # 2A-3: caps (F1), held capital (F5), fee schedule (F7), first fill per market (F1)
+                  "capped", "through", "through_ts", "fee_mode", "ticker",
+                  "interval")                       # 2A-3 wave 2: the baseline summary keeps interval 10 only
 SETTLED_STATUSES = ("settled", "finalized", "determined")
 SHADOW_SUMMARY_DAYS = 30
 SHADOW_STORE_TIMEOUT_S = 10.0
@@ -63,6 +71,30 @@ CLIENT_TIMEOUT_S = 8.0
 CLIENT_MAX_RETRIES = 1
 SHADOW_ARB_READ_RESERVE_S = CLIENT_TIMEOUT_S * (CLIENT_MAX_RETRIES + 1)   # L1: worst case of one read
 DEADLINE_MARGIN_S = 5.0              # the worker stops itself this long before the cycle budget runs out
+# 2A-3 F1: held positions and exposure caps (the real strategy's limits, applied to an assumed capital)
+SHADOW_HELD_SCAN = 3000              # ended, unsettled episodes read per cycle to rebuild the held position
+SHADOW_CAPITAL_DEFAULT = 150.0       # cloud setting shadow_capital (validated 20-100000 by the cloud schema)
+SHADOW_CAPITAL_MIN, SHADOW_CAPITAL_MAX = 20.0, 100000.0
+DEFAULT_MAX_OPEN_FRAC = 0.5
+CAP_TOL = 0.005                      # dollars: rounding slack before a bid counts as over a budget
+CAP_REASONS = ("series_cap", "open_cap", "run_budget")
+# 2A-3 F7: optional private fee schedule (absent in the public repo: every series uses the maker fee)
+FEE_SCHEDULE_PATH = Path(__file__).resolve().parents[1] / "data" / "fee_schedule.json"
+FEE_SCHEDULE_ENV = "FEE_SCHEDULE_PATH"
+FEE_SCHEDULE_MAX_BYTES = 64 * 1024
+FEE_SCHEDULE_MAX_RULES = 200
+# 2A-3: optional private limits file (absent in the public repo: no per-series cap). {"series_share_limit": 0-1}
+SHADOW_LIMITS_PATH = Path(__file__).resolve().parents[1] / "data" / "shadow_limits.json"
+SHADOW_LIMITS_ENV = "SHADOW_LIMITS_PATH"
+SHADOW_LIMITS_MAX_BYTES = 4 * 1024
+# 2A-3 wave 2: interval variants (off unless env SHADOW_VARIANTS=true; cadences from cloud shadow_intervals)
+SHADOW_VARIANTS_ENV = "SHADOW_VARIANTS"
+BASELINE_INTERVAL = 10               # the existing shadow cycle; its episodes and passes carry interval 10
+VARIANT_INTERVALS_ALLOWED = (5, 7, 10)
+SHADOW_VARIANT_LOAD_S = 20.0         # load guard: no variant cycle while the last shadow pass took longer than this
+SHADOW_VARIANT_NEW_SHARE = 0.5       # variants stop adding episodes once today's total reaches this share of the cap
+SHADOW_READ_CACHE_S = 60.0           # shared read cache: identical public reads within this window are reused
+SHADOW_READ_CACHE_MAX = 1000
 
 END_REASONS = ("cancel", "closed", "shadow_off", "stale")
 _SEG = r"[A-Za-z0-9][A-Za-z0-9._\-]{0,127}"     # one ticker path segment (never "." or "..")
@@ -208,6 +240,17 @@ class CycleInput:
     standin: bool = False
     # S3: None = no arbitrage scan this cycle; else {"series", "max_contracts", "min_profit", "scan_cap"}
     arb: dict | None = None
+    # 2A-3 F1: ended but unsettled episodes (the held position), the assumed capital and the open-exposure share
+    held: list[dict] = field(default_factory=list)
+    capital: float = SHADOW_CAPITAL_DEFAULT
+    max_open_frac: float = DEFAULT_MAX_OPEN_FRAC
+    # 2A-3 F7: the parsed fee schedule, None (every series maker), or "file" (load it in the worker)
+    fee_schedule: Any = "file"
+    # 2A-3 F1: the per-series share of the open-exposure ceiling, None (no series cap), or "file" (load it)
+    series_share_limit: Any = "file"
+    interval: int = 10                                          # cadence in minutes (recorded on new episodes)
+    new_cap: int = SHADOW_DAILY_NEW_CAP                         # wave 2: variants get a smaller share of the cap
+    retire: list[dict] = field(default_factory=list)            # wave 2: open episodes of a variant now off
 
 
 @dataclass
@@ -217,8 +260,13 @@ class CycleResult:
     arb: dict | None = None          # S3: the arbitrage scan result (None when it did not run)
 
 
-def ep_id_for(ticker: str, book_side: str, order_price: float, join_ts: datetime) -> str:
-    return hashlib.sha256(f"{ticker}|{book_side}|{float(order_price):.4f}|{join_ts.isoformat()}".encode()).hexdigest()
+def ep_id_for(ticker: str, book_side: str, order_price: float, join_ts: datetime,
+              interval: int = 10) -> str:
+    """Baseline ids are unchanged; a variant's id adds its interval so two cadences never share an episode."""
+    key = f"{ticker}|{book_side}|{float(order_price):.4f}|{join_ts.isoformat()}"
+    if int(interval) != BASELINE_INTERVAL:
+        key += f"|i{int(interval)}"
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 def key_of(ticker: Any, book_side: Any, order_price: Any) -> tuple[str, str, str] | None:
@@ -275,6 +323,9 @@ def _end(ep: dict, reason: str, at: datetime) -> dict:
 
 
 def _maybe_score(ep: dict) -> None:
+    if ep.get("capped") is True:                                # F1: a refused bid is never scored
+        ep["pnl"] = None
+        return
     if ep.get("result") in ("yes", "no") and ep.get("fill"):
         try:
             ep["pnl"] = sm.score_episode(ep)
@@ -282,9 +333,167 @@ def _maybe_score(ep: dict) -> None:
             ep["pnl"] = None
 
 
+# ================================================================ 2A-3 helpers: fee schedule, caps, trade window
+def fee_schedule_path() -> Path:
+    """FEE_SCHEDULE_PATH if set, else control_api/data/fee_schedule.json (absent in the public repo)."""
+    env = (os.environ.get(FEE_SCHEDULE_ENV) or "").strip()
+    return Path(env) if env else FEE_SCHEDULE_PATH
+
+
+def parse_fee_schedule(doc: Any) -> dict | None:
+    """{"default": mode, "rules": [(prefix, mode), ...]} from the file's JSON, or None when it is invalid (then
+    every series uses the maker fee). Format: {"default": "maker"|"zero", "prefix_rules": [{"series_prefix": str,
+    "mode": "zero"|"maker"}, ...]}. Never raises."""
+    if not isinstance(doc, dict):
+        return None
+    default = doc.get("default", "maker")
+    rules = doc.get("prefix_rules", [])
+    if default not in sm.FEE_MODES or not isinstance(rules, list) or len(rules) > FEE_SCHEDULE_MAX_RULES:
+        return None
+    out = []
+    for r in rules:
+        if not isinstance(r, dict):
+            return None
+        pre, mode = r.get("series_prefix"), r.get("mode")
+        if not isinstance(pre, str) or not pre or len(pre) > 64 or mode not in sm.FEE_MODES:
+            return None
+        out.append((pre, mode))
+    return {"default": default, "rules": out}
+
+
+def _read_optional_json(p: Path, max_bytes: int) -> Any:
+    """The JSON of an optional private data file, or None when it is missing, too large, unreadable or malformed
+    (a deeply nested document's RecursionError included). Never raises; the contents are never logged."""
+    try:
+        if not p.is_file() or p.stat().st_size > max_bytes:
+            return None
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError, RecursionError, MemoryError):
+        return None
+
+
+def load_fee_schedule(path: Path | str | None = None) -> dict | None:
+    """Read and parse the optional fee schedule once (per cycle). Missing, unreadable, too large or invalid ->
+    None. The file's contents are never logged."""
+    p = Path(path) if path is not None else fee_schedule_path()
+    try:
+        return parse_fee_schedule(_read_optional_json(p, FEE_SCHEDULE_MAX_BYTES))
+    except RecursionError:
+        return None
+
+
+def shadow_limits_path() -> Path:
+    """SHADOW_LIMITS_PATH if set, else control_api/data/shadow_limits.json (absent in the public repo)."""
+    env = (os.environ.get(SHADOW_LIMITS_ENV) or "").strip()
+    return Path(env) if env else SHADOW_LIMITS_PATH
+
+
+def parse_series_limit(v: Any) -> float | None:
+    """A per-series share of the ceiling in (0, 1], else None (no series cap)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) and 0 < f <= 1 else None
+
+
+def load_series_limit(path: Path | str | None = None) -> float | None:
+    """The optional private limits file's `series_share_limit`, read once per cycle. Missing, unreadable,
+    invalid or out of range -> None: no per-series cap (as in the public repo)."""
+    doc = _read_optional_json(Path(path) if path is not None else shadow_limits_path(), SHADOW_LIMITS_MAX_BYTES)
+    return parse_series_limit(doc.get("series_share_limit")) if isinstance(doc, dict) else None
+
+
+def fee_mode_for(ticker: Any, sched: dict | None) -> str:
+    """A market's fee mode: the first rule whose prefix starts its series (the ticker before the first '-'),
+    else the schedule's default; no schedule -> "maker"."""
+    if not sched:
+        return "maker"
+    series = str(ticker or "").split("-", 1)[0]
+    for pre, mode in sched["rules"]:
+        if series.startswith(pre):
+            return mode
+    return sched["default"]
+
+
+def capital_of(cloud: Any) -> float:
+    """The cloud setting shadow_capital, clamped to its range; the default when missing or malformed."""
+    v = (cloud or {}).get("shadow_capital") if isinstance(cloud, dict) else None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return SHADOW_CAPITAL_DEFAULT
+    if isinstance(v, bool) or not math.isfinite(f):
+        return SHADOW_CAPITAL_DEFAULT
+    return min(SHADOW_CAPITAL_MAX, max(SHADOW_CAPITAL_MIN, f))
+
+
+def open_frac_of(cfg: Any, ceiling: Any = None) -> float:
+    """The strategy's max_open_frac (config), never above the API ceiling `ceiling` when given."""
+    try:
+        f = float((cfg or {}).get("max_open_frac"))
+    except (TypeError, ValueError, AttributeError):
+        f = DEFAULT_MAX_OPEN_FRAC
+    if not math.isfinite(f) or f <= 0:
+        f = DEFAULT_MAX_OPEN_FRAC
+    try:
+        if ceiling is not None:
+            f = min(f, float(ceiling))
+    except (TypeError, ValueError):
+        pass
+    return min(1.0, f)
+
+
+def held_cost(ep: dict) -> float:
+    """Dollars one ended, unsettled episode holds: central fill x price; an unknown fill counts in full (the
+    conservative side). Capped, voided and settled episodes hold nothing."""
+    if ep.get("capped") is True or ep.get("result") is not None or ep.get("end_ts") is None:
+        return 0.0
+    price, count = qp._f(ep.get("price")) or 0.0, qp._f(ep.get("count")) or 0.0
+    fill = ep.get("fill")
+    if isinstance(fill, dict):
+        return max(0.0, (qp._f(fill.get("mid")) or 0.0) * price)
+    return max(0.0, count * price)
+
+
+def series_of(ep: dict) -> str:
+    return str(ep.get("series") or str(ep.get("ticker") or "").split("-", 1)[0])
+
+
+def through_volume(trades: Iterable[dict], side: str, price: float, since: datetime, until: datetime | None) -> float:
+    """F4: contracts traded strictly through (below) our price on our side in [since, until], any taker side."""
+    vol = 0.0
+    for t in qp.dicts(list(trades)):
+        tt, yp = fq._ts(t.get("created_time") or t.get("ts")), fq.trade_yes_price(t)
+        if tt is None or yp is None or tt < since or (until is not None and tt > until):
+            continue
+        q = yp if side == "yes" else 1.0 - yp
+        if q < price - qp.PRICE_TOL:
+            vol += qp.trade_count(t)
+    return vol
+
+
+def trade_window(trades: list[dict], end: datetime, exclusive: bool) -> list[dict]:
+    """F8: an episode ended by cancel owns [join, end): a trade at exactly `end` belongs to the next episode."""
+    if not exclusive:
+        return trades
+    out = []
+    for t in qp.dicts(trades):
+        tt = fq._ts(t.get("created_time") or t.get("ts"))
+        if tt is not None and tt < end:
+            out.append(t)
+    return out
+
+
 def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None = None) -> CycleResult:
     """One shadow cycle against `md` (ReadOnlyMarketData or a test fake). Synchronous; network reads only.
-    Raises ShadowDeadline past `deadline` (time.monotonic()), so the caller discards a partial result."""
+    Raises ShadowDeadline past `deadline` (time.monotonic()), so the caller discards a partial result.
+
+    Order: (1) books and the strategy's uncapped desired quotes; (2) diff against the open episodes; (3) public
+    trades of ended episodes (including those ended in step 2, so the held position is current); (4) settlement;
+    (5) the held position and the real limits (2A-3 F1): headroom = min(run budget, max_open_frac x capital - held,
+    capital - held), split evenly across series, zero for a series at its per-series share (optional limits file) of the
+    ceiling; the strategy is asked again with the capped budget, the resting total per series is checked against
+    it, and a bid the limits refuse is recorded as a capped episode (never scored); (6) new episodes."""
     t0 = time.monotonic()
     now = inp.now
     errors: list[str] = []
@@ -301,19 +510,22 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
             updates[eid] = dict(ep)
         return updates[eid]
 
+    sched = load_fee_schedule() if isinstance(inp.fee_schedule, str) else inp.fee_schedule
     series = [str(s).strip() for s in inp.series if str(s).strip()]
     n = max(1, len(series))
-    per_series = max(0.0, float(inp.run_budget)) / n
+    run_budget = max(0.0, float(inp.run_budget))
+    per_series = run_budget / n
     order_cap = min(float(inp.max_order), per_series)
 
-    # ---- 1) markets, books and the strategy's desired quotes, per series
-    books_read = n_markets = n_quotes = new_eps = ended_eps = 0
+    # ---- 1) markets, books and the strategy's desired quotes (uncapped), per series
+    books_read = n_markets = n_quotes = new_eps = ended_eps = capped_new = 0
     listed: set[str] = set()                 # series whose market list is complete
     observed: set[str] = set()               # tickers whose book was read AND whose series' quotes were computed
     open_tickers: set[str] = set()
     books: dict[str, dict] = {}
     market_close: dict[str, datetime | None] = {}
     desired: dict[tuple[str, str, str], dict] = {}
+    seen_series: dict[str, tuple[list[dict], dict]] = {}       # series -> (usable markets, their books)
     for s in series:
         check_deadline()
         try:
@@ -347,22 +559,23 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
         sbooks = {m["ticker"]: books[m["ticker"]] for m in usable}
         try:
             want = list(strategy.desired_quotes(usable, sbooks, now, order_cap, per_series) or [])
-        except Exception as e:  # noqa: BLE001   (the installed strategy failed: leave this series' episodes alone)
+        except Exception as e:  # noqa: BLE001   (the installed strategy failed: leave this series alone)
             _err(errors, e)
             continue
         observed.update(sbooks)
-        for q in want:
-            f = _quote_fields(q)
-            if f is None or f["ticker"] not in sbooks:
-                _err(errors, "BadQuote")
-                continue
+        seen_series[s] = (usable, sbooks)
+        for f in _desired_fields(want, sbooks, errors):
             k = key_of(f["ticker"], f["book_side"], f["order_price"])
             if k is not None and k not in desired:
                 f["series"] = s
                 desired[k] = f
         n_quotes += len(want)
 
-    # ---- 2) diff the desired keys against the open episodes
+    # ---- 2) diff the desired keys against the open episodes (first: retire the open bids of a variant now off)
+    for ep in inp.retire:
+        if ep.get("ep_id") and ep.get("end_ts") is None:
+            _end(cur(ep), "shadow_off", _dt(ep.get("last_seen_ts")) or _dt(ep.get("join_ts")) or now)
+            ended_eps += 1
     by_key: dict[tuple[str, str, str], dict] = {}
     for ep in inp.open_eps:
         check_deadline()
@@ -395,60 +608,43 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
                 _end(cur(ep), "cancel", now); ended_eps += 1
         # else: not observed this cycle (a failed read or truncation): untouched
 
-    # ---- 3) new episodes (at the back of the queue: the whole level is ahead of us)
-    for k, f in desired.items():
-        if k in by_key:
-            continue
-        if inp.new_today + new_eps >= SHADOW_DAILY_NEW_CAP:
-            truncated = True
-            break
-        level = qp.level_size(books.get(f["ticker"]), f["side"], f["price"])
-        if level is None:
-            _err(errors, "BookUnreadable")
-            continue
-        eid = ep_id_for(f["ticker"], f["book_side"], f["order_price"], now)
-        updates[eid] = {
-            "ep_id": eid, "env": "prod", "ticker": f["ticker"], "series": f["series"], "side": f["side"],
-            "book_side": f["book_side"], "price": f["price"], "order_price": f["order_price"], "count": f["count"],
-            "cost": round(f["count"] * f["price"], 4), "cell": f["cell"], "close_time": market_close.get(f["ticker"]),
-            "join_ts": now, "last_seen_ts": now, "end_ts": None, "end_reason": None, "q0": level,
-            "level_min": level, "level_last": level, "n_obs": 1, "trades_read": False, "traded_vol": 0.0,
-            "through": False, "through_ts": None, "truncated": False, "fill": None, "result": None,
-            "settled_ts": None, "pnl": None, "standin": bool(inp.standin), "ts": now}
-        new_eps += 1
-
-    # ---- 4) public trades, once per ended episode
+    # ---- 3) public trades, once per ended episode (older ones first, then the ones ended just now)
     trade_reads = 0
     if len(inp.ended_unread) > SHADOW_MAX_TRADE_READS:
         truncated = True
-    for ep in inp.ended_unread[:SHADOW_MAX_TRADE_READS]:
+    queue = list(inp.ended_unread[:SHADOW_MAX_TRADE_READS])
+    queued = {e.get("ep_id") for e in queue}
+    queue += [u for u in list(updates.values()) if u.get("end_ts") is not None and u.get("trades_read") is not True
+              and u.get("capped") is not True and u.get("ep_id") not in queued]
+    for ep in queue[:SHADOW_MAX_TRADE_READS]:
         check_deadline()
-        join, end = _dt(ep.get("join_ts")), _dt(ep.get("end_ts"))
-        side, price = ep.get("side"), qp._f(ep.get("price"))
+        c = cur(ep)
+        join, end = _dt(c.get("join_ts")), _dt(c.get("end_ts"))
+        side, price = c.get("side"), qp._f(c.get("price"))
         if join is None or end is None or side not in ("yes", "no") or price is None:
-            c = cur(ep)
             c["trades_read"], c["fill"] = True, None
             continue
         try:
-            trades, trunc = md.trades(ep["ticker"], int(join.timestamp()), int(end.timestamp()) + 1)
+            trades, trunc = md.trades(c["ticker"], int(join.timestamp()), int(end.timestamp()) + 1)
         except Exception as e:  # noqa: BLE001   (retried next cycle, up to SHADOW_MAX_TRADE_ATTEMPTS)
             _err(errors, e)
-            c = cur(ep)
             c["trade_attempts"] = int(c.get("trade_attempts") or 0) + 1
             if c["trade_attempts"] >= SHADOW_MAX_TRADE_ATTEMPTS:         # SH-3: give up, never block the queue
                 c.update({"trades_read": True, "fill": None, "truncated": True, "trade_failed": True})
             continue
         trade_reads += 1
+        trades = trade_window(qp.dicts(list(trades)), end, c.get("end_reason") == "cancel")    # F8
         vol, through = qp.scan_trades(trades, side, price, join, end)
-        c = cur(ep)
+        tvol = through_volume(trades, side, price, join, end)                                   # F4
         c.update({"trades_read": True, "traded_vol": round(vol, 4), "through": bool(through),
                   "through_ts": first_through(trades, side, price, join, end) if through else None,
-                  "truncated": bool(trunc),
-                  "fill": sm.fill_scenarios(c.get("q0"), c.get("level_min"), vol, through, c.get("count"))})
+                  "through_vol": round(tvol, 4), "truncated": bool(trunc),
+                  "fill": sm.fill_scenarios(c.get("q0"), c.get("level_min"), vol, through, c.get("count"),
+                                            through_vol=tvol)})
         truncated |= bool(trunc)
         _maybe_score(c)
 
-    # ---- 5) settlement from the market's result
+    # ---- 4) settlement from the market's result
     settled = voided = 0
     groups: dict[str, list[dict]] = {}
     for ep in inp.unsettled:
@@ -486,16 +682,176 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
                 _maybe_score(c)
                 settled += 1
 
+    # ---- 5) the held position and the real limits (F1)
+    held_eps: dict[str, dict] = {}
+    for ep in inp.held:
+        if isinstance(ep, dict) and ep.get("ep_id"):
+            held_eps[ep["ep_id"]] = ep
+    if len(inp.held) >= SHADOW_HELD_SCAN:
+        truncated = True
+    for eid, u in updates.items():                              # this cycle's version wins
+        held_eps[eid] = u
+    held_total = 0.0
+    held_series: dict[str, float] = {}
+    held_markets: set[tuple[str, str]] = set()
+    for ep in held_eps.values():
+        h = held_cost(ep)
+        if h <= 0:
+            continue
+        held_total += h
+        sk = series_of(ep)
+        held_series[sk] = held_series.get(sk, 0.0) + h
+        held_markets.add((str(ep.get("ticker")), str(ep.get("side"))))
+    capital = max(0.0, float(inp.capital))
+    ceiling = max(0.0, float(inp.max_open_frac)) * capital
+    sfrac = (load_series_limit() if isinstance(inp.series_share_limit, str)
+             else parse_series_limit(inp.series_share_limit))
+
+    def _cost(ep: dict) -> float:
+        c = qp._f(ep.get("cost"))
+        return c if c is not None else (qp._f(ep.get("count")) or 0.0) * (qp._f(ep.get("price")) or 0.0)
+
+    # open bids not observed this cycle (a failed read) still rest: their cost is spoken for
+    unseen: dict[str, float] = {}
+    kept_ids = {e.get("ep_id") for e in by_key.values()}
+    for ep in inp.open_eps:
+        u = updates.get(ep.get("ep_id"), ep)
+        if u.get("end_ts") is None and u.get("capped") is not True and u.get("ep_id") not in kept_ids:
+            sk = str(u.get("series") or "")
+            unseen[sk] = unseen.get(sk, 0.0) + _cost(u)
+
+    # V1: a continuing bid the caps cancel may already have filled; its trades are read next cycle, so until then
+    # it counts as held at its full cost (an unknown fill). Cancelling more bids only adds to the held position and
+    # shrinks the budgets, so this loop settles after at most one pass per continuing bid.
+    cancel_now: dict[tuple[str, str, str], dict] = {}
+    continuing = [(k, ep) for k, ep in by_key.items() if ep.get("capped") is not True]
+    for _round in range(len(continuing) + 1):
+        extra_total = sum(_cost(ep) for ep in cancel_now.values())
+        extra_series: dict[str, float] = {}
+        for ep in cancel_now.values():
+            sk = series_of(ep)
+            extra_series[sk] = extra_series.get(sk, 0.0) + _cost(ep)
+        h_total = held_total + extra_total
+        h_series = {k: held_series.get(k, 0.0) + extra_series.get(k, 0.0)
+                    for k in set(held_series) | set(extra_series)}
+        headroom = max(0.0, min(run_budget, ceiling - h_total, capital - h_total))
+        series_capped = sorted(s for s in series if sfrac is not None and h_series.get(s, 0.0) > 0
+                               and h_series[s] >= sfrac * ceiling - 1e-9)
+        capped_per_series = headroom / n
+        limited = headroom < run_budget - 1e-9
+
+        allowed: dict[tuple[str, str, str], dict] = {}
+        budgets: dict[str, float] = {}
+        reason_of: dict[str, str] = {}
+        for s in series:
+            b = 0.0 if s in series_capped else capped_per_series
+            budgets[s] = b
+            reason_of[s] = "series_cap" if s in series_capped else ("open_cap" if limited else "run_budget")
+            if s not in seen_series:
+                continue
+            if b >= per_series - 1e-9:                          # no limit binds: the uncapped answer stands
+                for k, f in desired.items():
+                    if f["series"] == s:
+                        allowed[k] = f
+                continue
+            if b <= 0:
+                continue
+            usable, sbooks = seen_series[s]
+            check_deadline()
+            try:
+                want = list(strategy.desired_quotes(usable, sbooks, now, min(float(inp.max_order), b), b) or [])
+            except Exception as e:  # noqa: BLE001   (the capped call failed: nothing new for this series)
+                _err(errors, e)
+                continue
+            for f in _desired_fields(want, sbooks, errors):
+                k = key_of(f["ticker"], f["book_side"], f["order_price"])
+                if k is not None and k not in allowed:
+                    f["series"] = s
+                    allowed[k] = f
+
+        # resting cost per series never above its budget: unseen bids, then continuing ones, then new ones
+        spent: dict[str, float] = {s: unseen.get(s, 0.0) for s in series}
+
+        def fits(s: str, cost: float) -> bool:
+            if spent.get(s, 0.0) + cost > budgets.get(s, 0.0) + CAP_TOL:
+                return False
+            spent[s] = spent.get(s, 0.0) + cost
+            return True
+
+        more = {k: ep for k, ep in continuing
+                if k not in cancel_now and not (k in allowed and fits(str(ep.get("series") or ""), _cost(ep)))}
+        if not more:
+            break
+        cancel_now.update(more)
+    for k, ep in cancel_now.items():
+        _end(cur(ep), "cancel", now); ended_eps += 1           # the real bot would have cancelled it
+        del by_key[k]
+    held_for_doc = h_total
+
+    # ---- 6) new episodes (at the back of the queue: the whole level is ahead of us)
+    candidates = list(allowed.items()) + [(k, f) for k, f in desired.items() if k not in allowed]
+    for k, f in candidates:
+        prev = by_key.get(k)
+        if prev is not None and prev.get("capped") is not True:
+            continue                                            # an uncapped bid already rests at this key
+        ok = k in allowed and fits(f["series"], f["count"] * f["price"])
+        if prev is not None and not ok:
+            continue                                            # still refused: the capped episode continues
+        if inp.new_today + new_eps >= min(SHADOW_DAILY_NEW_CAP, int(inp.new_cap)):
+            truncated = True
+            break
+        level = qp.level_size(books.get(f["ticker"]), f["side"], f["price"])
+        if level is None:
+            _err(errors, "BookUnreadable")
+            continue
+        eid = ep_id_for(f["ticker"], f["book_side"], f["order_price"], now, inp.interval)
+        if eid in updates:
+            continue
+        if prev is not None:                                    # now affordable: the refused one ends here
+            _end(cur(prev), "cancel", now); ended_eps += 1
+            del by_key[k]
+        doc = {
+            "ep_id": eid, "env": "prod", "ticker": f["ticker"], "series": f["series"], "side": f["side"],
+            "book_side": f["book_side"], "price": f["price"], "order_price": f["order_price"], "count": f["count"],
+            "cost": round(f["count"] * f["price"], 4), "cell": f["cell"], "close_time": market_close.get(f["ticker"]),
+            "join_ts": now, "last_seen_ts": now, "end_ts": None, "end_reason": None, "q0": level,
+            "level_min": level, "level_last": level, "n_obs": 1, "trades_read": False, "traded_vol": 0.0,
+            "through": False, "through_ts": None, "through_vol": None, "truncated": False, "fill": None,
+            "result": None, "settled_ts": None, "pnl": None, "standin": bool(inp.standin), "ts": now,
+            "capped": False, "cap_reason": None, "interval": int(inp.interval),
+            "fee_mode": fee_mode_for(f["ticker"], sched)}
+        if not ok:                                              # F1: refused by a limit: recorded, never scored
+            doc.update({"capped": True, "cap_reason": reason_of.get(f["series"], "run_budget"),
+                        "trades_read": True, "fill": {"lo": 0.0, "mid": 0.0, "hi": 0.0}})
+            capped_new += 1
+        updates[eid] = doc
+        new_eps += 1
+
     pass_doc = {"ts": now, "ok": not errors, "duration_s": round(time.monotonic() - t0, 3), "markets": n_markets,
                 "books": books_read, "quotes": n_quotes, "new_eps": new_eps, "ended_eps": ended_eps,
                 "trade_reads": trade_reads, "settled": settled, "voided": voided, "truncated": bool(truncated),
-                "errors": list(dict.fromkeys(errors))}
+                "errors": list(dict.fromkeys(errors)),
+                # 2A-3 F1
+                "capped_new": capped_new, "held_cost": round(held_for_doc, 4), "held_markets": len(held_markets),
+                "ceiling": round(ceiling, 4), "headroom": round(headroom, 4), "series_capped": series_capped}
     arb = None
     if inp.arb:                                                 # S3: last, own budgets, never raises
         arb = arb_scan(md, inp.arb, now, deadline=deadline)
         pass_doc["arb_opps"] = len(arb["opps"])
         pass_doc["arb_skipped"] = arb["skipped"]
     return CycleResult(upserts=list(updates.values()), pass_doc=pass_doc, arb=arb)
+
+
+def _desired_fields(want: list, sbooks: dict, errors: list[str]) -> list[dict]:
+    """The plain fields of each valid quote on a market whose book was read; a bad one is recorded by name."""
+    out = []
+    for q in want:
+        f = _quote_fields(q)
+        if f is None or f["ticker"] not in sbooks:
+            _err(errors, "BadQuote")
+            continue
+        out.append(f)
+    return out
 
 
 # ================================================================ S3: arbitrage shadow scan (read only)
@@ -620,6 +976,111 @@ async def carry_arb(store: Any, summary: dict, now: datetime, timeout: float = S
         doc = None
     summary["arb"] = sm.arb_merge((doc or {}).get("arb") if isinstance(doc, dict) else None, None, now)
     return summary
+
+
+# ================================================================ 2A-3 wave 2: interval variants
+def variants_enabled() -> bool:
+    """Env SHADOW_VARIANTS (default off), read each time like SHADOW_ARB."""
+    return os.getenv(SHADOW_VARIANTS_ENV, "false").strip().lower() == "true"
+
+
+def interval_of(doc: Any) -> int:
+    """An episode's or pass doc's cadence; missing or malformed = the baseline (10)."""
+    v = doc.get("interval") if isinstance(doc, dict) else None
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+        return BASELINE_INTERVAL
+    return v
+
+
+def variant_intervals(cloud: Any) -> list[int]:
+    """The extra cadences to run: cloud shadow_intervals minus the baseline, only while SHADOW_VARIANTS is on.
+    Malformed values are dropped (the cloud schema validates writes; this guards reads)."""
+    if not variants_enabled():
+        return []
+    raw = (cloud or {}).get("shadow_intervals") if isinstance(cloud, dict) else None
+    out = {v for v in (raw if isinstance(raw, list) else [])
+           if isinstance(v, int) and not isinstance(v, bool) and v in VARIANT_INTERVALS_ALLOWED}
+    return sorted(out - {BASELINE_INTERVAL})[:3]
+
+
+def summary_intervals(cloud: Any) -> list[int] | None:
+    """None while variants are off (the summary carries no variant rows), else the active variant cadences."""
+    return variant_intervals(cloud) if variants_enabled() else None
+
+
+def build_summary(episodes: Iterable[dict], passes: Iterable[dict], now: datetime, *, enabled: bool = True,
+                  standin: bool = False, intervals: list[int] | None = None) -> dict:
+    """The served summary: the headline from baseline (interval 10) episodes and passes only, exactly as before;
+    with variants on, `variants` (one row per cadence) and `variant_compare` (each variant vs the baseline)."""
+    eps = [e for e in (episodes or []) if isinstance(e, dict)]
+    plist = [p for p in (passes or []) if isinstance(p, dict)]
+    base = [e for e in eps if interval_of(e) == BASELINE_INTERVAL]
+    bpasses = [p for p in plist if interval_of(p) == BASELINE_INTERVAL]
+    out = sm.summarize(base, now, passes=bpasses, enabled=enabled, standin=standin)
+    out["variants_enabled"] = intervals is not None
+    if intervals is not None:
+        out["variants"], out["variant_compare"] = sm.variant_blocks(eps, now, intervals, passes=plist,
+                                                                   interval_of=interval_of)
+    return out
+
+
+class ReadCache:
+    """Shared short-lived cache of public reads, so overlapping variant cycles do not repeat them. Values are
+    deep-copied in and out; failures are never cached. Thread-safe; bounded."""
+
+    def __init__(self, ttl_s: float = SHADOW_READ_CACHE_S, max_items: int = SHADOW_READ_CACHE_MAX):
+        self.ttl_s, self.max_items = float(ttl_s), int(max_items)
+        self._lock = threading.Lock()
+        self._data: dict[tuple, tuple[float, Any]] = {}
+        self.hits = self.misses = 0
+
+    def get(self, key: tuple, fetch) -> Any:
+        now = time.monotonic()
+        with self._lock:
+            hit = self._data.get(key)
+            if hit is not None and hit[0] > now:
+                self.hits += 1
+                return copy.deepcopy(hit[1])
+        val = fetch()                                    # may raise: nothing is stored
+        with self._lock:
+            self.misses += 1
+            self._data = {k: v for k, v in self._data.items() if v[0] > now}    # expired entries never linger
+            if len(self._data) >= self.max_items:
+                for k in sorted(self._data, key=lambda k: self._data[k][0])[:len(self._data) - self.max_items + 1]:
+                    del self._data[k]                                         # bounded: drop the oldest first
+            self._data[key] = (now + self.ttl_s, copy.deepcopy(val))
+        return val
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+    def view(self, md: Any) -> "CachedMarketData":
+        return CachedMarketData(md, self)
+
+
+class CachedMarketData:
+    """The same four read methods as ReadOnlyMarketData, answered from a ReadCache in front of it. No other
+    attribute: it adds no request, account or order path."""
+
+    __slots__ = ("_md", "_cache")
+
+    def __init__(self, md: Any, cache: ReadCache):
+        self._md, self._cache = md, cache
+
+    def markets(self, series: str, status: str, min_close_ts: int | None = None):
+        return self._cache.get(("markets", series, status, min_close_ts),
+                               lambda: self._md.markets(series, status, min_close_ts))
+
+    def orderbook(self, ticker: str, depth: int | None = None):
+        return self._cache.get(("orderbook", ticker, depth), lambda: self._md.orderbook(ticker, depth))
+
+    def market(self, ticker: str):
+        return self._cache.get(("market", ticker), lambda: self._md.market(ticker))
+
+    def trades(self, ticker: str, min_ts: int, max_ts: int):
+        """Never cached: each episode's trade window is read once, so a cached copy would only cost memory."""
+        return self._md.trades(ticker, min_ts, max_ts)
 
 
 def end_all(open_eps: Iterable[dict], reason: str, now: datetime) -> list[dict]:

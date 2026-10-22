@@ -189,8 +189,9 @@ def test_trades_read_once_with_fill_scenarios_and_through():
     assert u["fill"] == {"lo": 0.0, "mid": 5.0, "hi": 10.0}                # q0 120, a_min 100, a_mid 110
     md.trade_rows[T1] = [trade(NOW + timedelta(minutes=3), 0.38, 1)]
     [u] = sh.run_cycle(md, FakeStrategy(), inp(ended_unread=[ep], now=NOW + timedelta(minutes=30))).upserts
-    assert u["through"] is True and u["fill"] == {"lo": 10.0, "mid": 10.0, "hi": 10.0}
-    assert u["through_ts"] == NOW + timedelta(minutes=3)
+    # 2A-3 F4: lo = max(0, at-price 0 + through 1 - q0 120) = 0, hi = the full count, mid halfway
+    assert u["through"] is True and u["fill"] == {"lo": 0.0, "mid": 5.0, "hi": 10.0}
+    assert u["through_ts"] == NOW + timedelta(minutes=3) and u["through_vol"] == 1
 
 
 def test_settlement_scores_with_the_model():

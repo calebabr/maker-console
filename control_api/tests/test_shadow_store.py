@@ -290,3 +290,41 @@ async def test_settled_projection_scored_only_and_cap(store):
     assert ids(await store.shadow_settled(T0, scored_only=True, limit=2)) == ["ep5", "ep2"]   # newest kept
     opened = await store.shadow_open_episodes(fields=("price",), limit=1)
     assert len(opened) == 1 and set(opened[0]) <= {"ep_id", "price"}
+
+
+# ------------------------------------------------------------------ sprint 2A-3 episode fields and settings
+async def test_old_episodes_read_with_defaults(store):
+    await store.shadow_upsert_episodes([ep(1)])
+    [d] = await store.shadow_recent(5)
+    assert (d["through_vol"], d["capped"], d["cap_reason"], d["interval"], d["fee_mode"]) == (None, False, None, 10, None)
+    [p] = await store.shadow_open_episodes(fields=["price", "capped"])
+    assert p["capped"] is False and "interval" not in p and p["price"] == 0.9
+
+
+async def test_new_fields_stored_and_partial_update_keeps_them(store):
+    await store.shadow_upsert_episodes([ep(1, through_vol=12.5, capped=True, cap_reason="series cap",
+                                           interval=5, fee_mode="taker")])
+    await store.shadow_upsert_episodes([{"ep_id": "ep1", "n_obs": 2}])
+    [d] = await store.shadow_recent(5)
+    assert (d["through_vol"], d["capped"], d["cap_reason"], d["interval"], d["fee_mode"]) == (
+        12.5, True, "series cap", 5, "taker")
+
+
+@pytest.mark.parametrize("bad", [{"through_vol": -1}, {"through_vol": "x"}, {"capped": "yes"},
+                                 {"interval": 0}, {"interval": True}, {"cap_reason": 5}])
+async def test_bad_new_fields_rejected(store, bad):
+    with pytest.raises(ValueError):
+        await store.shadow_upsert_episodes([ep(1, **bad)])
+
+
+async def test_shadow_cloud_settings_validation():
+    assert ka.validate_cloud({"shadow_capital": 150, "shadow_intervals": [10, 5]}) == {
+        "shadow_capital": 150, "shadow_intervals": [5, 10]}
+    assert ka.validate_cloud({"shadow_capital": 20.5})["shadow_capital"] == 20.5
+    for bad in ({"shadow_capital": 19}, {"shadow_capital": 100001}, {"shadow_capital": True},
+                {"shadow_capital": float("nan")}, {"shadow_intervals": []}, {"shadow_intervals": [6]},
+                {"shadow_intervals": [5, 5]}, {"shadow_intervals": [5, 7, 10, 5]}, {"shadow_intervals": "10"},
+                {"shadow_intervals": [True]}):
+        with pytest.raises(ValueError):
+            ka.validate_cloud(bad)
+    assert S.DEFAULT_CLOUD_SETTINGS["shadow_capital"] == 150 and S.DEFAULT_CLOUD_SETTINGS["shadow_intervals"] == [10]

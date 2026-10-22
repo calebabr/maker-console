@@ -86,7 +86,8 @@ def _in_period(ep: dict, start: datetime | None, end: datetime | None) -> bool:
     return P.in_window(ep.get("join_ts"), start, end)
 
 
-async def _period_summary(request: Request, p: dict, now: datetime, enabled: bool, standin: bool) -> dict:
+async def _period_summary(request: Request, p: dict, now: datetime, enabled: bool, standin: bool,
+                          intervals: list[int] | None = None) -> dict:
     """summarize() over the episodes placed inside the period (same projections and caps as the runner's cached
     summary). Raises on store errors (the caller falls back to the zeroed shape)."""
     st = request.app.state.store
@@ -99,11 +100,13 @@ async def _period_summary(request: Request, p: dict, now: datetime, enabled: boo
                                           STORE_TIMEOUT_S) or [])
     open_eps = list(await asyncio.wait_for(st.shadow_open_episodes(fields=fields, limit=cap_open),
                                            STORE_TIMEOUT_S) or [])
-    passes = list(await asyncio.wait_for(st.shadow_recent_passes(300), STORE_TIMEOUT_S) or [])
+    passes = list(await asyncio.wait_for(st.shadow_recent_passes(300 * (1 + len(intervals or []))),
+                                         STORE_TIMEOUT_S) or [])
     eps = [e for e in settled + open_eps if isinstance(e, dict) and _in_period(e, start, end)]
     passes = [x for x in passes if isinstance(x, dict) and P.in_window(x.get("ts"), start, end)]
     fut = asyncio.get_running_loop().run_in_executor(
-        _pool(), functools.partial(sm.summarize, eps, now, passes=passes, enabled=enabled, standin=standin))
+        _pool(), functools.partial(shadowsvc.build_summary, eps, passes, now, enabled=enabled, standin=standin,
+                                   intervals=intervals))
     out = await asyncio.wait_for(fut, COMPUTE_TIMEOUT_S)
     if len(settled) >= cap or len(open_eps) >= cap_open:
         out["status"]["truncated"] = True
@@ -127,6 +130,7 @@ async def shadow_summary(request: Request, user: dict = Depends(current_user),
     now = datetime.now(timezone.utc)
     out = sm.empty_summary(enabled=enabled, standin=standin)
     p, ok = await _resolve(request, period)
+    intervals = shadowsvc.summary_intervals(getattr(runner, "cloud", None))     # None while variants are off
     try:
         doc = await asyncio.wait_for(request.app.state.store.get_shadow_summary(), STORE_TIMEOUT_S)
     except Exception:  # noqa: BLE001   (store down: the zeroed shape)
@@ -138,14 +142,15 @@ async def shadow_summary(request: Request, user: dict = Depends(current_user),
                 if k in doc and k not in ("enabled", "standin"):
                     out[k] = doc[k]
     elif ok:
-        key = (p["id"], str(((doc or {}).get("status") or {}).get("last_pass_ts")), enabled, standin)
+        key = (p["id"], str(((doc or {}).get("status") or {}).get("last_pass_ts")), enabled, standin,
+               tuple(intervals) if intervals is not None else None)
         cache = _cache(request)
         hit = cache.get(key)
         if hit is not None and hit[0] > time.monotonic():
             out = hit[1]
         else:
             try:
-                out = await _period_summary(request, p, now, enabled, standin)
+                out = await _period_summary(request, p, now, enabled, standin, intervals)
                 if len(cache) >= CACHE_MAX_KEYS:
                     cache.clear()
                 cache[key] = (time.monotonic() + CACHE_TTL_S, out)
@@ -165,14 +170,15 @@ async def shadow_summary(request: Request, user: dict = Depends(current_user),
 @router.get("/episodes")
 async def shadow_episodes(request: Request, user: dict = Depends(current_user),
                           limit: int = Query(50, ge=1, le=200), state: str | None = Query(None),
-                          period: str = Query("all", max_length=64)) -> dict:
+                          period: str = Query("all", max_length=64),
+                          interval: int | None = Query(None, ge=1, le=1440)) -> dict:
     """Newest first. `period` (default all) keeps only episodes placed in that period; filtered views scan the
     newest EPISODES_SCAN episodes (best effort for old periods)."""
     if state is not None and state not in SHADOW_STATES:
         raise HTTPException(400, f"state must be one of {list(SHADOW_STATES)}")
     p = await window_for(request, period)
     start, end = P.window_of(p)
-    filtered = not _whole_history(p)
+    filtered = not _whole_history(p) or interval is not None
     try:
         eps = await asyncio.wait_for(request.app.state.store.shadow_recent(EPISODES_SCAN if filtered else limit,
                                                                            state), STORE_TIMEOUT_S)
@@ -180,5 +186,6 @@ async def shadow_episodes(request: Request, user: dict = Depends(current_user),
         raise HTTPException(400, "invalid state") from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(503, "store unavailable") from e
-    rows = [ep for ep in (eps or []) if isinstance(ep, dict) and (not filtered or _in_period(ep, start, end))]
+    rows = [ep for ep in (eps or []) if isinstance(ep, dict) and (not filtered or _in_period(ep, start, end))
+            and (interval is None or shadowsvc.interval_of(ep) == interval)]
     return {"episodes": [_jsonable(ep) for ep in rows[:limit]], "period": _period_meta(period, p)}

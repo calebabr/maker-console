@@ -17,15 +17,16 @@ import CollapsibleList from '../components/CollapsibleList.jsx';
 export const CAVEATS = [
   'Our own market impact: real orders would sit in the queue and change who gets filled. The simulation cannot see that.',
   'Hidden queue changes between checks: cancels and trades between two looks are unknown, which is why the result is a range of low, middle and high.',
-  'No cash limits in v1: the simulation may take positions a real balance could not fund.',
+  'Cash limits use an assumed capital: the simulation applies the real open-position limits to an assumed balance, not your actual cash.',
   'Outages and rejects: a real run can miss passes or have orders refused. The simulation assumes none.',
   'Small sample: with few settled episodes the range is wide and the middle figure moves a lot.',
 ];
 
 const sgn = (v) => (typeof v === 'number' && v > 0 ? 'pos' : typeof v === 'number' && v < 0 ? 'neg' : '');
-const usd = (v) => money(v, { sign: true });
-const rate = (v) => pct(v, { sign: false, digits: 1 });
-const roi = (v) => pct(v, { sign: true });
+const NO_DATA = 'no data';
+const usd = (v) => (typeof v === 'number' ? money(v, { sign: true }) : NO_DATA);
+const rate = (v) => (typeof v === 'number' ? pct(v, { sign: false, digits: 1 }) : NO_DATA);
+const roi = (v) => (typeof v === 'number' ? pct(v, { sign: true }) : NO_DATA);
 const cellLabel = (c) => (Array.isArray(c) ? c.join(' / ') : String(c ?? ''));
 
 function Range({ label, r, fmt }) {
@@ -54,6 +55,102 @@ function Range({ label, r, fmt }) {
         </div>
       </dl>
     </div>
+  );
+}
+
+const winText = (v) => (typeof v === 'number' ? pct(v, { sign: false, digits: 1 }) : '—');
+export const TOO_EARLY_REASON = 'Too early to trust: needs at least 7 close days with a fill and 30 filled episodes.';
+
+function Honesty({ h, st, data }) {
+  const ff = h.first_fill_per_market;
+  const capped = st.capped_episodes;
+  return (
+    <>
+      <dl className="stats" data-testid="honesty-stats">
+        <Stat label="Break-even win rate">{winText(h.break_even_win_rate)}</Stat>
+        <Stat label="Observed win rate">
+          {winText(h.observed_win_rate)}
+          {typeof h.n_settled_fills === 'number' ? ` (n = ${h.n_settled_fills} settled fills)` : ''}
+        </Stat>
+        <Stat label="Peak held capital">{typeof h.peak_held_capital === 'number' ? money(h.peak_held_capital) : '—'}</Stat>
+        <Stat label="Return on held capital">{pctOrDash(h.return_on_held)}</Stat>
+        <Stat label="Peak resting bids">{typeof h.peak_capital === 'number' ? money(h.peak_capital) : '—'}</Stat>
+        {ff && (
+          <Stat label="First fill per market">
+            {pctOrDash(ff.roi)} on {money(ff.cost)} ({ff.markets ?? '—'} markets, P&amp;L {usd(ff.pnl)})
+          </Stat>
+        )}
+        {typeof capped === 'number' && <Stat label="Capped episodes">{capped} (refused by the limits, not scored)</Stat>}
+      </dl>
+      {data.day_basis === 'close_day' && (
+        <p className="hint" data-testid="day-basis">Days are counted by market close day.</p>
+      )}
+    </>
+  );
+}
+
+function VariantSection({ enabled, variants, compare }) {
+  const rows = Array.isArray(variants) ? variants : [];
+  if (enabled !== true || !rows.length) return null;
+  const cmp = Array.isArray(compare) ? compare : [];
+  const cmpFor = (iv) => cmp.find((c) => c && c.interval === iv);
+  const notes = cmp.filter((c) => c && c.reliability_note);
+  const mid = (r) => (r && typeof r.mid === 'number' ? r.mid : null);
+  return (
+    <Card title="Check-interval variants (simulated)" subtitle="Same estimator, different check cadence. Compared with the 10-minute baseline.">
+      <div data-testid="variant-section">
+        <CollapsibleList items={rows} pageKey="shadow-variants" label="variants">
+          {(vis) => (
+            <div className="sh-table-wrap">
+              <table className="sh-table" data-testid="variant-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Interval</th>
+                    <th scope="col">Fills</th>
+                    <th scope="col">Fill rate</th>
+                    <th scope="col">P&amp;L mid</th>
+                    <th scope="col">Diff vs 10 min</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {vis.map((v) => {
+                    const c = cmpFor(v.interval);
+                    const d = c && c.pnl_diff;
+                    const dm = mid(d);
+                    const ci = d && Array.isArray(d.ci90) ? d.ci90 : null;
+                    const early = v.headline_status === 'too_early';
+                    return (
+                      <tr key={v.interval} className={early ? 'sh-grey' : undefined}>
+                        <th scope="row">
+                          {v.interval} min{v.baseline ? ' (baseline)' : ''}
+                        </th>
+                        <td>{typeof v.central_fills === 'number' ? v.central_fills.toFixed(1) : '—'}</td>
+                        <td>{mid(v.fill_rate) != null ? rate(mid(v.fill_rate)) : '—'}</td>
+                        <td>{mid(v.pnl) != null ? usd(mid(v.pnl)) : '—'}</td>
+                        <td>
+                          {v.baseline
+                            ? '—'
+                            : dm == null
+                              ? '—'
+                              : ci
+                                ? `${usd(dm)} (90%: ${usd(ci[0])} to ${usd(ci[1])})`
+                                : usd(dm)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CollapsibleList>
+        {notes.map((c) => (
+          <p className="hint" key={c.interval} data-testid="variant-note">
+            {c.interval} min: {c.reliability_note}
+          </p>
+        ))}
+      </div>
+    </Card>
   );
 }
 
@@ -266,6 +363,7 @@ export default function Shadow() {
 
   const st = (data && data.status) || {};
   const h = data && (zeroFee && data.headline_zero_fee ? data.headline_zero_fee : data.headline);
+  const tooEarlyNew = !!(h && (h.headline_status === 'too_early' || (!h.headline_status && st.headline_status === 'too_early')));
   const caveats = data && Array.isArray(data.caveats) && data.caveats.length ? data.caveats : CAVEATS;
 
   return (
@@ -314,7 +412,7 @@ export default function Shadow() {
               <Card title="Coverage">
                 <dl className="stats">
                   <div>
-                    <dt>Days covered</dt>
+                    <dt>Days with fills</dt>
                     <dd>{st.days_covered ?? '—'}</dd>
                   </div>
                   <div>
@@ -333,13 +431,19 @@ export default function Shadow() {
                 {st.truncated && <p className="hint">Older episodes were left out of this estimate to keep it fast.</p>}
               </Card>
 
-              {st.too_early || !h ? (
+              {!h || (!tooEarlyNew && st.too_early) ? (
                 <div className="notice notice-info" role="status">
                   Too early to estimate. The range needs more days and settled episodes before the figures mean much.
                 </div>
               ) : (
                 <>
                   <Card title="Estimated results (simulated)">
+                    {tooEarlyNew && (
+                      <div className="notice notice-info" role="status" data-testid="too-early-reason">
+                        {TOO_EARLY_REASON}
+                      </div>
+                    )}
+                    <div className={tooEarlyNew ? 'sh-grey' : undefined} data-testid="headline-block">
                     <div className="sh-toggle" role="group" aria-label="Fee treatment">
                       <button type="button" className="btn small" aria-pressed={!zeroFee} onClick={() => setZeroFee(false)}>
                         After fees
@@ -357,12 +461,8 @@ export default function Shadow() {
                     <Range label={zeroFee ? 'Estimated P&L, zero fees' : 'Estimated P&L, after maker fees'} r={h.pnl} fmt={usd} />
                     <Range label="Estimated ROI" r={h.roi} fmt={roi} />
                     <Range label="Estimated fill rate" r={h.fill_rate} fmt={rate} />
-                    <dl className="stats">
-                      <div>
-                        <dt>Peak capital</dt>
-                        <dd>{money(h.peak_capital)}</dd>
-                      </div>
-                    </dl>
+                    <Honesty h={h} st={st} data={data} />
+                    </div>
                   </Card>
 
                   <Card title="Cumulative estimated P&L">
@@ -377,6 +477,7 @@ export default function Shadow() {
                   </Card>
                 </>
               )}
+              <VariantSection enabled={data.variants_enabled} variants={data.variants} compare={data.variant_compare} />
               <EventDays days={data.by_event_day} stats={data.day_stats} note={data.reliability_note} />
               <ArbSection arb={data.arb} period={data.period} />
             </>

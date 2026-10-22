@@ -14,3 +14,5 @@
 .sh-table thead th { color: var(--muted); font-size: 0.75rem; }
 .sh-chart svg { width: 100%; height: 150px; display: block; }
 .sh-notes li { margin-bottom: 6px; }
+
+.sh-grey { opacity: 0.55; }

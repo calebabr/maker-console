@@ -37,8 +37,9 @@ CAVEATS = [
     "and can move other traders' behaviour, which this estimate ignores.",
     "The queue can change between checks in ways we cannot see (orders placed and "
     "cancelled between two looks), so queue position is approximate.",
-    "No cash limit is applied in this version: every hypothetical bid is assumed "
-    "affordable, so real results may differ when capital is short.",
+    "Cash limits use an assumed capital (the shadow capital setting), not the real "
+    "account: bids the real limits could not have funded are recorded as capped and "
+    "left out, but the real balance and its timing would differ.",
     "Outages, rejected orders and missed passes are not modelled; a real bot would "
     "have gaps this estimate does not.",
     "Small sample: with few settled days the interval is wide, and a handful of "
@@ -94,21 +95,30 @@ def _r(x: float, nd: int = 4) -> float:
 # --------------------------------------------------------------------------
 # fills, fees, pnl
 # --------------------------------------------------------------------------
-def fill_scenarios(q0, level_min, traded_vol, through, count) -> dict[str, float]:
+def fill_scenarios(q0, level_min, traded_vol, through, count, through_vol=None) -> dict[str, float]:
     """Estimated filled contracts (lo / mid / hi), each capped to ``count``.
 
     ``q0`` is the queue ahead of us when we joined, ``level_min`` the smallest
     total size seen at our price level since (the queue can only shrink through
     cancels or trades), ``traded_vol`` the volume traded at our price while the
-    episode was open, ``through`` whether the market traded through our price
-    (which fills a resting bid in full).
+    episode was open, ``through`` whether the market traded through our price.
+
+    A trade-through (2A-3 F4): ``hi`` is the full count (the level emptied, so a
+    resting bid there would have been hit first); ``lo`` assumes nobody ahead of
+    us cancelled, so only the volume beyond the queue ahead reached us:
+    ``max(0, traded_vol + through_vol - q0)``, capped to the count; ``mid`` is
+    halfway. ``through_vol`` None (episodes recorded before 2A-3) keeps the old
+    full-count fill in all three scenarios.
     """
     count_f = max(0.0, _num(count))
     if count_f <= 0:
         return {"lo": 0.0, "mid": 0.0, "hi": 0.0}
     if through:
         full = count_f
-        return {"lo": full, "mid": full, "hi": full}
+        if through_vol is None:
+            return {"lo": full, "mid": full, "hi": full}
+        lo = _clamp(max(0.0, _num(traded_vol)) + max(0.0, _num(through_vol)) - max(0.0, _num(q0)), 0.0, full)
+        return {"lo": lo, "mid": (lo + full) / 2.0, "hi": full}
     q = max(0.0, _num(q0))
     lvl = q if level_min is None else max(0.0, _num(level_min))
     vol = max(0.0, _num(traded_vol))
@@ -137,6 +147,12 @@ def maker_fee(count, price, mode) -> float:
 def episode_pnl(fill, price, win, fee) -> float:
     """P&L in dollars: each filled contract pays 1 if it wins, costs ``price``."""
     return _num(fill) * ((1.0 if win else 0.0) - _num(price)) - _num(fee)
+
+
+def ep_fee_mode(ep: Mapping[str, Any]) -> str:
+    """The fee mode an episode is scored with (F7): its recorded `fee_mode`, else the maker fee (conservative)."""
+    m = ep.get("fee_mode")
+    return m if m in FEE_MODES else "maker"
 
 
 def score_episode(ep: Mapping[str, Any]) -> dict[str, dict[str, float]]:
@@ -180,9 +196,11 @@ def _settle_day(ep: Mapping[str, Any]) -> str | None:
 
 
 def _peak_capital(episodes: Iterable[Mapping[str, Any]], now: datetime) -> float:
-    """Maximum simultaneous cost of open episodes (no cash limit applied)."""
+    """Maximum simultaneous cost of resting bids ("peak resting bids"; capped episodes were never placed)."""
     events: list[tuple[datetime, int, float]] = []
     for ep in episodes:
+        if ep.get("capped") is True:
+            continue
         start = _as_dt(ep.get("join_ts"))
         if start is None:
             continue
@@ -200,6 +218,50 @@ def _peak_capital(episodes: Iterable[Mapping[str, Any]], now: datetime) -> float
     return peak
 
 
+def _peak_held(scored: list[dict[str, Any]], now: datetime) -> float:
+    """F5: maximum simultaneous cost of FILLED positions (central fill x price), each held from its fill time
+    (`through_ts` for a trade-through, else `end_ts`) to settlement (`settled_ts`, else `close_time`)."""
+    events: list[tuple[datetime, int, float]] = []
+    for s in scored:
+        amt = s["fill"]["mid"] * s["price"]
+        if amt <= 0:
+            continue
+        ep = s["ep"]
+        start = ((_as_dt(ep.get("through_ts")) if ep.get("through") else None) or _as_dt(ep.get("end_ts"))
+                 or _as_dt(ep.get("join_ts")))
+        if start is None:
+            continue
+        end = _as_dt(ep.get("settled_ts")) or _as_dt(ep.get("close_time")) or now
+        if end < start:
+            end = start
+        events.append((start, 1, amt))
+        events.append((end, 0, -amt))
+    events.sort(key=lambda e: (e[0], e[1]))
+    cur = peak = 0.0
+    for _, _, delta in events:
+        cur += delta
+        peak = max(peak, cur)
+    return peak
+
+
+def _first_fill_per_market(scored: list[dict[str, Any]], mode_key: str) -> dict[str, Any]:
+    """F1 (additive): only the FIRST filled episode (earliest join) of each (ticker, side), central scenario.
+    `mode_key` "pnl_s" (the scheduled fee, the headline) or "pnl_z" (zero fee)."""
+    first: dict[tuple[str, str], dict[str, Any]] = {}
+    for s in scored:
+        if s["fill"]["mid"] <= 0:
+            continue
+        k = (str(s["ep"].get("ticker") or ""), str(s["ep"].get("side") or ""))
+        j = _as_dt(s["ep"].get("join_ts")) or _tmin()
+        cur = first.get(k)
+        if cur is None or j < cur[0]:
+            first[k] = (j, s)
+    cost = sum(s["fill"]["mid"] * s["price"] for _, s in first.values())
+    pnl = sum(s[mode_key]["mid"] for _, s in first.values())
+    return {"cost": _r(cost), "pnl": _r(pnl), "roi": _r(pnl / cost, 6) if cost > 0 else None,
+            "markets": len(first)}
+
+
 def _range3(d: Mapping[str, float], nd: int = 4) -> dict[str, float]:
     """lo / mid / hi for a dollar figure.
 
@@ -214,10 +276,19 @@ def _range3(d: Mapping[str, float], nd: int = 4) -> dict[str, float]:
 
 def _empty_headline() -> dict[str, Any]:
     return {
-        "pnl": {"lo": 0.0, "mid": 0.0, "hi": 0.0, "ci90": [0.0, 0.0]},
-        "roi": {"lo": 0.0, "mid": 0.0, "hi": 0.0, "ci90": [0.0, 0.0]},
+        "pnl": {"lo": 0.0, "mid": 0.0, "hi": 0.0, "ci90": None},
+        "roi": {"lo": None, "mid": None, "hi": None, "ci90": None},   # V3: no cost, no ROI
         "fill_rate": {"lo": 0.0, "mid": 0.0, "hi": 0.0},
         "peak_capital": 0.0,
+        # Sprint 2A-3 (additive)
+        "ci_reliable": False,                    # F3: the ci90 fields are null until the too-early gate passes
+        "headline_status": "too_early",          # F2: "too_early" | "ok"
+        "break_even_win_rate": None,             # F2: cost-weighted average price paid (central fills)
+        "observed_win_rate": None,               # F2: share of central filled contracts that won
+        "n_settled_fills": 0,                    # F2: settled episodes with a central fill > 0
+        "peak_held_capital": 0.0,                # F5: peak cost of filled positions held to settlement
+        "return_on_held": None,                  # F5: central P&L / peak_held_capital
+        "first_fill_per_market": {"cost": 0.0, "pnl": 0.0, "roi": None, "markets": 0},   # F1 (additive)
     }
 
 
@@ -234,6 +305,10 @@ def empty_summary(enabled: bool = False, standin: bool = False) -> dict[str, Any
             "last_pass_ts": None,
             "pass_ok_pct": None,
             "truncated": False,
+            # Sprint 2A-3 (additive)
+            "headline_status": "too_early",     # F2
+            "capped_episodes": 0,               # F1: episodes the caps refused (never scored)
+            "settled_days": 0,                  # F6: close days with a scored episode (filled or not)
         },
         "headline": _empty_headline(),
         "headline_zero_fee": _empty_headline(),
@@ -242,6 +317,12 @@ def empty_summary(enabled: bool = False, standin: bool = False) -> dict[str, Any
         "daily": [],
         "fee_mode": "maker",
         "caveats": list(CAVEATS),
+        "day_basis": "close_day",               # F6: a "day" is the UTC close (settle) day, not the event date
+        "fee_modes": {m: 0 for m in FEE_MODES},  # F7: scored episodes per fee mode
+        # Sprint 2A-3 wave 2 (interval variants; empty while env SHADOW_VARIANTS is off)
+        "variants_enabled": False,
+        "variants": [],
+        "variant_compare": [],
         # additive (Sprint 2A-2 S2/S3): existing fields above are unchanged
         "by_event_day": [],
         "day_stats": _empty_day_stats(),
@@ -296,8 +377,13 @@ def _group_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "episodes": len(rows),
         "fills_mid": _r(sum(r["fill"]["mid"] for r in rows)),
-        "pnl": _range3(_sum3([r["pnl"]["maker"] for r in rows])),
+        "pnl": _range3(_sum3([_sched(r) for r in rows])),
     }
+
+
+def _sched(s: Mapping[str, Any]) -> Mapping[str, float]:
+    """The P&L row the headline uses: the episode's own fee mode (F7; maker when none is recorded)."""
+    return s.get("pnl_s") or s["pnl"]["maker"]
 
 
 # --------------------------------------------------------------------------
@@ -328,7 +414,8 @@ def _ret3(pnl: Mapping[str, float], cost: Mapping[str, float]) -> dict[str, floa
 
 def by_event_day(scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One row per settle day (UTC date of `settled_ts`, else `close_time`; the same key as `daily`), oldest first:
-    episodes (scored), filled_episodes (central fill > 0), cost / pnl (maker fee) / return per scenario."""
+    episodes (scored), filled_episodes (central fill > 0), cost / pnl (each episode's fee mode) /
+    return per scenario."""
     days: dict[str, dict[str, Any]] = {}
     for s in scored:
         b = days.setdefault(s["day"], {"episodes": 0, "filled": 0, "cost": {sc: 0.0 for sc in SCENARIOS},
@@ -337,7 +424,7 @@ def by_event_day(scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
         b["filled"] += int(s["fill"]["mid"] > 0)
         for sc in SCENARIOS:
             b["cost"][sc] += s["fill"][sc] * s["price"]
-            b["pnl"][sc] += s["pnl"]["maker"][sc]
+            b["pnl"][sc] += _sched(s)[sc]
     out = []
     for d in sorted(days):
         b = days[d]
@@ -378,10 +465,16 @@ def summarize(episodes, now, *, seed: int = DEFAULT_SEED, draws: int = DEFAULT_D
               passes=None, enabled: bool = True, standin: bool = False) -> dict[str, Any]:
     """Aggregate episodes into the ``GET /api/shadow/summary`` shape.
 
-    Only settled episodes (with a result and a fill estimate) are scored;
-    all episodes count toward peak capital. Fee-adjusted ("maker") figures are
-    the headline; zero-fee figures sit under ``headline_zero_fee``. ``passes``
-    (optional, newest first or any order) feeds the pass health fields.
+    Only settled, uncapped episodes (with a result and a fill estimate) are
+    scored; uncapped episodes count toward peak resting bids (`peak_capital`).
+    Fee-adjusted figures (each episode's recorded `fee_mode`, maker when none)
+    are the headline; zero-fee figures sit under ``headline_zero_fee``.
+    ``passes`` (optional, any order) feeds the pass health fields.
+
+    Sprint 2A-3: capped episodes are counted (`status.capped_episodes`) and
+    never scored; `days_covered` and the too-early gate count only close days
+    with a filled episode; the 90% intervals are null (`ci_reliable` false)
+    while too early and resample only filled days.
     """
     now_dt = _as_dt(now) or datetime.now(timezone.utc)
     all_eps = list(episodes or [])
@@ -396,64 +489,97 @@ def summarize(episodes, now, *, seed: int = DEFAULT_SEED, draws: int = DEFAULT_D
         out["status"]["truncated"] = any(bool(p.get("truncated")) for p in plist)
 
     scored: list[dict[str, Any]] = []
+    capped = 0
     for ep in all_eps:
+        if ep.get("capped") is True:                  # F1: refused by a cap, never placed, never scored
+            capped += 1
+            continue
         if ep.get("result") not in ("yes", "no") or not ep.get("fill"):
             continue
         day = _settle_day(ep)
         if day is None:
             continue
+        pnl = score_episode(ep)
+        mode = ep_fee_mode(ep)
         scored.append({
             "ep": ep,
             "day": day,
             "fill": {sc: _num(ep["fill"].get(sc)) for sc in SCENARIOS},
-            "pnl": score_episode(ep),
+            "pnl": pnl,
+            "pnl_s": pnl[mode],                       # F7: the episode's own fee mode (the headline)
+            "pnl_z": pnl["zero"],
+            "mode": mode,
             "price": _num(ep.get("price")),
+            "win": ep.get("result") == ep.get("side"),
         })
+    out["status"]["capped_episodes"] = capped
 
     out["headline"]["peak_capital"] = _r(_peak_capital(all_eps, now_dt), 2)
     out["headline_zero_fee"]["peak_capital"] = out["headline"]["peak_capital"]
     if not scored:
         return out
 
-    # per-day buckets (settlement day, UTC)
+    # per-day buckets (settlement / close day, UTC)
     by_day: dict[str, dict[str, Any]] = {}
     for s in scored:
         b = by_day.setdefault(s["day"], {
-            "maker": {sc: 0.0 for sc in SCENARIOS},
+            "sched": {sc: 0.0 for sc in SCENARIOS},
             "zero": {sc: 0.0 for sc in SCENARIOS},
             "cost_mid": 0.0,
+            "filled": 0,
         })
         for sc in SCENARIOS:
-            b["maker"][sc] += s["pnl"]["maker"][sc]
-            b["zero"][sc] += s["pnl"]["zero"][sc]
+            b["sched"][sc] += s["pnl_s"][sc]
+            b["zero"][sc] += s["pnl_z"][sc]
         b["cost_mid"] += s["fill"]["mid"] * s["price"]
+        b["filled"] += int(s["fill"]["mid"] > 0)
     day_keys = sorted(by_day)
+    filled_days = [k for k in day_keys if by_day[k]["filled"] > 0]       # F6: only days with a filled episode
 
     total_count = sum(_num(s["ep"].get("count")) for s in scored)
     fills = {sc: sum(s["fill"][sc] for s in scored) for sc in SCENARIOS}
     cost = {sc: sum(s["fill"][sc] * s["price"] for s in scored) for sc in SCENARIOS}
 
-    def _roi(pnl: Mapping[str, float]) -> dict[str, float]:
-        return {sc: (pnl[sc] / cost[sc] if cost[sc] > 0 else 0.0) for sc in SCENARIOS}
+    pnl_sched = _sum3([s["pnl_s"] for s in scored])
+    pnl_zero = _sum3([s["pnl_z"] for s in scored])
 
-    pnl_maker = _sum3([s["pnl"]["maker"] for s in scored])
-    pnl_zero = _sum3([s["pnl"]["zero"] for s in scored])
+    central_fills = fills["mid"]
+    filled = [s for s in scored if s["fill"]["mid"] > 0]
+    # V2: one gate everywhere (the reliability note too): 7 close days with a fill and 30 FILLED EPISODES
+    too_early = not (len(filled_days) >= MIN_SETTLED_DAYS and len(filled) >= MIN_FILLED_EPISODES)
+    ci = None
+    if not too_early:                                 # F3: no interval while too early; filled days only
+        ci = _bootstrap(
+            [{"pnl_maker": by_day[k]["sched"]["mid"], "pnl_zero": by_day[k]["zero"]["mid"],
+              "cost": by_day[k]["cost_mid"]} for k in filled_days],
+            seed, draws,
+        )
 
-    ci = _bootstrap(
-        [{"pnl_maker": by_day[k]["maker"]["mid"], "pnl_zero": by_day[k]["zero"]["mid"],
-          "cost": by_day[k]["cost_mid"]} for k in day_keys],
-        seed, draws,
-    )
+    # F2: break-even vs observed win rate, over central filled contracts
+    n_contracts = sum(s["fill"]["mid"] for s in filled)
+    break_even = _r(cost["mid"] / n_contracts, 6) if n_contracts > 0 else None
+    observed = _r(sum(s["fill"]["mid"] for s in filled if s["win"]) / n_contracts, 6) if n_contracts > 0 else None
+    peak_held = _r(_peak_held(scored, now_dt), 2)
+    status = "too_early" if too_early else "ok"
 
     fill_rate = {sc: (fills[sc] / total_count if total_count > 0 else 0.0) for sc in SCENARIOS}
-    for name, pnl, ci_p, ci_r in (("headline", pnl_maker, ci["pnl_maker"], ci["roi_maker"]),
-                                  ("headline_zero_fee", pnl_zero, ci["pnl_zero"], ci["roi_zero"])):
-        roi = _roi(pnl)
+    for name, pnl, ci_p, ci_r, key in (
+            ("headline", pnl_sched, ci and ci["pnl_maker"], ci and ci["roi_maker"], "pnl_s"),
+            ("headline_zero_fee", pnl_zero, ci and ci["pnl_zero"], ci and ci["roi_zero"], "pnl_z")):
+        roi = _ret3(pnl, cost)                        # V3: a scenario with no cost has no ROI (null), not 0 %
         out[name] = {
-            "pnl": {**_range3(pnl), "ci90": [_r(ci_p[0]), _r(ci_p[1])]},
-            "roi": {**_range3(roi, 6), "ci90": [_r(ci_r[0], 6), _r(ci_r[1], 6)]},
+            "pnl": {**_range3(pnl), "ci90": None if ci_p is None else [_r(ci_p[0]), _r(ci_p[1])]},
+            "roi": {**roi, "ci90": None if ci_r is None else [_r(ci_r[0], 6), _r(ci_r[1], 6)]},
             "fill_rate": {sc: _r(fill_rate[sc], 6) for sc in SCENARIOS},
             "peak_capital": out["headline"]["peak_capital"],
+            "ci_reliable": ci is not None,
+            "headline_status": status,
+            "break_even_win_rate": break_even,
+            "observed_win_rate": observed,
+            "n_settled_fills": len(filled),
+            "peak_held_capital": peak_held,
+            "return_on_held": _r(pnl["mid"] / peak_held, 6) if peak_held > 0 else None,
+            "first_fill_per_market": _first_fill_per_market(scored, key),
         }
 
     out["by_series"] = [
@@ -470,17 +596,21 @@ def summarize(episodes, now, *, seed: int = DEFAULT_SEED, draws: int = DEFAULT_D
     daily = []
     for k in day_keys:
         for sc in SCENARIOS:
-            cum[sc] += by_day[k]["maker"][sc]
+            cum[sc] += by_day[k]["sched"][sc]
         band = _range3(cum)
         daily.append({"day": k, "cum_lo": band["lo"], "cum_mid": band["mid"], "cum_hi": band["hi"]})
     out["daily"] = daily
 
-    central_fills = fills["mid"]
+    modes = {m: sum(1 for s in scored if s["mode"] == m) for m in FEE_MODES}
+    out["fee_modes"] = modes
+    out["fee_mode"] = "maker" if modes["zero"] == 0 else "per_series"
     out["status"].update({
-        "days_covered": len(day_keys),
+        "days_covered": len(filled_days),
+        "settled_days": len(day_keys),
         "settled_episodes": len(scored),
         "central_fills": _r(central_fills),
-        "too_early": not (len(day_keys) >= MIN_SETTLED_DAYS and central_fills >= MIN_CENTRAL_FILLS),
+        "too_early": too_early,
+        "headline_status": status,
     })
     rows = by_event_day(scored)
     out["by_event_day"] = rows
@@ -488,6 +618,106 @@ def summarize(episodes, now, *, seed: int = DEFAULT_SEED, draws: int = DEFAULT_D
     out["reliability_note"] = reliability_note(out["day_stats"]["days_with_fills"],
                                                out["day_stats"]["filled_episodes"])
     return out
+
+
+# --------------------------------------------------------------------------
+# 2A-3 wave 2: interval variants (each cadence's own episodes; paired comparison with the baseline)
+# --------------------------------------------------------------------------
+BASELINE_INTERVAL = 10
+COMPARE_TOO_EARLY_TEXT = ("Too early to compare cadences: both need {d} close days with a fill and {f} filled "
+                          "episodes before the difference means much.")
+COMPARE_NOTE = ("Paired by close day over {n} days with a fill in either cadence. Both cadences quote the same "
+                "markets on the same days, so their results move together and the difference is noisy; read the "
+                "interval, not the point. Each cadence has its own capped position, so a faster one is not simply "
+                "more of the same bids.")
+
+
+def _day_pnl(eps: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, float]]:
+    """Per close day: central P&L at each episode's fee mode and central fill cost, the same episodes summarize()
+    scores (uncapped, yes/no result, a fill estimate, a day)."""
+    days: dict[str, dict[str, float]] = {}
+    for ep in eps:
+        if ep.get("capped") is True or ep.get("result") not in ("yes", "no") or not ep.get("fill"):
+            continue
+        day = _settle_day(ep)
+        if day is None:
+            continue
+        f = _num(ep["fill"].get("mid"))
+        d = days.setdefault(day, {"pnl": 0.0, "cost": 0.0, "filled": 0.0})
+        d["pnl"] += score_episode(ep)[ep_fee_mode(ep)]["mid"]
+        d["cost"] += f * _num(ep.get("price"))
+        d["filled"] += 1.0 if f > 0 else 0.0
+    return days
+
+
+def _paired_ci(diffs: list[float], seed: int, draws: int) -> list[float] | None:
+    """Day-clustered bootstrap of the summed paired difference: resample days with replacement."""
+    n = len(diffs)
+    if n == 0 or draws <= 0:
+        return None
+    rng = random.Random(seed)
+    sums = sorted(sum(diffs[rng.randrange(n)] for _ in range(n)) for _ in range(draws))
+    return [_r(_percentile(sums, 0.05)), _r(_percentile(sums, 0.95))]
+
+
+def _variant_row(iv: int, s: Mapping[str, Any]) -> dict[str, Any]:
+    h, st = s["headline"], s["status"]
+    return {"interval": iv, "baseline": iv == BASELINE_INTERVAL,
+            "pnl": {k: h["pnl"][k] for k in SCENARIOS}, "roi": {k: h["roi"][k] for k in SCENARIOS},
+            "fill_rate": dict(h["fill_rate"]), "central_fills": st["central_fills"],
+            "settled_episodes": st["settled_episodes"], "n_settled_fills": h["n_settled_fills"],
+            "capped_episodes": st["capped_episodes"], "days_covered": st["days_covered"],
+            "too_early": st["too_early"], "headline_status": st["headline_status"],
+            "peak_held_capital": h["peak_held_capital"], "last_pass_ts": st["last_pass_ts"],
+            "pass_ok_pct": st["pass_ok_pct"]}
+
+
+def variant_blocks(episodes, now, intervals, *, passes=None, interval_of=None, seed: int = DEFAULT_SEED,
+                   draws: int = DEFAULT_DRAWS) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(variants, variant_compare) for the baseline (10) and each variant cadence in `intervals`.
+
+    `variants`: per cadence, its own headline figures (maker/scheduled fee), fills and fill rate, from the episodes
+    tagged with that interval. `variant_compare`: per variant, the paired difference vs the baseline by close day
+    (variant minus baseline central P&L, summed), a day-clustered bootstrap 90% interval of that sum (null while
+    either side is too early), the ROI and fill-rate differences and a reliability note."""
+    iv_of = interval_of or (lambda d: int((d or {}).get("interval") or BASELINE_INTERVAL))
+    ivs = sorted({BASELINE_INTERVAL, *[int(i) for i in (intervals or [])]})
+    groups: dict[int, list] = {i: [] for i in ivs}
+    for ep in episodes or []:
+        g = groups.get(iv_of(ep))
+        if g is not None:
+            g.append(ep)
+    pgroups: dict[int, list] = {i: [] for i in ivs}
+    for p in passes or []:
+        g = pgroups.get(iv_of(p))
+        if g is not None:
+            g.append(p)
+    sums = {i: summarize(groups[i], now, passes=pgroups[i], draws=0) for i in ivs}
+    variants = [_variant_row(i, sums[i]) for i in ivs]
+    base_days = _day_pnl(groups[BASELINE_INTERVAL])
+    base = sums[BASELINE_INTERVAL]
+    compare = []
+    for i in ivs:
+        if i == BASELINE_INTERVAL:
+            continue
+        var_days = _day_pnl(groups[i])
+        days = sorted(d for d in set(base_days) | set(var_days)
+                      if (base_days.get(d, {}).get("filled", 0) > 0 or var_days.get(d, {}).get("filled", 0) > 0))
+        diffs = [var_days.get(d, {}).get("pnl", 0.0) - base_days.get(d, {}).get("pnl", 0.0) for d in days]
+        too_early = bool(base["status"]["too_early"] or sums[i]["status"]["too_early"])
+        ci = None if too_early else _paired_ci(diffs, seed, draws)
+        hv, hb = sums[i]["headline"], base["headline"]
+        compare.append({
+            "interval": i, "vs": BASELINE_INTERVAL, "days": len(days),
+            "pnl_diff": {"mid": _r(sum(diffs)), "ci90": ci},
+            "roi_diff_mid": (None if hv["roi"]["mid"] is None or hb["roi"]["mid"] is None
+                             else _r(hv["roi"]["mid"] - hb["roi"]["mid"], 6)),
+            "fill_rate_diff_mid": _r(hv["fill_rate"]["mid"] - hb["fill_rate"]["mid"], 6),
+            "too_early": too_early, "ci_reliable": ci is not None,
+            "reliability_note": (COMPARE_TOO_EARLY_TEXT.format(d=MIN_SETTLED_DAYS, f=MIN_FILLED_EPISODES) if too_early
+                                 else COMPARE_NOTE.format(n=len(days))),
+        })
+    return variants, compare
 
 
 # --------------------------------------------------------------------------
@@ -655,5 +885,5 @@ _EPS = timedelta(seconds=1)          # an event seen exactly at `top` still coun
 __all__ = [
     "CAVEATS", "fill_scenarios", "maker_fee", "episode_pnl", "score_episode",
     "summarize", "empty_summary", "by_event_day", "day_stats", "reliability_note",
-    "empty_arb", "arb_merge", "arb_view",
+    "empty_arb", "arb_merge", "arb_view", "variant_blocks",
 ]

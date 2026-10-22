@@ -726,14 +726,14 @@ class MemoryStore(Store):
         docs.sort(key=lambda d: (key(d), d.get("\x00seq", 0)), reverse=reverse)
         if limit is not None:
             docs = docs[:max(0, int(limit))]
-        return [self._clean(d) for d in docs]
+        return [S.shadow_with_defaults(self._clean(d)) for d in docs]
 
     @staticmethod
     def _project(docs: list[dict], fields: Iterable[str] | None) -> list[dict]:
         if fields is None:
             return docs
         keep = set(fields) | {"ep_id"}
-        return [{k: v for k, v in d.items() if k in keep} for d in docs]
+        return [S.shadow_with_defaults({k: v for k, v in d.items() if k in keep}, keep) for d in docs]
 
     async def shadow_open_episodes(self, *, fields: Iterable[str] | None = None,
                                    limit: int | None = None) -> list[dict]:

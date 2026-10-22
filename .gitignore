@@ -14,6 +14,8 @@ bot.env
 # never commit them; restore with `git checkout -- kalshi_bot`).
 kalshi_bot/_overlay.py
 control_api/data/cell_expectations.json
+control_api/data/fee_schedule.json
+control_api/data/shadow_limits.json
 _private/
 private_checkout/
 

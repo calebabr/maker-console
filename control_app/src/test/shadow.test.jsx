@@ -55,4 +55,102 @@ describe('Shadow estimate page', () => {
     expect(await screen.findByText(/shadow estimate is off/i)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Server' })).toHaveAttribute('href', '/server');
   });
+
+  const NEW_H = (over = {}) => ({
+    ...SUMMARY().headline,
+    headline_status: 'ok',
+    break_even_win_rate: 0.904,
+    observed_win_rate: 1,
+    n_settled_fills: 92,
+    peak_held_capital: 773.9,
+    return_on_held: 0.122,
+    first_fill_per_market: { cost: 197.23, pnl: 15.32, roi: 0.078, markets: 22 },
+    ...over,
+  });
+
+  it('greys the headline with a reason while too early and shows no interval when ci90 is null', async () => {
+    const h = NEW_H({ headline_status: 'too_early', pnl: R(1, 5, 9, null), roi: R(0.004, 0.01, 0.016, null) });
+    base(SUMMARY({ headline: h, status: { ...SUMMARY().status, headline_status: 'too_early', too_early: true } }));
+    renderApp('/shadow');
+    expect(await screen.findByTestId('too-early-reason')).toHaveTextContent(/7 close days/);
+    expect(screen.getByTestId('headline-block')).toHaveClass('sh-grey');
+    expect(screen.queryByText(/90%:/)).toBeNull();
+  });
+
+  it('shows break-even vs observed win rate with n, first fill, held capital and return on held', async () => {
+    base(SUMMARY({ headline: NEW_H() }));
+    renderApp('/shadow');
+    const box = await screen.findByTestId('honesty-stats');
+    expect(box).toHaveTextContent('90.4%');
+    expect(box).toHaveTextContent('n = 92 settled fills');
+    expect(box).toHaveTextContent(/First fill per market/);
+    expect(box).toHaveTextContent('22 markets');
+    expect(box).toHaveTextContent('773.90');
+    expect(box).toHaveTextContent('12.2%');
+    expect(screen.getByTestId('headline-block')).not.toHaveClass('sh-grey');
+  });
+
+  it('shows the capped count and the close-day label', async () => {
+    base(SUMMARY({ headline: NEW_H(), day_basis: 'close_day', status: { ...SUMMARY().status, capped_episodes: 268 } }));
+    renderApp('/shadow');
+    expect(await screen.findByTestId('honesty-stats')).toHaveTextContent('268');
+    expect(screen.getByTestId('day-basis')).toHaveTextContent(/market close day/);
+  });
+
+  const VAR = (interval, baseline, extra = {}) => ({
+    interval, baseline, pnl: R(1, 5, 9), roi: R(0, 0.01, 0.02), fill_rate: R(0.2, 0.3, 0.4),
+    central_fills: 20, settled_episodes: 10, n_settled_fills: 8, capped_episodes: 0, days_covered: 3,
+    too_early: true, headline_status: 'too_early', peak_held_capital: 50, last_pass_ts: null, pass_ok_pct: 1, ...extra,
+  });
+
+  it('shows the variant table with the paired difference (null ci) and the reliability note', async () => {
+    base(SUMMARY({
+      headline: NEW_H(),
+      variants_enabled: true,
+      variants: [VAR(5, false), VAR(10, true)],
+      variant_compare: [{ interval: 5, vs: 10, days: 3, pnl_diff: { mid: 1.5, ci90: null }, too_early: true, ci_reliable: false, reliability_note: 'Too few days to separate the cadences.' }],
+    }));
+    renderApp('/shadow');
+    const tbl = await screen.findByTestId('variant-table');
+    expect(tbl).toHaveTextContent('5 min');
+    expect(tbl).toHaveTextContent('10 min (baseline)');
+    expect(tbl).toHaveTextContent('+$1.50');
+    expect(tbl).not.toHaveTextContent('90%:');
+    expect(screen.getByTestId('variant-note')).toHaveTextContent(/Too few days/);
+  });
+
+  it('shows the interval when the compare ci90 is present', async () => {
+    base(SUMMARY({
+      headline: NEW_H(),
+      variants_enabled: true,
+      variants: [VAR(7, false), VAR(10, true)],
+      variant_compare: [{ interval: 7, vs: 10, days: 9, pnl_diff: { mid: 1, ci90: [-0.5, 2.5] }, too_early: false, ci_reliable: true, reliability_note: '' }],
+    }));
+    renderApp('/shadow');
+    expect(await screen.findByTestId('variant-table')).toHaveTextContent('90%:');
+  });
+
+  it('hides variants when variants_enabled is false', async () => {
+    base(SUMMARY({ headline: NEW_H(), variants_enabled: false, variants: [], variant_compare: [] }));
+    renderApp('/shadow');
+    await screen.findByTestId('honesty-stats');
+    expect(screen.queryByTestId('variant-section')).toBeNull();
+  });
+
+  it('hides the variant section when there are no variants', async () => {
+    base(SUMMARY({ headline: NEW_H() }));
+    renderApp('/shadow');
+    await screen.findByTestId('honesty-stats');
+    expect(screen.queryByTestId('variant-section')).toBeNull();
+  });
+
+  it('shows no data, never 0%, for a null roi', async () => {
+    base(SUMMARY({ headline: NEW_H({ roi: { lo: null, mid: null, hi: null, ci90: null } }) }));
+    renderApp('/shadow');
+    await screen.findByTestId('honesty-stats');
+    const h3 = screen.getByText('Estimated ROI', { selector: 'h3' });
+    const block = h3.parentElement;
+    expect(block).toHaveTextContent('no data');
+    expect(block).not.toHaveTextContent('0.0%');
+  });
 });

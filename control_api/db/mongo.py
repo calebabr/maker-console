@@ -359,7 +359,8 @@ class MongoStore(Store):
             if limit <= 0:
                 return []
             cur = cur.limit(int(limit))
-        return await cur.to_list()
+        keep = None if fields is None else set(fields) | {"ep_id"}
+        return [S.shadow_with_defaults(d, keep) for d in await cur.to_list()]
 
     async def shadow_open_episodes(self, *, fields: Iterable[str] | None = None,
                                    limit: int | None = None) -> list[dict]:

@@ -81,6 +81,7 @@ ORDER_ERROR_ALERT_EVERY = timedelta(minutes=30)
 PAUSED_ALERT_EVERY = timedelta(hours=1)
 SHADOW_RETRY_S = 60                 # a shadow cycle skipped for a transient reason retries after at most this
 SHADOW_TRANSIENT = ("standby", "pass_running", "busy", "stop_running", "error")
+SHADOW_VARIANT_TICK_S = 30           # 2A-3 wave 2: how often the variant loop checks which cadence is due
 # S-25: queue-position, fill-quality and fills-sync Kalshi reads run on their own small pool with a short client,
 # never on the default executor that Stop's cancel uses.
 TELEMETRY_WORKERS = 2
@@ -420,6 +421,13 @@ class Runner:
         self._shadow_active = False           # a cycle ran since shadow was last turned on
         self._shadow_summary_utc: datetime | None = None   # last cached-summary refresh (SH-2)
         self.shadow_state: dict = {"last_cycle_utc": None, "last_reason": None, "last_error": None}
+        # 2A-3 wave 2 interval variants (env SHADOW_VARIANTS): one shadow cycle at a time (never a trading lock),
+        # a shared short read cache, the variant loop, and per-cadence state (last duration feeds the load guard)
+        self._shadow_cycle_lock = asyncio.Lock()
+        self._shadow_cache = shadowsvc.ReadCache()
+        self._shadow_variant_task: asyncio.Task | None = None
+        self._shadow_last_duration_s: float | None = None
+        self.shadow_variant_state: dict = {}
         self._monitor_running = False     # CA-2: single-flight; a second run while one runs gets monitor_running
         # ---- release process: single-leader lease + fencing (R1), graceful handover (R2/R3), schema (R4)
         g = lambda n, d: getattr(settings, n, d)  # noqa: E731   (tests may pass a minimal settings object)
@@ -784,6 +792,9 @@ class Runner:
                 # kept out of self._tasks: shutdown cancels it without waiting. It idles while the cloud setting
                 # shadow_enabled is false, so the app can turn it on and off without a restart.
                 self._shadow_task = asyncio.create_task(self._shadow_loop(), name="runner-shadow")
+                if shadowsvc.variants_enabled():         # 2A-3 wave 2: off by default (env SHADOW_VARIANTS)
+                    self._shadow_variant_task = asyncio.create_task(self._shadow_variant_loop(),
+                                                                    name="runner-shadow-variants")
             self._spawn(self.run_source_backfill())     # read-only relabel of older fills; budgeted, never raises
         log.info("runner started: instance %s on %s, role %s", self.instance_id[:8], hostname(), self.role())
 
@@ -800,6 +811,8 @@ class Runner:
         self._shutting_down = True
         if self._shadow_task is not None:
             self._shadow_task.cancel()                 # shadow never delays shutdown: cancel, never await
+        if self._shadow_variant_task is not None:
+            self._shadow_variant_task.cancel()
         try:
             await asyncio.wait_for(self._graceful_handover(), timeout=self.shutdown_budget_s())
         except BaseException as e:  # noqa: BLE001   (incl. the budget timeout and cancellation)
@@ -2107,29 +2120,45 @@ class Runner:
             return min(full, float(SHADOW_RETRY_S))
         return full
 
-    def _shadow_sync(self, inp: Any, strategy: Any, deadline: float) -> Any:
+    def _shadow_sync(self, inp: Any, strategy: Any, deadline: float, cached: bool = False) -> Any:
         md = self.shadow_factory()
+        if cached:                                       # variants on: overlapping cadences share public reads
+            md = self._shadow_cache.view(md)
         return shadowsvc.run_cycle(md, strategy, inp, deadline=deadline)
 
     async def _shadow_store(self, coro, timeout: float = shadowsvc.SHADOW_STORE_TIMEOUT_S):
         return await asyncio.wait_for(coro, timeout)
 
-    async def _shadow_compute(self, now: datetime, standin: bool) -> Any:
+    async def _shadow_compute(self, now: datetime, standin: bool, interval: int = shadowsvc.BASELINE_INTERVAL) -> Any:
         st = self.store
-        open_eps = await self._shadow_store(st.shadow_open_episodes())
+        variants = shadowsvc.variant_intervals(self.cloud)
+        k = 1 + len(variants)                            # wave 2: more cadences share the stored episodes
+        mine = (lambda eps: [e for e in (eps or []) if shadowsvc.interval_of(e) == interval])
+        all_open = list(await self._shadow_store(st.shadow_open_episodes()) or [])
+        open_eps = mine(all_open)
+        retire = ([e for e in all_open if shadowsvc.interval_of(e) not in (interval, *variants)]
+                  if interval == shadowsvc.BASELINE_INTERVAL else [])   # a variant turned off: end its open bids
+        # trade reads and settlement do not depend on the cadence: whichever cycle runs drains the shared queues
         unread = await self._shadow_store(st.shadow_ended_unread(shadowsvc.SHADOW_MAX_TRADE_READS + 1))
         unsettled = await self._shadow_store(st.shadow_unsettled(now, shadowsvc.SHADOW_MAX_SETTLE_READS * 10))
         new_today = await self._shadow_store(st.shadow_count_new_since(shadowsvc.day_start(now)))
+        held = mine(await self._shadow_store(st.shadow_recent(shadowsvc.SHADOW_HELD_SCAN * k, "ended")))  # F1
         ms = self.ms
         cfg = {**ms.DEFAULTS, **botfiles.public_config(self.config)}
         inp = shadowsvc.CycleInput(series=list(cfg.get("series") or []), run_budget=float(cfg["run_budget"]),
                                    max_order=float(cfg["max_order"]), open_eps=list(open_eps or []),
                                    ended_unread=list(unread or []), unsettled=list(unsettled or []),
-                                   new_today=int(new_today or 0), now=now, standin=standin)
-        if shadowsvc.arb_enabled() and not standin:      # S3 (env SHADOW_ARB, default off): read-only, own budgets
+                                   new_today=int(new_today or 0), now=now, standin=standin,
+                                   held=list(held or []), capital=shadowsvc.capital_of(self.cloud),
+                                   max_open_frac=shadowsvc.open_frac_of(
+                                       cfg, getattr(self.settings, "max_open_frac", None)),
+                                   interval=interval, retire=retire)
+        if interval != shadowsvc.BASELINE_INTERVAL:
+            inp.new_cap = int(shadowsvc.SHADOW_DAILY_NEW_CAP * shadowsvc.SHADOW_VARIANT_NEW_SHARE)
+        elif shadowsvc.arb_enabled() and not standin:    # S3 (env SHADOW_ARB, default off): read-only, own budgets
             inp.arb = shadowsvc.arb_input(arbsvc.current(self.config))
         deadline = time.monotonic() + shadowsvc.SHADOW_BUDGET_S - shadowsvc.DEADLINE_MARGIN_S
-        self._shadow_cf = self._shadow_executor.submit(self._shadow_sync, inp, ms, deadline)
+        self._shadow_cf = self._shadow_executor.submit(self._shadow_sync, inp, ms, deadline, bool(variants))
         return await asyncio.wrap_future(self._shadow_cf)
 
     async def _shadow_refresh_summary(self, now: datetime, standin: bool) -> None:
@@ -2140,10 +2169,11 @@ class Runner:
         settled = list(await self._shadow_store(st.shadow_settled(
             now - timedelta(days=shadowsvc.SHADOW_SUMMARY_DAYS), fields=fields, limit=cap, scored_only=True)) or [])
         open_eps = list(await self._shadow_store(st.shadow_open_episodes(fields=fields, limit=cap_open)) or [])
-        passes = await self._shadow_store(st.shadow_recent_passes(300))
+        intervals = shadowsvc.summary_intervals(self.cloud)
+        passes = await self._shadow_store(st.shadow_recent_passes(300 * (1 + len(intervals or []))))
         fut = asyncio.get_running_loop().run_in_executor(
-            self._shadow_executor, functools.partial(shadow_model.summarize, settled + open_eps, now,
-                                                     passes=list(passes or []), enabled=True, standin=standin))
+            self._shadow_executor, functools.partial(shadowsvc.build_summary, settled + open_eps, list(passes or []),
+                                                     now, enabled=True, standin=standin, intervals=intervals))
         summary = await asyncio.wait_for(fut, shadowsvc.SHADOW_BUDGET_S / 3)
         if len(settled) >= cap or len(open_eps) >= cap_open:
             summary["status"]["truncated"] = True
@@ -2174,41 +2204,74 @@ class Runner:
         except Exception as e:  # noqa: BLE001
             log.warning("shadow close-out failed: %s", type(e).__name__)
 
-    async def shadow_cycle(self) -> dict:
+    def _shadow_variant_skip(self, interval: int) -> str | None:
+        """2A-3 wave 2 load guard for a variant cadence (pure local reads, never a lock)."""
+        if interval not in shadowsvc.variant_intervals(self.cloud):
+            return "variant_off"                         # env SHADOW_VARIANTS off or not in shadow_intervals
+        if botfiles.is_standin():
+            return "standin"
+        last = self._shadow_last_duration_s
+        if last is not None and last > shadowsvc.SHADOW_VARIANT_LOAD_S:
+            return "load"                                # the last shadow pass ran long: let the baseline recover
+        return None
+
+    async def shadow_cycle(self, interval: int = shadowsvc.BASELINE_INTERVAL) -> dict:
         """One shadow cycle if allowed. Reads and computes inside SHADOW_BUDGET_S (a timeout or error writes no
-        episodes), then writes the episodes in one upsert, the pass doc and the cached summary. Never raises."""
+        episodes), then writes the episodes in one upsert, the pass doc and the cached summary. Never raises.
+        `interval` other than the baseline (10) runs a variant cadence (wave 2): its own episodes and pass doc,
+        tagged `interval`; no arbitrage scan and no summary refresh."""
+        variant = interval != shadowsvc.BASELINE_INTERVAL
         why = self._shadow_skip_reason()
         if why is None and not self.shadow_enabled():
             why = "disabled"
-            if self._shadow_active:
+            if self._shadow_active and not variant:
                 await self._shadow_off()
-        self.shadow_state["last_reason"] = why
+        if why is None and variant:
+            why = self._shadow_variant_skip(interval)
+        if why is None and self._shadow_cycle_lock.locked():
+            why = "busy"                                 # another cadence's cycle is writing: never queue behind it
+        if variant:
+            self.shadow_variant_state[interval] = {**self.shadow_variant_state.get(interval, {}), "last_reason": why}
+        else:
+            self.shadow_state["last_reason"] = why
         if why:
             return {"ran": False, "reason": why}
+        async with self._shadow_cycle_lock:
+            return await self._shadow_cycle_locked(interval)
+
+    async def _shadow_cycle_locked(self, interval: int) -> dict:
+        variant = interval != shadowsvc.BASELINE_INTERVAL
+        state = (self.shadow_variant_state.setdefault(interval, {"last_cycle_utc": None, "last_error": None})
+                 if variant else self.shadow_state)
         now = utcnow()
         t0 = time.monotonic()
         standin = botfiles.is_standin()
         try:
-            res = await asyncio.wait_for(self._shadow_compute(now, standin), shadowsvc.SHADOW_BUDGET_S)
+            res = await asyncio.wait_for(self._shadow_compute(now, standin, interval), shadowsvc.SHADOW_BUDGET_S)
         except Exception as e:  # noqa: BLE001   (incl. the budget timeout): nothing half-done is written
             name = type(e).__name__
-            self.shadow_state.update(last_cycle_utc=now, last_error=name)
+            state.update(last_cycle_utc=now, last_error=name)
+            self._shadow_last_duration_s = round(time.monotonic() - t0, 3)
             log.warning("shadow cycle discarded: %s", name)
             if not self._shadow_leader_ok():
                 return {"ran": False, "reason": "standby"}
-            with contextlib.suppress(Exception):
-                await self._shadow_store(self.store.add_shadow_pass({
-                    "ts": now, "ok": False, "duration_s": round(time.monotonic() - t0, 3), "markets": 0,
+            fail = {"ts": now, "ok": False, "duration_s": round(time.monotonic() - t0, 3), "markets": 0,
                     "books": 0, "quotes": 0, "new_eps": 0, "ended_eps": 0, "trade_reads": 0, "settled": 0,
-                    "truncated": False, "errors": [name]}), 5)
+                    "truncated": False, "errors": [name]}
+            if variant:
+                fail["interval"] = interval
+            with contextlib.suppress(Exception):
+                await self._shadow_store(self.store.add_shadow_pass(fail), 5)
             return {"ran": False, "reason": "error", "error": name}
         if self._shutting_down:
             return {"ran": False, "reason": "shutting_down"}
         if not self._shadow_leader_ok():                 # SH-4: lease lost mid-cycle: no episode or pass writes
-            self.shadow_state.update(last_cycle_utc=now, last_error="standby")
+            state.update(last_cycle_utc=now, last_error="standby")
             return {"ran": False, "reason": "standby"}
         self._shadow_active = True
         pass_doc = dict(res.pass_doc)
+        if variant:
+            pass_doc["interval"] = interval
         try:
             if res.upserts:
                 await self._shadow_store(self.store.shadow_upsert_episodes(res.upserts))
@@ -2216,9 +2279,13 @@ class Runner:
             pass_doc["ok"] = False
             pass_doc["errors"] = list(pass_doc.get("errors") or []) + [f"store:{type(e).__name__}"]
         pass_doc["duration_s"] = round(time.monotonic() - t0, 3)
+        self._shadow_last_duration_s = pass_doc["duration_s"]
         if self._shadow_leader_ok():
             with contextlib.suppress(Exception):
                 await self._shadow_store(self.store.add_shadow_pass(pass_doc), 5)
+        if variant:
+            state.update(last_cycle_utc=now, last_error=None if pass_doc["ok"] else "partial")
+            return {"ran": True, "pass": pass_doc}
         if getattr(res, "arb", None) is not None and self._shadow_leader_ok():
             try:
                 await shadowsvc.persist_arb(self.store, res.arb, now)       # S3: daily buckets in the summary doc
@@ -2231,6 +2298,22 @@ class Runner:
                 log.warning("shadow summary refresh failed: %s", type(e).__name__)
         self.shadow_state.update(last_cycle_utc=now, last_error=None if pass_doc["ok"] else "partial")
         return {"ran": True, "pass": pass_doc}
+
+    async def _shadow_variant_loop(self) -> None:
+        """2A-3 wave 2: each variant cadence in cloud shadow_intervals (minus the baseline) runs on its own clock.
+        A transient skip (busy, a pass or Stop running, the load guard) retries at the next tick."""
+        last: dict[int, float] = {}
+        while True:
+            await asyncio.sleep(SHADOW_VARIANT_TICK_S)
+            try:
+                for iv in shadowsvc.variant_intervals(self.cloud):
+                    if time.monotonic() - last.get(iv, float("-inf")) < iv * 60:
+                        continue
+                    res = await self.shadow_cycle(interval=iv)
+                    if res.get("ran") or res.get("reason") not in SHADOW_TRANSIENT + ("load",):
+                        last[iv] = time.monotonic()
+            except Exception as e:  # noqa: BLE001
+                log.error("shadow variant cycle failed: %s", type(e).__name__)
 
     async def _arb_loop(self) -> None:
         while True:
