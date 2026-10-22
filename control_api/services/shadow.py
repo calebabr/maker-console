@@ -15,7 +15,9 @@ shadow pool) and returns the documents to write; it never touches the store, the
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -51,8 +53,15 @@ SUMMARY_FIELDS = ("result", "fill", "price", "count", "cost", "side", "settled_t
 SETTLED_STATUSES = ("settled", "finalized", "determined")
 SHADOW_SUMMARY_DAYS = 30
 SHADOW_STORE_TIMEOUT_S = 10.0
+# S3: the arbitrage shadow scan (off unless env SHADOW_ARB=true). At most one per shadow cycle, after the episode work;
+# it stops itself at its own request and time budgets and never raises ShadowDeadline (the cycle's episodes are kept).
+SHADOW_ARB_ENV = "SHADOW_ARB"
+SHADOW_ARB_MAX_REQUESTS = 60         # market-list pages + order books per scan
+SHADOW_ARB_BUDGET_S = 15.0           # wall time per scan (also never past the cycle deadline)
+SHADOW_ARB_MAX_EVENTS = 40           # events scanned per scan
 CLIENT_TIMEOUT_S = 8.0
 CLIENT_MAX_RETRIES = 1
+SHADOW_ARB_READ_RESERVE_S = CLIENT_TIMEOUT_S * (CLIENT_MAX_RETRIES + 1)   # L1: worst case of one read
 DEADLINE_MARGIN_S = 5.0              # the worker stops itself this long before the cycle budget runs out
 
 END_REASONS = ("cancel", "closed", "shadow_off", "stale")
@@ -197,12 +206,15 @@ class CycleInput:
     new_today: int = 0
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     standin: bool = False
+    # S3: None = no arbitrage scan this cycle; else {"series", "max_contracts", "min_profit", "scan_cap"}
+    arb: dict | None = None
 
 
 @dataclass
 class CycleResult:
     upserts: list[dict]
     pass_doc: dict
+    arb: dict | None = None          # S3: the arbitrage scan result (None when it did not run)
 
 
 def ep_id_for(ticker: str, book_side: str, order_price: float, join_ts: datetime) -> str:
@@ -478,7 +490,136 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
                 "books": books_read, "quotes": n_quotes, "new_eps": new_eps, "ended_eps": ended_eps,
                 "trade_reads": trade_reads, "settled": settled, "voided": voided, "truncated": bool(truncated),
                 "errors": list(dict.fromkeys(errors))}
-    return CycleResult(upserts=list(updates.values()), pass_doc=pass_doc)
+    arb = None
+    if inp.arb:                                                 # S3: last, own budgets, never raises
+        arb = arb_scan(md, inp.arb, now, deadline=deadline)
+        pass_doc["arb_opps"] = len(arb["opps"])
+        pass_doc["arb_skipped"] = arb["skipped"]
+    return CycleResult(upserts=list(updates.values()), pass_doc=pass_doc, arb=arb)
+
+
+# ================================================================ S3: arbitrage shadow scan (read only)
+def arb_enabled() -> bool:
+    """Env SHADOW_ARB (default off), read at each cycle so it can be measured and switched without a deploy of
+    code (an env change on Render restarts the service)."""
+    return os.getenv(SHADOW_ARB_ENV, "false").strip().lower() == "true"
+
+
+def arb_input(arb_settings: dict) -> dict:
+    """The CycleInput.arb block from the effective arbitrage settings (services/arb.current)."""
+    return {"series": [str(s) for s in (arb_settings.get("arb_series") or [])],
+            "max_contracts": float(arb_settings["arb_max_contracts"]),
+            "min_profit": float(arb_settings["arb_min_profit"]),
+            "scan_cap": float(arb_settings["arb_scan_cap"])}
+
+
+def arb_scan(md: Any, cfg: dict, now: datetime, *, deadline: float | None = None, scanner: Any = None) -> dict:
+    """One read-only arbitrage scan over production public data. Uses only `md.markets` / `md.orderbook` (the
+    GET-allowlisted, credential-less client) and the installed scanner's pure `best_opportunity`; it never calls the
+    scanner's scan or order functions and writes no file. Stops at SHADOW_ARB_MAX_REQUESTS, SHADOW_ARB_BUDGET_S or
+    the cycle deadline (whichever first) and says so in `skipped`. Never raises."""
+    t0 = time.monotonic()
+    stop_at = t0 + SHADOW_ARB_BUDGET_S
+    if deadline is not None:
+        # L1: a read may start only if even a worst-case slow read (timeout x attempts) ends before the cycle
+        # deadline, so the scan can never push the cycle past its budget and lose that cycle's episodes.
+        stop_at = min(stop_at, deadline - SHADOW_ARB_READ_RESERVE_S)
+    out = {"ts": now, "ok": True, "skipped": None, "requests": 0, "events_scanned": 0, "opps": [], "errors": []}
+
+    def budget(n: int) -> str | None:
+        if time.monotonic() > stop_at:
+            return "time_budget"
+        if out["requests"] + n > SHADOW_ARB_MAX_REQUESTS:
+            return "request_budget"
+        return None
+
+    class _Stop(Exception):
+        pass
+
+    try:
+        if scanner is None:
+            from . import arb as arbsvc
+            scanner = arbsvc.scanner()
+        best = scanner.best_opportunity
+        max_c, min_p, cap = float(cfg["max_contracts"]), float(cfg["min_profit"]), float(cfg["scan_cap"])
+        series = list(cfg.get("series") or [])
+        if series:                                   # rotate the start so a budget-capped scan covers every series
+            k = int(now.timestamp() // 60) % len(series)
+            series = series[k:] + series[:k]
+        for s in series:
+            why = budget(1)
+            if why:
+                out["skipped"] = why
+                break
+            try:
+                mkts, trunc = md.markets(s, "open")
+            except Exception as e:  # noqa: BLE001
+                out["requests"] += 1
+                _err(out["errors"], e)
+                continue
+            out["requests"] += SHADOW_MAX_MARKET_PAGES if trunc else 1
+            events: dict[str, list[str]] = {}
+            for m in qp.dicts(mkts):
+                ev, t = m.get("event_ticker"), m.get("ticker")
+                if ctsvc.valid_ticker(ev) and ctsvc.valid_ticker(t):
+                    events.setdefault(ev, []).append(t)
+            for ev, tickers in events.items():
+                if out["events_scanned"] >= SHADOW_ARB_MAX_EVENTS:
+                    out["skipped"] = "event_budget"
+                    break
+                why = budget(len(tickers))
+                if why:
+                    out["skipped"] = why
+                    break
+                books: dict[str, dict] = {}
+                try:
+                    for t in tickers:
+                        why = budget(1)                 # L1: checked before EVERY book read, not once per event
+                        if why:
+                            out["skipped"] = why
+                            raise _Stop
+                        out["requests"] += 1
+                        books[t] = md.orderbook(t)
+                except _Stop:
+                    break                               # a partly read event is dropped (it needs every leg)
+                except Exception as e:  # noqa: BLE001   (an event needs every leg's book)
+                    _err(out["errors"], e)
+                    continue
+                out["events_scanned"] += 1
+                op = best(ev, books, max_c)
+                if op is not None and float(op.profit) >= min_p:
+                    cost = float(op.cost)
+                    out["opps"].append({"event": str(op.event), "kind": str(op.kind), "profit": float(op.profit),
+                                        "cost": cost, "contracts": float(op.contracts),
+                                        "legs": len(list(op.legs or [])), "gate_ok": cost <= cap})
+            if out["skipped"]:
+                break
+    except Exception as e:  # noqa: BLE001   (a scanner or settings problem: record it, keep the cycle)
+        _err(out["errors"], e)
+        out["skipped"] = out["skipped"] or "error"
+    out["ok"] = not out["errors"]
+    out["duration_s"] = round(time.monotonic() - t0, 3)
+    out["errors"] = list(dict.fromkeys(out["errors"]))
+    return out
+
+
+async def persist_arb(store: Any, scan: dict, now: datetime, timeout: float = SHADOW_STORE_TIMEOUT_S) -> None:
+    """Fold one scan into the cached summary doc's `arb` block (read, merge, replace). Raises on store errors."""
+    doc = await asyncio.wait_for(store.get_shadow_summary(), timeout)
+    doc = dict(doc) if isinstance(doc, dict) else sm.empty_summary(enabled=True)
+    doc["arb"] = sm.arb_merge(doc.get("arb"), scan, now)
+    await asyncio.wait_for(store.set_shadow_summary(doc), timeout)
+
+
+async def carry_arb(store: Any, summary: dict, now: datetime, timeout: float = SHADOW_STORE_TIMEOUT_S) -> dict:
+    """Copy the stored `arb` block into a freshly computed summary (summarize() does not know it), so a summary
+    refresh never drops the arbitrage buckets. A failed read keeps the empty block."""
+    try:
+        doc = await asyncio.wait_for(store.get_shadow_summary(), timeout)
+    except Exception:  # noqa: BLE001
+        doc = None
+    summary["arb"] = sm.arb_merge((doc or {}).get("arb") if isinstance(doc, dict) else None, None, now)
+    return summary
 
 
 def end_all(open_eps: Iterable[dict], reason: str, now: datetime) -> list[dict]:
