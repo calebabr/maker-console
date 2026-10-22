@@ -10,6 +10,7 @@ import { useDialogs } from '../context/DialogContext.jsx';
 import { useResource } from '../hooks/useResource.js';
 import { api } from '../services/api.js';
 import '../styles/settings.css';
+import CollapsibleList from '../components/CollapsibleList.jsx';
 
 const PAGE = 50;
 
@@ -89,20 +90,24 @@ function AlertHistory() {
       {busy && !items && <Loading />}
       {items && !items.length && !error && <p className="muted">No alerts yet.</p>}
       {items && items.length > 0 && (
-        <ul className="rows">
-          {items.map((a) => (
-            <li key={a.id || `${a.ts}-${a.title}`} className="alert-row" data-type={a.type}>
-              <div className="alert-row-top">
-                <span>
-                  <Chip tone={TYPE_TONE[a.type] || 'muted'}>{TYPE_LABEL[a.type] || a.type}</Chip>{' '}
-                  <span className="alert-title">{a.title}</span>
-                </span>
-                <Time className="muted small" value={a.ts} withDate />
-              </div>
-              {a.body && <div className="alert-body">{a.body}</div>}
-            </li>
-          ))}
-        </ul>
+        <CollapsibleList items={items} pageKey="alerts-history" label="alerts" pinned={(a) => ['error', 'stop', 'breaker'].includes(a.type)}>
+          {(vis) => (
+            <ul className="rows">
+              {vis.map((a) => (
+                <li key={a.id || `${a.ts}-${a.title}`} className="alert-row" data-type={a.type}>
+                  <div className="alert-row-top">
+                    <span>
+                      <Chip tone={TYPE_TONE[a.type] || 'muted'}>{TYPE_LABEL[a.type] || a.type}</Chip>{' '}
+                      <span className="alert-title">{a.title}</span>
+                    </span>
+                    <Time className="muted small" value={a.ts} withDate />
+                  </div>
+                  {a.body && <div className="alert-body">{a.body}</div>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </CollapsibleList>
       )}
       {more && (
         <button type="button" className="btn block" onClick={loadMore} disabled={busy} style={{ marginTop: 10 }}>

@@ -2126,6 +2126,8 @@ class Runner:
                                    max_order=float(cfg["max_order"]), open_eps=list(open_eps or []),
                                    ended_unread=list(unread or []), unsettled=list(unsettled or []),
                                    new_today=int(new_today or 0), now=now, standin=standin)
+        if shadowsvc.arb_enabled() and not standin:      # S3 (env SHADOW_ARB, default off): read-only, own budgets
+            inp.arb = shadowsvc.arb_input(arbsvc.current(self.config))
         deadline = time.monotonic() + shadowsvc.SHADOW_BUDGET_S - shadowsvc.DEADLINE_MARGIN_S
         self._shadow_cf = self._shadow_executor.submit(self._shadow_sync, inp, ms, deadline)
         return await asyncio.wrap_future(self._shadow_cf)
@@ -2145,6 +2147,7 @@ class Runner:
         summary = await asyncio.wait_for(fut, shadowsvc.SHADOW_BUDGET_S / 3)
         if len(settled) >= cap or len(open_eps) >= cap_open:
             summary["status"]["truncated"] = True
+        await shadowsvc.carry_arb(st, summary, now)      # S3: keep the stored arbitrage buckets
         if not self._shadow_leader_ok():
             return                                       # SH-4: lost the lease meanwhile: write nothing
         await self._shadow_store(st.set_shadow_summary(summary))
@@ -2216,6 +2219,11 @@ class Runner:
         if self._shadow_leader_ok():
             with contextlib.suppress(Exception):
                 await self._shadow_store(self.store.add_shadow_pass(pass_doc), 5)
+        if getattr(res, "arb", None) is not None and self._shadow_leader_ok():
+            try:
+                await shadowsvc.persist_arb(self.store, res.arb, now)       # S3: daily buckets in the summary doc
+            except Exception as e:  # noqa: BLE001
+                log.warning("shadow arb persist failed: %s", type(e).__name__)
         if self._shadow_summary_due(now, pass_doc):
             try:
                 await self._shadow_refresh_summary(now, standin)

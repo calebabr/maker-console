@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 
 SCENARIOS = ("lo", "mid", "hi")
@@ -24,6 +24,13 @@ MIN_SETTLED_DAYS = 7
 MIN_CENTRAL_FILLS = 30
 DEFAULT_SEED = 7
 DEFAULT_DRAWS = 2000
+# S2 (additive): per-day view and its reliability note. Same wording as the app's too-early state.
+MIN_FILLED_EPISODES = 30
+TOO_EARLY_TEXT = ("Too early to estimate. The range needs more days and settled episodes before the figures "
+                  "mean much.")
+# S3 (additive): arbitrage shadow scan, daily buckets kept inside the cached summary doc
+ARB_RETENTION_DAYS = 30
+ARB_MAX_EVENTS_PER_DAY = 300
 
 CAVEATS = [
     "Our own orders would change the market: a real resting bid adds to the queue "
@@ -235,6 +242,11 @@ def empty_summary(enabled: bool = False, standin: bool = False) -> dict[str, Any
         "daily": [],
         "fee_mode": "maker",
         "caveats": list(CAVEATS),
+        # additive (Sprint 2A-2 S2/S3): existing fields above are unchanged
+        "by_event_day": [],
+        "day_stats": _empty_day_stats(),
+        "reliability_note": reliability_note(0, 0),
+        "arb": empty_arb(),
     }
 
 
@@ -286,6 +298,80 @@ def _group_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "fills_mid": _r(sum(r["fill"]["mid"] for r in rows)),
         "pnl": _range3(_sum3([r["pnl"]["maker"] for r in rows])),
     }
+
+
+# --------------------------------------------------------------------------
+# S2: per-event-day returns (additive; the headline above is unchanged)
+# --------------------------------------------------------------------------
+def reliability_note(days_with_fills: int, filled_episodes: int) -> str | None:
+    """Plain note while the per-day figures are too thin to read much into; None once both minimums are met."""
+    if days_with_fills >= MIN_SETTLED_DAYS and filled_episodes >= MIN_FILLED_EPISODES:
+        return None
+    return (f"{TOO_EARLY_TEXT} So far: {days_with_fills} of {MIN_SETTLED_DAYS} days with a fill, "
+            f"{filled_episodes} of {MIN_FILLED_EPISODES} filled episodes.")
+
+
+def _empty_day_stats() -> dict[str, Any]:
+    return {"event_days": 0, "days_with_fills": 0, "filled_episodes": 0, "mean_return_mid": None,
+            "sd_return_mid": None, "worst_day": None, "best_day": None, "best_day_pnl_share": None,
+            "top3_pnl_share": None}
+
+
+def _ret3(pnl: Mapping[str, float], cost: Mapping[str, float]) -> dict[str, float | None]:
+    """Return per scenario on that scenario's own cost; lo/hi are the min/max like the headline. None: no cost."""
+    vals = {sc: (pnl[sc] / cost[sc] if cost[sc] > 0 else None) for sc in SCENARIOS}
+    if vals["mid"] is None:
+        return {"lo": None, "mid": None, "hi": None}
+    have = [v for v in vals.values() if v is not None]
+    return {"lo": _r(min(have), 6), "mid": _r(vals["mid"], 6), "hi": _r(max(have), 6)}
+
+
+def by_event_day(scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per settle day (UTC date of `settled_ts`, else `close_time`; the same key as `daily`), oldest first:
+    episodes (scored), filled_episodes (central fill > 0), cost / pnl (maker fee) / return per scenario."""
+    days: dict[str, dict[str, Any]] = {}
+    for s in scored:
+        b = days.setdefault(s["day"], {"episodes": 0, "filled": 0, "cost": {sc: 0.0 for sc in SCENARIOS},
+                                       "pnl": {sc: 0.0 for sc in SCENARIOS}})
+        b["episodes"] += 1
+        b["filled"] += int(s["fill"]["mid"] > 0)
+        for sc in SCENARIOS:
+            b["cost"][sc] += s["fill"][sc] * s["price"]
+            b["pnl"][sc] += s["pnl"]["maker"][sc]
+    out = []
+    for d in sorted(days):
+        b = days[d]
+        out.append({"day": d, "episodes": b["episodes"], "filled_episodes": b["filled"],
+                    "cost": {sc: _r(b["cost"][sc]) for sc in SCENARIOS},
+                    "pnl": _range3(b["pnl"]), "return": _ret3(b["pnl"], b["cost"])})
+    return out
+
+
+def day_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Spread and concentration of the per-day view. Mean / sample sd of the central daily return over days with a
+    fill; worst / best day by central return; P&L shares from the single best day and the best three days (by
+    central P&L), None unless the total central P&L is positive."""
+    out = _empty_day_stats()
+    out["event_days"] = len(rows)
+    out["filled_episodes"] = sum(r["filled_episodes"] for r in rows)
+    withret = [r for r in rows if r["return"]["mid"] is not None]
+    out["days_with_fills"] = sum(1 for r in rows if r["filled_episodes"] > 0)
+    if withret:
+        rets = [r["return"]["mid"] for r in withret]
+        out["mean_return_mid"] = _r(sum(rets) / len(rets), 6)
+        if len(rets) >= 2:
+            mu = sum(rets) / len(rets)
+            out["sd_return_mid"] = _r(math.sqrt(sum((x - mu) ** 2 for x in rets) / (len(rets) - 1)), 6)
+        lo = min(withret, key=lambda r: (r["return"]["mid"], r["day"]))
+        hi = max(withret, key=lambda r: (r["return"]["mid"], r["day"]))
+        out["worst_day"] = {"day": lo["day"], "return_mid": lo["return"]["mid"], "pnl_mid": lo["pnl"]["mid"]}
+        out["best_day"] = {"day": hi["day"], "return_mid": hi["return"]["mid"], "pnl_mid": hi["pnl"]["mid"]}
+    total = sum(r["pnl"]["mid"] for r in rows)
+    if total > 0:
+        ranked = sorted((r["pnl"]["mid"] for r in rows), reverse=True)
+        out["best_day_pnl_share"] = _r(ranked[0] / total, 4)
+        out["top3_pnl_share"] = _r(sum(ranked[:3]) / total, 4)
+    return out
 
 
 def summarize(episodes, now, *, seed: int = DEFAULT_SEED, draws: int = DEFAULT_DRAWS,
@@ -396,10 +482,178 @@ def summarize(episodes, now, *, seed: int = DEFAULT_SEED, draws: int = DEFAULT_D
         "central_fills": _r(central_fills),
         "too_early": not (len(day_keys) >= MIN_SETTLED_DAYS and central_fills >= MIN_CENTRAL_FILLS),
     })
+    rows = by_event_day(scored)
+    out["by_event_day"] = rows
+    out["day_stats"] = day_stats(rows)
+    out["reliability_note"] = reliability_note(out["day_stats"]["days_with_fills"],
+                                               out["day_stats"]["filled_episodes"])
     return out
+
+
+# --------------------------------------------------------------------------
+# S3: arbitrage shadow scan (daily buckets stored inside the cached summary doc)
+# --------------------------------------------------------------------------
+def empty_arb(enabled: bool = False) -> dict[str, Any]:
+    """The stored block ({days, last_scan}) and the served view share this shape plus `enabled` / `rolling`."""
+    return {"enabled": bool(enabled), "days": [],
+            "rolling": {k: {**_arb_stats([], None, None), "clipped_to_period": False} for k in ("7d", "30d")},
+            "last_scan": None}
+
+
+def _median(vals: list[float]) -> float | None:
+    if not vals:
+        return None
+    v = sorted(vals)
+    n = len(v)
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2.0
+
+
+def arb_merge(block: Mapping[str, Any] | None, scan: Mapping[str, Any] | None, now: datetime) -> dict[str, Any]:
+    """Fold one scan result into the stored block. Pure. Returns {days, last_scan}: one bucket per UTC day (last
+    ARB_RETENTION_DAYS kept), each with scans / skipped / requests counters and its distinct events
+    ({event, kind, first_seen, last_seen, seen, seen_yes, seen_no, profit, cost, contracts, legs, gate_ok}, the
+    profit / cost / kind of the most profitable sighting). At most ARB_MAX_EVENTS_PER_DAY events per day."""
+    now_dt = _as_dt(now) or datetime.now(timezone.utc)
+    days = [dict(d, events=[dict(e) for e in (d.get("events") or []) if isinstance(e, dict)])
+            for d in ((block or {}).get("days") or []) if isinstance(d, dict) and d.get("day")]
+    last = (block or {}).get("last_scan")
+    if scan:
+        ts = _as_dt(scan.get("ts")) or now_dt
+        key = ts.date().isoformat()
+        day = next((d for d in days if d["day"] == key), None)
+        if day is None:
+            day = {"day": key, "scans": 0, "skipped": 0, "requests": 0, "dropped": 0, "events": []}
+            days.append(day)
+        day["scans"] = int(day.get("scans") or 0) + 1
+        day["skipped"] = int(day.get("skipped") or 0) + int(bool(scan.get("skipped")))
+        day["requests"] = int(day.get("requests") or 0) + int(_num(scan.get("requests")))
+        by_event = {e.get("event"): e for e in day["events"]}
+        iso_ts = ts.isoformat()
+        for op in scan.get("opps") or []:
+            ev = str(op.get("event") or "")
+            if not ev:
+                continue
+            kind = "YES" if str(op.get("kind")).upper() == "YES" else "NO"
+            e = by_event.get(ev)
+            if e is None:
+                if len(day["events"]) >= ARB_MAX_EVENTS_PER_DAY:
+                    day["dropped"] = int(day.get("dropped") or 0) + 1
+                    continue
+                e = {"event": ev, "first_seen": iso_ts, "seen": 0, "seen_yes": 0, "seen_no": 0, "profit": None}
+                day["events"].append(e)
+                by_event[ev] = e
+            e["last_seen"] = iso_ts
+            e["seen"] = int(e.get("seen") or 0) + 1
+            e["seen_yes" if kind == "YES" else "seen_no"] = int(e.get("seen_yes" if kind == "YES" else "seen_no")
+                                                                or 0) + 1
+            profit = _num(op.get("profit"))
+            if e.get("profit") is None or profit > _num(e.get("profit")):
+                e.update({"kind": kind, "profit": _r(profit), "cost": _r(_num(op.get("cost"))),
+                          "contracts": _r(_num(op.get("contracts")), 2), "legs": int(_num(op.get("legs"))),
+                          "gate_ok": bool(op.get("gate_ok"))})
+        last = {k: scan.get(k) for k in ("ok", "skipped", "requests", "duration_s", "events_scanned")}
+        last.update(ts=iso_ts, opportunities=len(scan.get("opps") or []))
+    cutoff = (now_dt.date().toordinal() - ARB_RETENTION_DAYS + 1)
+    days = sorted((d for d in days if _day_ord(d["day"]) >= cutoff), key=lambda d: d["day"])
+    return {"days": days, "last_scan": last}
+
+
+def _day_ord(day: str) -> int:
+    try:
+        return datetime.fromisoformat(day).date().toordinal()
+    except (TypeError, ValueError):
+        return 0
+
+
+def _in(ts: Any, start: datetime | None, end: datetime | None) -> bool:
+    t = _as_dt(ts)
+    return t is not None and (start is None or t >= start) and (end is None or t < end)
+
+
+def _arb_stats(events: list[Mapping[str, Any]], start: datetime | None, end: datetime | None) -> dict[str, Any]:
+    durs = []
+    for e in events:
+        a, b = _as_dt(e.get("first_seen")), _as_dt(e.get("last_seen"))
+        if a and b and int(_num(e.get("seen"))) >= 2:
+            durs.append((b - a).total_seconds())
+    n = len(events)
+    return {"from": _iso(start), "to": _iso(end), "opportunities": n,
+            "yes": sum(1 for e in events if e.get("kind") == "YES"),
+            "no": sum(1 for e in events if e.get("kind") == "NO"),
+            "profit": _r(sum(_num(e.get("profit")) for e in events)),
+            "median_cost": None if not n else _r(_median([_num(e.get("cost")) for e in events])),
+            "gate_pass_share": None if not n else _r(sum(1 for e in events if e.get("gate_ok")) / n, 4),
+            "median_duration_s": None if not durs else _r(_median(durs), 1)}
+
+
+def _merge_events(evs: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Distinct events across day buckets (an event can span two UTC days): earliest first_seen, latest last_seen,
+    summed sightings, the most profitable sighting's figures."""
+    out: dict[str, dict[str, Any]] = {}
+    for e in evs:
+        k = str(e.get("event"))
+        cur = out.get(k)
+        if cur is None:
+            out[k] = dict(e)
+            continue
+        cur["seen"] = int(_num(cur.get("seen"))) + int(_num(e.get("seen")))
+        if (_as_dt(e.get("first_seen")) or _tmin()) < (_as_dt(cur.get("first_seen")) or _tmin()):
+            cur["first_seen"] = e.get("first_seen")
+        if (_as_dt(e.get("last_seen")) or _tmin()) > (_as_dt(cur.get("last_seen")) or _tmin()):
+            cur["last_seen"] = e.get("last_seen")
+        if _num(e.get("profit")) > _num(cur.get("profit")):
+            for f in ("kind", "profit", "cost", "contracts", "legs", "gate_ok"):
+                cur[f] = e.get(f)
+    return list(out.values())
+
+
+def _tmin() -> datetime:
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def arb_view(block: Mapping[str, Any] | None, now: datetime, *, enabled: bool,
+             start: datetime | None = None, end: datetime | None = None) -> dict[str, Any]:
+    """The served arbitrage section, clipped to [start, end) (a period; None = open). Events count when their
+    last sighting falls inside the window. Per UTC day: opportunities (distinct events), yes / no, estimated profit
+    after fees (sum of each event's best sighting), median set cost, gate_pass_share (share of events whose best
+    set cost was within the arbitrage per-scan cap), median first-to-last-seen seconds (events seen twice or more),
+    scans and skipped. `rolling` 7d / 30d: the same over distinct events, each window clipped to the period."""
+    now_dt = _as_dt(now) or datetime.now(timezone.utc)
+    stored = arb_merge(block, None, now_dt)
+    out = empty_arb(enabled)
+    out["last_scan"] = stored.get("last_scan")
+    kept: list[dict[str, Any]] = []
+    for d in stored["days"]:
+        evs = [e for e in d["events"] if _in(e.get("last_seen"), start, end)]
+        day_start = datetime.fromisoformat(d["day"]).replace(tzinfo=timezone.utc)
+        if (end is not None and day_start >= end) or (start is not None and day_start + _ONE_DAY <= start):
+            continue
+        row = {"day": d["day"], **_arb_stats(evs, None, None), "scans": int(_num(d.get("scans"))),
+               "skipped": int(_num(d.get("skipped"))), "dropped": int(_num(d.get("dropped")))}
+        row.pop("from"), row.pop("to")
+        out["days"].append(row)
+        kept.extend(evs)
+    top = now_dt if end is None else min(now_dt, end)
+    for label, n in (("7d", 7), ("30d", 30)):
+        lo = top - _days(n)
+        clipped = start is not None and start > lo
+        lo = max(lo, start) if start is not None else lo
+        stats = _arb_stats([e for e in _merge_events(kept) if _in(e.get("last_seen"), lo, top + _EPS)], lo, top)
+        stats["clipped_to_period"] = bool(clipped)
+        out["rolling"][label] = stats
+    return out
+
+
+def _days(n: int) -> timedelta:
+    return timedelta(days=n)
+
+
+_ONE_DAY = timedelta(days=1)
+_EPS = timedelta(seconds=1)          # an event seen exactly at `top` still counts
 
 
 __all__ = [
     "CAVEATS", "fill_scenarios", "maker_fee", "episode_pnl", "score_episode",
-    "summarize", "empty_summary",
+    "summarize", "empty_summary", "by_event_day", "day_stats", "reliability_note",
+    "empty_arb", "arb_merge", "arb_view",
 ]

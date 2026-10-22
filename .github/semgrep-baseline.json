@@ -36,6 +36,12 @@
       "path": "control_api/runner.py",
       "fingerprint": "020a3d0467d1",
       "reason": "The log line prints a fixed message and the exception class name only; the word 'password'/'token'/'secret' is part of the message text, no credential value is logged."
+    },
+    {
+      "rule": "yaml.github-actions.security.audit.unsafe-add-mask-workflow-command.unsafe-add-mask-workflow-command",
+      "path": ".github/workflows/release.yml",
+      "fingerprint": "85e495060cc0",
+      "reason": "Intentional defensive masking. The step builds a base64 authorization header from GH_TOKEN, which GitHub does not mask on its own because it is a derived value, and masks it before the git push so it can never appear in a log. Nothing here disables workflow commands (no stop-commands) and no user-controlled text is echoed into the command; the value comes from the workflow token only."
     }
   ]
 }

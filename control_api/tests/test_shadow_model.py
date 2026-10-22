@@ -152,7 +152,9 @@ def test_empty_input_shape():
 def test_summary_top_level_keys_match_contract():
     s = m.summarize([_ep()], NOW)
     assert set(s) == {"enabled", "standin", "status", "headline", "headline_zero_fee",
-                      "by_series", "by_cell", "daily", "fee_mode", "caveats"}
+                      "by_series", "by_cell", "daily", "fee_mode", "caveats",
+                      # additive (Sprint 2A-2 S2/S3); the contract fields above are unchanged
+                      "by_event_day", "day_stats", "reliability_note", "arb"}
     assert set(s["status"]) == {"days_covered", "settled_episodes", "central_fills", "too_early",
                                 "last_pass_ts", "pass_ok_pct", "truncated"}
     assert set(s["headline"]) == {"pnl", "roi", "fill_rate", "peak_capital"}

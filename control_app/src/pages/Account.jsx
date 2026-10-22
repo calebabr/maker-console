@@ -10,6 +10,7 @@ import { api } from '../services/api.js';
 import { formatMoney } from '../utils/format.js';
 import { matchesSource, sourceChips } from '../utils/activity.js';
 import '../styles/settings.css';
+import CollapsibleList from '../components/CollapsibleList.jsx';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
@@ -85,20 +86,28 @@ export default function Account() {
 
       {positions.length > 0 && (
         <Card title="Open Positions" subtitle={<>{positions.length} <Chip tone="muted">{formatMoney(total(positions))} Value</Chip></>}>
-          <ul className="rows">
-            {positions.map((p, i) => (
-              <PositionRow key={`${p.ticker}-${p.side}-${p.source}-${p.strategy}-${i}`} p={p} strategies={strategies} />
-            ))}
-          </ul>
+          <CollapsibleList items={positions} pageKey="account-positions" label="positions">
+            {(vis) => (
+              <ul className="rows">
+                {vis.map((p, i) => (
+                  <PositionRow key={`${p.ticker}-${p.side}-${p.source}-${p.strategy}-${i}`} p={p} strategies={strategies} />
+                ))}
+              </ul>
+            )}
+          </CollapsibleList>
         </Card>
       )}
       {orders.length > 0 && (
         <Card title="Resting Orders" subtitle={`${orders.length} waiting to fill`}>
-          <ul className="rows">
-            {orders.map((p, i) => (
-              <PositionRow key={`o-${p.ticker}-${p.side}-${p.source}-${p.strategy}-${i}`} p={p} strategies={strategies} />
-            ))}
-          </ul>
+          <CollapsibleList items={orders} pageKey="account-orders" label="orders">
+            {(vis) => (
+              <ul className="rows">
+                {vis.map((p, i) => (
+                  <PositionRow key={`o-${p.ticker}-${p.side}-${p.source}-${p.strategy}-${i}`} p={p} strategies={strategies} />
+                ))}
+              </ul>
+            )}
+          </CollapsibleList>
         </Card>
       )}
 

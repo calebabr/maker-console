@@ -33,6 +33,9 @@ FILL_LIMIT = 50_000
 SETTLEMENT_LIMIT = 20_000
 SOURCES = ("bot", "you", "all")
 FLOW_KINDS = ("deposit", "withdrawal")
+EQUITY_CHANGE_LABEL = ("Account equity change excluding deposits and withdrawals. It counts every settlement that "
+                       "landed in the period, including positions filled in an EARLIER period, plus unrealised "
+                       "moves, so it can differ from the period's P&L. The by-fill-date `pnl` is the period's P&L.")
 ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 
@@ -247,6 +250,9 @@ def cash_flow_block(flows: Iterable[dict], snaps: Iterable[dict], period: dict, 
     """Deposits / withdrawals dated inside the period, shown beside P&L (never netted into it), plus the account
     equity (cash + open exposure) at the start and end taken from the account snapshots when we have them.
 
+    * equity_change_ex_flows includes settlements of positions filled in EARLIER periods and unrealised moves, so it
+      is not the period's P&L; `equity_change_includes_earlier_settlements` / `equity_change_label` say so. The
+      headline P&L of a period is the by-fill-date `pnl` of the summary;
     * capital_base = start equity + deposits in the period (money that was available to work with);
     * return_on_capital = pnl / capital_base;
     * equity_change_ex_flows = end equity - start equity - (deposits - withdrawals): what the account moved by
@@ -273,7 +279,9 @@ def cash_flow_block(flows: Iterable[dict], snaps: Iterable[dict], period: dict, 
             "capital_base": None if base is None else round(base, 2),
             "return_on_capital": _ratio(pnl, base) if pnl is not None and base else None,
             "equity_change_ex_flows": (round(end_eq - start_eq - (dep - wd), 2)
-                                       if start_eq is not None and end_eq is not None else None)}
+                                       if start_eq is not None and end_eq is not None else None),
+            "equity_change_includes_earlier_settlements": True,
+            "equity_change_label": EQUITY_CHANGE_LABEL}
 
 
 def summarize(fills: Iterable[dict], settlements: Iterable[dict], period: dict, *, env: str | None,
@@ -316,7 +324,7 @@ def summarize(fills: Iterable[dict], settlements: Iterable[dict], period: dict, 
         last = ts if last is None or ts > last else last
     out = _finish(sel)
     flow = cash_flow_block(flows, snaps, period, out["pnl"], now)
-    return {"period": public_period(period), "env": env, "source": source, **out,
+    return {"period": public_period(period), "env": env, "source": source, "pnl_basis": "fill_date", **out,
             "by_source": {k: _finish(v) for k, v in by.items() if v["fills"] or k in ids},
             "total": _finish(total), "cash_flows": flow,
             "data_from": iso(first), "data_to": iso(last), "generated_utc": iso(now), "truncated": bool(truncated)}
@@ -339,3 +347,50 @@ async def read_summary(store, period: dict, *, env: str | None, source: str, now
     snaps = await store.list_account_snapshots(since=since - timedelta(days=2), limit=10000)
     return summarize(fills, settl, period, env=env, source=source, flows=flows, snaps=snaps, now=now,
                      truncated=len(fills) >= FILL_LIMIT or len(settl) >= SETTLEMENT_LIMIT)
+
+
+# ---------------------------------------------------------------- rolling windows clipped to a period (2A-2 S4)
+ROLLING_DAYS = (7, 30)
+
+
+def _day(d: datetime | None) -> str:
+    return d.strftime("%Y-%m-%d") if d else "the beginning"
+
+
+def rolling_window(period: dict | None, days: int, now: datetime) -> dict:
+    """The "last N days" window, clipped to a period: {label, from, to, period_id, days, clipped}.
+
+    * period None (`all`): [now - N days, now), period_id "all", never clipped;
+    * current period: [max(now - N days, period start), now);
+    * an ENDED period: the N days are counted back from the period's END (not from today), clipped to its start,
+      so Period 1 shows its own last 7 / 30 days instead of an empty window.
+    `from` / `to` are ISO times; `to` is exclusive and is the instant the window was measured at."""
+    start, end = window_of(period)
+    anchor = now if end is None or end > now else end
+    lo = anchor - timedelta(days=days)
+    clipped = start is not None and start > lo
+    if clipped:
+        lo = start
+    if period is None:
+        label = f"Last {days} days (all periods)"
+    else:
+        name = period.get("name") or period["id"]
+        if not clipped:
+            label = f"Last {days} days within {name}"
+        elif end is None or end > now:
+            label = f"{name} so far (since {_day(start)}, under {days} days)"
+        else:
+            label = f"All of {name} (shorter than {days} days)"
+    return {"label": label, "from": iso(lo), "to": iso(anchor), "period_id": period["id"] if period else "all",
+            "days": days, "clipped": bool(clipped)}
+
+
+async def rolling_pnl(store, period: dict | None, now: datetime, *, taker: bool = False, env: str | None = None) -> dict:
+    """The Overview's rolling P&L for a chosen period, attributed by FILL date (same rule as the period summary):
+    {d7, d30, settled_fills, basis: "fill_date", period, window: {d7: <window>, d30: <window>}}. d7 / d30 are None
+    when nothing settled in that window. Raises on store errors (callers wrap it)."""
+    w7, w30 = rolling_window(period, 7, now), rolling_window(period, 30, now)
+    hi = utc(w30["to"])
+    res = await pnlsvc.compute_by_fill(store, utc(w7["from"]), utc(w30["from"]), hi, taker=taker, env=env)
+    return {**res, "basis": "fill_date", "period": public_period(period) if period else None,
+            "window": {"d7": w7, "d30": w30}}

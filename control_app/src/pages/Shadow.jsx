@@ -1,12 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Card from '../components/Card.jsx';
 import ShadowBand from '../components/ShadowBand.jsx';
+import PeriodSelect from '../components/PeriodSelect.jsx';
 import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
 import { useResource } from '../hooks/useResource.js';
 import { api } from '../services/api.js';
 import { ago, money, pct } from '../utils/format.js';
 import '../styles/shadow.css';
+import CollapsibleList from '../components/CollapsibleList.jsx';
 
 // Shadow estimate (docs/SHADOW_CONTRACT.md): a simulation from public market data. No orders are placed,
 // so every figure here is an estimate, never real P&L.
@@ -55,9 +57,11 @@ function Range({ label, r, fmt }) {
   );
 }
 
-function PnlTable({ rows, keyOf, labelOf, head }) {
+function PnlTable({ rows, keyOf, labelOf, head, pageKey }) {
   if (!rows || !rows.length) return <p className="muted small">Nothing settled yet.</p>;
   return (
+    <CollapsibleList items={rows} pageKey={pageKey} label="rows">
+      {(vis) => (
     <div className="sh-table-wrap">
       <table className="sh-table">
         <thead>
@@ -71,7 +75,7 @@ function PnlTable({ rows, keyOf, labelOf, head }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
+          {vis.map((r) => (
             <tr key={keyOf(r)}>
               <th scope="row">{labelOf(r)}</th>
               <td>{r.episodes}</td>
@@ -84,11 +88,180 @@ function PnlTable({ rows, keyOf, labelOf, head }) {
         </tbody>
       </table>
     </div>
+      )}
+    </CollapsibleList>
+  );
+}
+
+const pctOrDash = (v) => (typeof v === 'number' ? pct(v, { sign: true, digits: 1 }) : '—');
+const shareText = (v) => (typeof v === 'number' ? pct(v, { sign: false, digits: 0 }) : '—');
+const durationText = (s) => (typeof s === 'number' ? (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : `${Math.round(s / 60)} min`) : '—');
+
+function Stat({ label, children }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+
+function EventDays({ days, stats, note }) {
+  const rows = Array.isArray(days) ? days.filter((d) => d && d.day) : [];
+  const newest = rows.slice().reverse();
+  return (
+    <Card title="By event day" subtitle="Return for each day the markets settled. Simulated.">
+      {note && (
+        <div className="notice notice-info" role="status" data-testid="reliability-note">
+          {note}
+        </div>
+      )}
+      {stats && stats.event_days > 0 && (
+        <dl className="stats" data-testid="day-stats">
+          <Stat label="Days with fills">{stats.days_with_fills} of {stats.event_days}</Stat>
+          <Stat label="Mean daily return">{pctOrDash(stats.mean_return_mid)}</Stat>
+          <Stat label="Spread (SD)">{pctOrDash(stats.sd_return_mid)}</Stat>
+          <Stat label="Worst day">{stats.worst_day ? `${stats.worst_day.day} ${pctOrDash(stats.worst_day.return_mid)}` : '—'}</Stat>
+          <Stat label="Best day">{stats.best_day ? `${stats.best_day.day} ${pctOrDash(stats.best_day.return_mid)}` : '—'}</Stat>
+          <Stat label="Best day share of P&L">{shareText(stats.best_day_pnl_share)}</Stat>
+          <Stat label="Top 3 days share">{shareText(stats.top3_pnl_share)}</Stat>
+        </dl>
+      )}
+      {!rows.length ? (
+        <p className="muted small">No settled days in this view yet.</p>
+      ) : (
+        <CollapsibleList items={newest} pageKey="shadow-event-days" label="days">
+          {(vis) => (
+            <div className="sh-table-wrap">
+              <table className="sh-table" data-testid="event-day-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Day</th>
+                    <th scope="col">Episodes</th>
+                    <th scope="col">Filled</th>
+                    <th scope="col">Return low</th>
+                    <th scope="col">Mid</th>
+                    <th scope="col">High</th>
+                    <th scope="col">P&amp;L mid</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {vis.map((d) => (
+                    <tr key={d.day}>
+                      <th scope="row">{d.day}</th>
+                      <td>{d.episodes}</td>
+                      <td>{d.filled_episodes}</td>
+                      <td>{pctOrDash(d.return && d.return.lo)}</td>
+                      <td>{pctOrDash(d.return && d.return.mid)}</td>
+                      <td>{pctOrDash(d.return && d.return.hi)}</td>
+                      <td>{usd(d.pnl && d.pnl.mid)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CollapsibleList>
+      )}
+    </Card>
+  );
+}
+
+function ArbWindow({ title, w }) {
+  if (!w) return null;
+  return (
+    <div>
+      <h3 className="subhead">{title}</h3>
+      <dl className="stats">
+        <Stat label="Opportunities">{w.opportunities ?? '—'}</Stat>
+        <Stat label="YES / NO">{w.yes ?? '—'} / {w.no ?? '—'}</Stat>
+        <Stat label="Est. profit after fees">{money(w.profit, { sign: true })}</Stat>
+        <Stat label="Median set cost">{money(w.median_cost)}</Stat>
+        <Stat label="Would pass the risk cap">{shareText(w.gate_pass_share)}</Stat>
+        <Stat label="Typical lifetime">{durationText(w.median_duration_s)}</Stat>
+      </dl>
+    </div>
+  );
+}
+
+function ArbSection({ arb, period }) {
+  if (!arb || !arb.enabled) {
+    return (
+      <Card title="Arbitrage opportunities (simulated)">
+        <p className="muted" data-testid="arb-off">The arbitrage scan is off. Nothing is scanned and no orders are ever placed.</p>
+      </Card>
+    );
+  }
+  const r7 = arb.rolling && arb.rolling['7d'];
+  const r30 = arb.rolling && arb.rolling['30d'];
+  const name = period && period.name;
+  const lab = (n, r) => (r && r.clipped_to_period && name ? `Last ${n} days within ${name}` : `Last ${n} days`);
+  const days = (Array.isArray(arb.days) ? arb.days : []).slice().reverse();
+  const last = arb.last_scan;
+  return (
+    <Card title="Arbitrage opportunities (simulated)" subtitle="Read-only scan of public prices. Nothing is executed.">
+      <div data-testid="arb-section">
+        <ArbWindow title={lab(7, r7)} w={r7} />
+        <ArbWindow title={lab(30, r30)} w={r30} />
+        {last && (
+          <p className="hint" data-testid="arb-last-scan">
+            Last scan {last.ts ? ago(last.ts) : '—'}: {last.skipped ? `skipped (${String(last.skipped).replace(/_/g, ' ')})` : `${last.opportunities ?? 0} found`}.
+          </p>
+        )}
+        {days.length > 0 && (
+          <CollapsibleList items={days} pageKey="shadow-arb-days" label="days">
+            {(vis) => (
+              <div className="sh-table-wrap">
+                <table className="sh-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Day</th>
+                      <th scope="col">Found</th>
+                      <th scope="col">YES</th>
+                      <th scope="col">NO</th>
+                      <th scope="col">Profit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vis.map((d) => (
+                      <tr key={d.day}>
+                        <th scope="row">{d.day}</th>
+                        <td>{d.opportunities}</td>
+                        <td>{d.yes}</td>
+                        <td>{d.no}</td>
+                        <td>{usd(d.profit)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CollapsibleList>
+        )}
+      </div>
+    </Card>
   );
 }
 
 export default function Shadow() {
-  const { data, error, loading, staleAt, reload } = useResource(() => api.getShadowSummary(), '/api/shadow/summary');
+  const periods = useResource(() => api.getPeriods(), '/api/periods');
+  const [periodSel, setPeriodSel] = useState(null); // null = the current period
+  const periodList = (periods.data && periods.data.periods) || [];
+  const currentPeriod = periodList.find((p) => p.current);
+  const periodId = periodSel || (currentPeriod && currentPeriod.id) || 'current';
+  const { data, error, loading, staleAt, reload } = useResource(
+    () => api.getShadowSummary({ period: periodId }),
+    `/api/shadow/summary?period=${periodId}`,
+  );
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [periodId]);
   const [zeroFee, setZeroFee] = useState(false);
 
   const st = (data && data.status) || {};
@@ -103,6 +276,15 @@ export default function Shadow() {
           Refresh
         </button>
       </div>
+      {periodList.length > 0 && (
+        <PeriodSelect periods={periodList} value={periodId} onChange={setPeriodSel} id="shadow-period-select" />
+      )}
+      {data && data.period && data.period.label && (
+        <p className="hint" data-testid="shadow-period-label">Showing: {data.period.label}</p>
+      )}
+      {data && data.period_ok === false && (
+        <div className="notice notice-error" role="alert">Period markers could not be read, so these figures are empty. Try again shortly.</div>
+      )}
       <StaleNotice staleAt={error ? staleAt : null} />
       <ErrorNotice error={error} onRetry={reload} />
       {loading && !data && <Loading />}
@@ -188,13 +370,15 @@ export default function Shadow() {
                   </Card>
 
                   <Card title="By series">
-                    <PnlTable rows={data.by_series} keyOf={(r) => r.series} labelOf={(r) => r.series} head="Series" />
+                    <PnlTable rows={data.by_series} keyOf={(r) => r.series} labelOf={(r) => r.series} head="Series" pageKey="shadow-by-series" />
                   </Card>
                   <Card title="By cell">
-                    <PnlTable rows={data.by_cell} keyOf={(r) => cellLabel(r.cell)} labelOf={(r) => cellLabel(r.cell)} head="Cell" />
+                    <PnlTable rows={data.by_cell} keyOf={(r) => cellLabel(r.cell)} labelOf={(r) => cellLabel(r.cell)} head="Cell" pageKey="shadow-by-cell" />
                   </Card>
                 </>
               )}
+              <EventDays days={data.by_event_day} stats={data.day_stats} note={data.reliability_note} />
+              <ArbSection arb={data.arb} period={data.period} />
             </>
           )}
 

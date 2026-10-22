@@ -72,6 +72,8 @@ export default function Overview() {
   const edge = useResource(() => api.analyticsSummary({ days: 30 }), '/api/analytics/summary?days=30');
   const periods = useResource(() => api.getPeriods(), '/api/periods');
   const [period, setPeriod] = useState('all');
+  const [pnlPeriodSel, setPnlPeriodSel] = useState(null); // null = the current period
+  const [periodPnl, setPeriodPnl] = useState(null);
   const [bySource, setBySource] = useState(null);
   const [busy, setBusy] = useState(null);
   const cardRef = useRef(null);
@@ -99,6 +101,20 @@ export default function Overview() {
     };
   }, [period]);
   const periodList = (periods.data && periods.data.periods) || [];
+  const currentPeriod = periodList.find((p) => p.current);
+  const pnlPeriod = pnlPeriodSel || (currentPeriod && currentPeriod.id) || 'current';
+
+  // Rolling 7- and 30-day P&L for the chosen period (default: the current one), refreshed with each status poll.
+  useEffect(() => {
+    let alive = true;
+    api
+      .status({ period: pnlPeriod })
+      .then((r) => alive && setPeriodPnl((r && r.pnl) || null))
+      .catch(() => alive && setPeriodPnl(null));
+    return () => {
+      alive = false;
+    };
+  }, [pnlPeriod, updatedAt]);
 
   const a = status && status.account;
   const limit = riskLimit(status);
@@ -206,7 +222,13 @@ export default function Overview() {
           </Card>
 
           <Card title={<>Profit &amp; Loss<HelpIcon term="realised-pnl" /></>}>
-            <PnlStats pnl={status.pnl} emptyText="No settled fills yet. P&L appears once fills settle." />
+            {periodList.length > 0 && (
+              <PeriodSelect periods={periodList} value={pnlPeriod} onChange={setPnlPeriodSel} label="P&L period" id="pnl-period-select" />
+            )}
+            <PnlStats pnl={periodPnl || status.pnl} emptyText="No settled fills yet. P&L appears once fills settle." />
+            {periodPnl && periodPnl.basis === 'fill_date' && (
+              <p className="hint" data-testid="pnl-basis">Counted by fill date: a position belongs to the period it was filled in.</p>
+            )}
             {status.fills_sync && status.fills_sync.error && (
               <p className="hint error-text">Fill sync failed {formatAgo(status.fills_sync.last_utc)}: {String(status.fills_sync.error)}</p>
             )}

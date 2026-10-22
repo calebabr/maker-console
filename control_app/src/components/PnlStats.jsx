@@ -17,16 +17,21 @@ export default function PnlStats({ pnl, big = true, emptyText = 'No settled fill
   const d7 = pnl && pnl.d7;
   const d30 = pnl && pnl.d30;
   const any = isNum(d7) || isNum(d30);
+  // Period-aware figures (GET /api/status?period=) carry a plain-words window label per column.
+  const w7 = pnl && pnl.window && pnl.window.d7 && pnl.window.d7.label;
+  const w30 = pnl && pnl.window && pnl.window.d30 && pnl.window.d30.label;
   return (
     <>
       <dl className="stats" data-testid="pnl">
         <div>
           <dt>7 days<HelpIcon term="pnl-window" /></dt>
           <dd className={`${big ? 'big ' : ''}${cls(d7)}`}>{money(d7, { sign: true })}</dd>
+          {w7 && <dd className="hint pnl-window" data-testid="pnl-window-7">{w7}</dd>}
         </div>
         <div>
           <dt>30 days</dt>
           <dd className={`${big ? 'big ' : ''}${cls(d30)}`}>{money(d30, { sign: true })}</dd>
+          {w30 && <dd className="hint pnl-window" data-testid="pnl-window-30">{w30}</dd>}
         </div>
       </dl>
       {!any && <p className="hint">{emptyText}</p>}

@@ -84,6 +84,16 @@ Never set `DEV_MODE=true` on Render.
 4. Do **not** add them as repository secrets (delete any you did).
 *Check:* the `production` page lists `main` as the only branch and 7 secret names; Repository secrets has none of them.
 
+**12. Vercel: deploy production only from the `release` branch (one time).** Until you do this, a push to `main` still updates the live app; nothing breaks if you wait. Do it after the first release run has created the branch (the `promote-frontend` job creates `release` on its first run; or in step 3 below create it from `main`).
+1. GitHub > repo > **Branches** > check that `release` exists. If not: Code tab > branch dropdown > type `release` > **Create branch: release from main**.
+2. Optional protection: Settings > Branches > Add branch ruleset > name `release` > target `release` > tick **Restrict deletions** and **Block force pushes** > Create. Do not require pull requests (the workflow pushes directly).
+3. Vercel > your project > **Settings** > **Git** > **Production Branch**: type `release` > **Save**.
+4. Vercel > **Deployments**: the current production deployment stays live. Pushes to `main` now show as **Preview**.
+5. Run one release (see "Releasing a change"). The `promote-frontend` job moves `release`; Vercel builds it as **Production**.
+*Check:* after the release, Vercel > Deployments shows a Production deployment from branch `release` at the released commit, and a later push to `main` shows only a Preview.
+*Rollback:* Vercel > your project > **Deployments** > the last good **Production** deployment > ... > **Instant Rollback**. This keeps the approval path intact. Setting Production Branch back to `main` re-opens the unapproved path (every push to `main` reaches your phone), so use it only as a last resort and set it back to `release` afterwards.
+*Limit:* the `VERCEL_DEPLOY_HOOK` secret is no longer needed after this step (it would only build a preview); you may delete the hook and the secret together, but then also remove the deploy hook step from `release.yml` first.
+
 **11. Phone and laptop.**
 - **iPhone:** open the Vercel URL in Safari (or Chrome) > Share > **Add to Home Screen**. Push needs iOS 16.4 or newer and only works from the Home Screen icon. **Android:** browser menu > Install app.
 - Open the app from the icon, log in with password + Duo code, More > Alerts > **Enable notifications** > Allow > **Send test**. Push also needs the VAPID keys (step 7b below).
@@ -115,12 +125,12 @@ Pushing to GitHub does **not** change your running app (Render's auto-deploy is 
 1. **Wait for CI.** GitHub > repo > Actions (or the commit's checks): all 7 green. A red X means a failure; "cancelled" on an older commit just means a newer push replaced it. You get an email only on failures.
 2. **Run workflow.** Actions > **release** > Run workflow > branch `main` > paste the commit SHA (the full 40 characters; Commits > copy icon) > Run. The gate checks that CI is green and that the commit is the tip of `main`.
 3. **Approve in the app.** Open Keel > Server page > the pending release > approve with a fresh Duo code. Nothing deploys before this.
-4. **Wait about 3 to 5 minutes.** The workflow deploys Render, then Vercel, then reports. ntfy sends "release done".
+4. **Wait about 3 to 5 minutes.** The workflow deploys Render, moves the `release` branch (Vercel builds production from it, step 12), then reports. ntfy sends "release done".
 5. **Check.** Server page: the new `api_version`, you are the single **Leader**, the lease **generation** went up by one. A notification "Trading resumed after restart" is normal: the bot was restored to demo/running as it was.
 
 **If something looks wrong:** press **Stop** (always works, no 2FA). If the app is unreachable: Render > service > Suspend. A refusal code in the gate is a safe stop (see `docs/RELEASE_PROCESS.md`): fix the cause and start a new run; a failed run cannot be re-run, start a fresh one.
 
-**Known gap (2026-10-17):** Vercel also deploys the frontend automatically on every push to `main` (its GitHub integration), so app-screen changes can reach your phone without the approval step. Backend and trading changes are not affected. Tracked as a task.
+**App screens are gated too.** After step 12 below, Vercel deploys production only from the `release` branch, which the release workflow moves after your 2FA approval. A push to `main` makes a preview URL only and never reaches your phone.
 
 ## What each email means
 

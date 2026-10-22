@@ -9,6 +9,7 @@ import { api } from '../services/api.js';
 import { dateTime, formatMoney, formatPct, humanize } from '../utils/format.js';
 import { pnlClass } from './StatusCard.jsx';
 import '../styles/periods.css';
+import CollapsibleList from './CollapsibleList.jsx';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const when = (v) => (v ? dateTime(v) : 'Start of data');
@@ -50,6 +51,16 @@ export function PeriodSummary({ summary }) {
           </>
         )}
       </dl>
+      {summary.pnl_basis === 'fill_date' && (
+        <p className="hint" data-testid="ps-basis">
+          Profit &amp; Loss is counted by fill date: a position belongs to the period it was filled in, even if it settles later.
+        </p>
+      )}
+      {cf.equity_change_label && isNum(cf.equity_change_ex_flows) && (
+        <p className="hint" data-testid="ps-equity-change">
+          Equity change {formatMoney(cf.equity_change_ex_flows, { sign: true })}: {cf.equity_change_label}
+        </p>
+      )}
       <p className="hint">Deposits and withdrawals are listed for context. They are never added to or taken out of P&amp;L.</p>
     </div>
   );
@@ -168,14 +179,18 @@ export default function PeriodsCard() {
         {list.length > 0 && (
           <>
             <PeriodSelect periods={list} value={selected} onChange={setSelected} includeAll={false} id="periods-card-select" />
-            <ul className="period-timeline" aria-label="Period timeline">
-              {list.map((p) => (
-                <li key={p.id} data-period={p.id}>
-                  <span>{p.name}{p.current ? ' (current)' : ''}</span>
-                  <span className="period-when">{when(p.started_at)}</span>
-                </li>
-              ))}
-            </ul>
+            <CollapsibleList items={list} pageKey="periods-timeline" label="periods">
+              {(vis) => (
+                <ul className="period-timeline" aria-label="Period timeline">
+                  {vis.map((p) => (
+                    <li key={p.id} data-period={p.id}>
+                      <span>{p.name}{p.current ? ' (current)' : ''}</span>
+                      <span className="period-when">{when(p.started_at)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CollapsibleList>
           </>
         )}
         <form className="period-form" onSubmit={markPeriod}>
@@ -202,20 +217,24 @@ export default function PeriodsCard() {
         {flows.length === 0 ? (
           <p className="muted">No entries yet.</p>
         ) : (
-          <ul className="flow-list" aria-label="Cash flows">
-            {flows.map((f) => (
-              <li key={f.id} data-flow={f.id}>
-                <span>
-                  {humanize(f.kind)} <strong className="num">{formatMoney(f.amount)}</strong>
-                  <span className="flow-when"> · {dateTime(f.ts)}</span>
-                  {f.note ? <span className="muted"> · {f.note}</span> : null}
-                </span>
-                <button type="button" className="btn small" onClick={() => removeFlow(f)} disabled={!!busy} aria-label={`Delete ${f.kind} of ${formatMoney(f.amount)}`}>
-                  Delete
-                </button>
-              </li>
-            ))}
-          </ul>
+          <CollapsibleList items={flows} pageKey="cash-flows" label="entries">
+            {(vis) => (
+              <ul className="flow-list" aria-label="Cash flows">
+                {vis.map((f) => (
+                  <li key={f.id} data-flow={f.id}>
+                    <span>
+                      {humanize(f.kind)} <strong className="num">{formatMoney(f.amount)}</strong>
+                      <span className="flow-when"> · {dateTime(f.ts)}</span>
+                      {f.note ? <span className="muted"> · {f.note}</span> : null}
+                    </span>
+                    <button type="button" className="btn small" onClick={() => removeFlow(f)} disabled={!!busy} aria-label={`Delete ${f.kind} of ${formatMoney(f.amount)}`}>
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CollapsibleList>
         )}
         <form className="period-form" onSubmit={addFlow}>
           <div className="row">

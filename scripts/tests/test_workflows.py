@@ -46,7 +46,7 @@ def test_workflow_rules(path):
         assert "timeout-minutes" in job, f"{job_id}: set timeout-minutes"
         for scope, level in (job.get("permissions") or {}).items():
             if level == "write":
-                assert path.name == "release.yml" and job_id == "finalize" and scope == "contents", \
+                assert path.name == "release.yml" and job_id in ("finalize", "promote-frontend") and scope == "contents", \
                     f"{job_id}: unexpected write permission {scope}"
     for job_id, st in steps(wf):
         if "uses" in st:
@@ -145,3 +145,20 @@ def test_render_has_no_literal_secret_values():
 @pytest.fixture(autouse=True)
 def _scripts_on_path(monkeypatch):
     monkeypatch.syspath_prepend(str(REPO / "scripts"))
+
+
+def test_release_branch_promotion_is_gated_fast_forward_only():
+    """S6: Vercel production deploys from the `release` branch, which only this job moves, after approval + backend verify."""
+    wf = load(REPO / ".github" / "workflows" / "release.yml")
+    job = wf["jobs"]["promote-frontend"]
+    assert {"gate", "deploy-backend"} <= set(job["needs"])                       # after approval, gate and backend verify
+    assert "promote-frontend" in wf["jobs"]["deploy-frontend"]["needs"]
+    assert job["environment"] == "production" and job["permissions"] == {"contents": "write"}
+    body = "\n".join(st.get("run", "") for st in job["steps"])
+    assert "refs/heads/release" in body and "--force" not in body and "+refs" not in body and " -f " not in body
+    assert "merge-base --is-ancestor origin/release" in body and 'is-ancestor "$SHA" origin/main' in body
+    assert job["steps"][0]["with"]["persist-credentials"] is False
+    assert any("GH_TOKEN" in (st.get("env") or {}) for st in job["steps"])
+    for jid, j in wf["jobs"].items():                                             # no other job may write
+        if jid not in ("promote-frontend", "finalize"):
+            assert "write" not in (j.get("permissions") or {}).values(), jid

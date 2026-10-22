@@ -7,6 +7,7 @@ import { analyticsApi, NOTE_MAX } from '../../services/analyticsApi.js';
 import { formatMoney, formatPct, formatTime, num, titleCase } from '../../utils/format.js';
 import { kalshiMarketUrl } from '../../utils/kalshi.js';
 import { cents, isNum, rate, signCls } from '../../utils/analytics.js';
+import CollapsibleList from '../CollapsibleList.jsx';
 
 /** "This Month", "This Week" or "Last 90 Days" for the selected window. */
 export function periodLabel(days) {
@@ -181,11 +182,15 @@ export default function MyTrades({ days, resource }) {
           )}
           <h3 className="subhead">Journal</h3>
           {!trades.length && <p className="muted">No manual trades in this window.</p>}
-          <ul className="rows mt-list" aria-label="My trades">
-            {trades.map((t) => (
-              <TradeRow key={t.fill_id} t={t} onSaved={patchNote} />
-            ))}
-          </ul>
+          <CollapsibleList items={trades} pageKey="analytics-my-trades" limit={10} label="trades">
+            {(vis) => (
+              <ul className="rows mt-list" aria-label="My trades">
+                {vis.map((t) => (
+                  <TradeRow key={t.fill_id} t={t} onSaved={patchNote} />
+                ))}
+              </ul>
+            )}
+          </CollapsibleList>
           {isNum(data.total_trades) && data.total_trades > trades.length && (
             <p className="hint">Showing the newest {num(trades.length)} of {num(data.total_trades)}.</p>
           )}

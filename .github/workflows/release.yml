@@ -9,7 +9,8 @@
 # with write access. Agents never run or approve it (they cannot pass 2FA).
 #
 # Security rules for this file (checked by scripts/tests/test_workflows.py):
-#   * top-level permissions are none; each job asks for the least it needs (read-only except the final tag job)
+#   * top-level permissions are none; each job asks for the least it needs (read-only except promote-frontend, which
+#     pushes only the `release` branch fast-forward, and the final tag job)
 #   * third-party actions pinned by full SHA; no pull_request_target; no schedule
 #   * secrets only through env: on the step that uses them, never interpolated into a script; inputs reach shell
 #     scripts only as environment variables; nothing secret is echoed
@@ -21,7 +22,8 @@
 #   DEPLOY_STATUS_KEY     same value as DEPLOY_STATUS_KEY in Render
 #   RELEASE_TOKEN         same value as RELEASE_TOKEN in Render
 #   RENDER_DEPLOY_HOOK    Render deploy hook URL (service -> Settings -> Deploy Hook)
-#   VERCEL_DEPLOY_HOOK    Vercel deploy hook URL (project -> Settings -> Git -> Deploy Hooks, branch main)
+#   VERCEL_DEPLOY_HOOK    Vercel deploy hook URL (project -> Settings -> Git -> Deploy Hooks, branch main). Kept for the
+#                         migration; once Production Branch is `release` it only makes a harmless preview build.
 #   NTFY_TOPIC            the ntfy topic used for alerts
 name: release
 
@@ -220,8 +222,42 @@ jobs:
           [ -n "$PREV_GENERATION" ] && args+=(--prev-generation "$PREV_GENERATION")
           python3 scripts/release_ctl.py "${args[@]}"
 
-  deploy-frontend:
+  promote-frontend:
+    # S6: the Vercel project's Production Branch is `release` (owner setting, docs/DEPLOY.md step 12). This job
+    # fast-forwards `release` to the approved commit, only after the gate, the owner's 2FA approval and the verified
+    # backend deploy. Until the owner flips the Vercel setting, a push to `release` only makes a preview deployment.
     needs: [gate, deploy-backend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      contents: write          # push the single branch `release`; the only write besides the tag job
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fast-forward the release branch to the approved commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "$SHA" in *[!0-9a-f]*|"") echo "::error::bad commit"; exit 1;; esac
+          git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::the approved commit is not on main"; exit 1; }
+          git fetch --quiet origin release 2>/dev/null || echo "release branch does not exist yet; it will be created"
+          if git rev-parse --verify --quiet origin/release > /dev/null; then
+            git merge-base --is-ancestor origin/release "$SHA" || { echo "::error::release is not an ancestor of the approved commit; refusing a non-fast-forward"; exit 1; }
+          fi
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
+          # Never forced: the server rejects anything that is not a fast-forward. Only refs/heads/release is written.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH}" push "https://github.com/${REPO}.git" "${SHA}:refs/heads/release"
+          echo "release branch is now at ${SHA}"
+
+  deploy-frontend:
+    needs: [gate, deploy-backend, promote-frontend]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -263,7 +299,7 @@ jobs:
         run: python3 scripts/release_ctl.py verify-frontend --url "$APP_URL" --timeout 420
 
   finalize:
-    needs: [gate, deploy-backend, deploy-frontend]
+    needs: [gate, deploy-backend, promote-frontend, deploy-frontend]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
@@ -298,7 +334,7 @@ jobs:
 
   alert-failure:
     # Any failed or cancelled stage: tell the owner. The bot is never touched by this workflow (Stop and the lease decide).
-    needs: [gate, approve, deploy-backend, deploy-frontend, finalize]
+    needs: [gate, approve, deploy-backend, promote-frontend, deploy-frontend, finalize]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -11,6 +11,7 @@ import { api } from '../services/api.js';
 import { formatMoney } from '../utils/format.js';
 import { EVENT_GROUPS, eventGroupOf, eventLabel, groupByDay, matchesSource, sourceChips } from '../utils/activity.js';
 import '../styles/settings.css';
+import CollapsibleList from '../components/CollapsibleList.jsx';
 
 // Journal rows: {utc|ts, event, ticker, side, price, count, cost, cell, note, source: "bot"|"you", strategy}
 const LIMIT = 100;
@@ -93,32 +94,36 @@ export default function Activity() {
             <h2>{d.label}</h2>
             <span className="muted small num">{d.items.length}</span>
           </div>
-          <ul className="rows">
-            {d.items.map((r, i) => (
-              <li key={r.row_hash || `${rowTime(r)}-${i}`} className="row-item" data-source={r.source === 'you' ? 'you' : 'bot'}>
-                <div className="row-top">
-                  <span className="row-tags">
-                    <span className={`pill pill-event pill-${String(r.event || '').replace(/[^a-z_]/gi, '')}`}>{eventLabel(r.event)}</span>
-                    <SourceBadge row={r} strategies={strategies} />
-                  </span>
-                  <Time className="muted small" value={rowTime(r)} />
-                </div>
-                {r.ticker && <div className="mono row-ticker">{r.ticker}</div>}
-                <div className="row-meta num">
-                  {r.side && <span>{String(r.side).toUpperCase()}</span>}
-                  {r.price != null && r.price !== '' && <span>@ {Math.round(Number(r.price) * 100)}¢</span>}
-                  {r.count != null && r.count !== '' && <span>× {Number(r.count).toFixed(2)}</span>}
-                  {r.cost != null && r.cost !== '' && <span>{formatMoney(Number(r.cost))}</span>}
-                </div>
-                {r.note && <div className="muted small">{r.note}</div>}
-                {r.ticker && (
-                  <div className="row-links">
-                    <KalshiLink ticker={r.ticker} />
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
+          <CollapsibleList items={d.items} pageKey={`activity-${d.key}`} label="rows">
+            {(vis) => (
+              <ul className="rows">
+                {vis.map((r, i) => (
+                  <li key={r.row_hash || `${rowTime(r)}-${i}`} className="row-item" data-source={r.source === 'you' ? 'you' : 'bot'}>
+                    <div className="row-top">
+                      <span className="row-tags">
+                        <span className={`pill pill-event pill-${String(r.event || '').replace(/[^a-z_]/gi, '')}`}>{eventLabel(r.event)}</span>
+                        <SourceBadge row={r} strategies={strategies} />
+                      </span>
+                      <Time className="muted small" value={rowTime(r)} />
+                    </div>
+                    {r.ticker && <div className="mono row-ticker">{r.ticker}</div>}
+                    <div className="row-meta num">
+                      {r.side && <span>{String(r.side).toUpperCase()}</span>}
+                      {r.price != null && r.price !== '' && <span>@ {Math.round(Number(r.price) * 100)}¢</span>}
+                      {r.count != null && r.count !== '' && <span>× {Number(r.count).toFixed(2)}</span>}
+                      {r.cost != null && r.cost !== '' && <span>{formatMoney(Number(r.cost))}</span>}
+                    </div>
+                    {r.note && <div className="muted small">{r.note}</div>}
+                    {r.ticker && (
+                      <div className="row-links">
+                        <KalshiLink ticker={r.ticker} />
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CollapsibleList>
         </section>
       ))}
     </div>
