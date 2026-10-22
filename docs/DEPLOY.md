@@ -87,7 +87,7 @@ Never set `DEV_MODE=true` on Render.
 **12. Vercel: deploy production only from the `release` branch (one time).** Until you do this, a push to `main` still updates the live app; nothing breaks if you wait. Do it after the first release run has created the branch (the `promote-frontend` job creates `release` on its first run; or in step 3 below create it from `main`).
 1. GitHub > repo > **Branches** > check that `release` exists. If not: Code tab > branch dropdown > type `release` > **Create branch: release from main**.
 2. Optional protection: Settings > Branches > Add branch ruleset > name `release` > target `release` > tick **Restrict deletions** and **Block force pushes** > Create. Do not require pull requests (the workflow pushes directly).
-3. Vercel > your project > **Settings** > **Git** > **Production Branch**: type `release` > **Save**.
+3. Vercel > your project > **Settings** > **Environments** > **Production** > **Branch Tracking**: change the branch name to `release` > **Save**. (Older dashboards show it under **Settings** > **Git** > **Production Branch**; if you cannot find it, use the search box at the top of the project settings and type "branch".)
 4. Vercel > **Deployments**: the current production deployment stays live. Pushes to `main` now show as **Preview**.
 5. Run one release (see "Releasing a change"). The `promote-frontend` job moves `release`; Vercel builds it as **Production**.
 *Check:* after the release, Vercel > Deployments shows a Production deployment from branch `release` at the released commit, and a later push to `main` shows only a Preview.
