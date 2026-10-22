@@ -140,7 +140,8 @@ def test_empty_input_shape():
     s = m.summarize([], NOW)
     assert s["status"]["too_early"] is True
     assert s["status"]["days_covered"] == 0 and s["status"]["settled_episodes"] == 0
-    assert s["headline"]["pnl"] == {"lo": 0.0, "mid": 0.0, "hi": 0.0, "ci90": [0.0, 0.0]}
+    assert s["headline"]["pnl"] == {"lo": 0.0, "mid": 0.0, "hi": 0.0, "ci90": None}      # 2A-3 F3
+    assert s["headline"]["ci_reliable"] is False and s["headline"]["headline_status"] == "too_early"
     assert s["headline"]["peak_capital"] == 0.0
     assert s["by_series"] == [] and s["by_cell"] == [] and s["daily"] == []
     assert s["fee_mode"] == "maker"
@@ -154,10 +155,16 @@ def test_summary_top_level_keys_match_contract():
     assert set(s) == {"enabled", "standin", "status", "headline", "headline_zero_fee",
                       "by_series", "by_cell", "daily", "fee_mode", "caveats",
                       # additive (Sprint 2A-2 S2/S3); the contract fields above are unchanged
-                      "by_event_day", "day_stats", "reliability_note", "arb"}
+                      "by_event_day", "day_stats", "reliability_note", "arb",
+                      # additive (Sprint 2A-3)
+                      "day_basis", "fee_modes", "variants_enabled", "variants", "variant_compare"}
     assert set(s["status"]) == {"days_covered", "settled_episodes", "central_fills", "too_early",
-                                "last_pass_ts", "pass_ok_pct", "truncated"}
-    assert set(s["headline"]) == {"pnl", "roi", "fill_rate", "peak_capital"}
+                                "last_pass_ts", "pass_ok_pct", "truncated",
+                                "headline_status", "capped_episodes", "settled_days"}
+    assert set(s["headline"]) == {"pnl", "roi", "fill_rate", "peak_capital",
+                                  "ci_reliable", "headline_status", "break_even_win_rate", "observed_win_rate",
+                                  "n_settled_fills", "peak_held_capital", "return_on_held",
+                                  "first_fill_per_market"}
     assert set(s["headline"]["pnl"]) == {"lo", "mid", "hi", "ci90"}
     assert set(s["headline"]["fill_rate"]) == {"lo", "mid", "hi"}
 
@@ -193,22 +200,30 @@ def test_pnl_range_ordering_for_winners():
 
 
 def test_too_early_gate():
-    # 7 days, 30 mid fills: not too early; the boundary
-    eps = [_ep(i, day=i, count=10, fill={"lo": 1.0, "mid": 5.0, "hi": 9.0}) for i in range(7)]
+    # 2A-3 V2: 7 close days with a fill AND 30 filled episodes (the same rule as the reliability note)
+    eps = [_ep(i, day=i % 7, count=10, fill={"lo": 1.0, "mid": 5.0, "hi": 9.0}) for i in range(30)]
     s = m.summarize(eps, NOW)
-    assert s["status"]["days_covered"] == 7
-    assert s["status"]["central_fills"] == 35.0
-    assert s["status"]["too_early"] is False
+    assert s["status"]["days_covered"] == 7 and s["headline"]["n_settled_fills"] == 30
+    assert s["status"]["too_early"] is False and s["reliability_note"] is None
     # six days is still early
-    assert m.summarize(eps[:6], NOW)["status"]["too_early"] is True
-    # seven days but 29 central fills is early
-    few = [_ep(i, day=i, fill={"lo": 0.0, "mid": 29 / 7, "hi": 5.0}) for i in range(7)]
-    f = m.summarize(few, NOW)["status"]
-    assert f["days_covered"] == 7 and f["central_fills"] == pytest.approx(29.0, abs=1e-3)
-    assert f["too_early"] is True
-    # enough fills on too few days is early
-    big = [_ep(i, day=0, count=100, fill={"lo": 10.0, "mid": 50.0, "hi": 90.0}) for i in range(3)]
+    assert m.summarize([e for e in eps if e["ep_id"] not in {f"ep{i}" for i in range(6, 30, 7)}],
+                       NOW)["status"]["too_early"] is True
+    # seven days but 29 filled episodes is early, however many contracts they hold
+    few = [_ep(i, day=i % 7, count=100, fill={"lo": 0.0, "mid": 50.0, "hi": 90.0}) for i in range(29)]
+    f = m.summarize(few, NOW)
+    assert f["status"]["days_covered"] == 7 and f["status"]["central_fills"] > 1000
+    assert f["status"]["too_early"] is True and f["reliability_note"] is not None
+    # enough filled episodes on too few days is early
+    big = [_ep(i, day=i % 3, count=100, fill={"lo": 10.0, "mid": 50.0, "hi": 90.0}) for i in range(40)]
     assert m.summarize(big, NOW)["status"]["too_early"] is True
+
+
+def test_roi_is_null_for_a_scenario_with_no_cost():
+    # 2A-3 V3: lo fills nothing, so it has no ROI; the band is the scenarios that have a cost
+    eps = [_ep(i, day=i, result="no", fill={"lo": 0.0, "mid": 5.0, "hi": 8.0}) for i in range(3)]
+    r = m.summarize(eps, NOW)["headline"]["roi"]
+    assert r["mid"] is not None and r["lo"] <= r["mid"] <= r["hi"] and r["hi"] < 0
+    assert m.summarize([], NOW)["headline"]["roi"]["mid"] is None
 
 
 def test_peak_capital_is_max_simultaneous_cost():
@@ -302,8 +317,8 @@ def test_bootstrap_deterministic_same_seed():
 
 
 def test_bootstrap_different_seed_changes_interval_not_point():
-    eps = [_ep(i, day=i, result="yes" if i % 3 else "no", count=5 + 3 * i,
-               fill={"lo": 1.0, "mid": 2.0 + i, "hi": 4.0 + i}) for i in range(15)]
+    eps = [_ep(i, day=i % 15, result="yes" if i % 3 else "no", count=5 + 3 * (i % 15),
+               fill={"lo": 1.0, "mid": 2.0 + i % 15, "hi": 4.0 + i % 15}) for i in range(30)]
     a = m.summarize(eps, NOW, seed=1, draws=500)
     b = m.summarize(eps, NOW, seed=2, draws=500)
     assert a["headline"]["pnl"]["mid"] == b["headline"]["pnl"]["mid"]
@@ -332,12 +347,26 @@ def test_ci_brackets_point_estimate_on_mixed_data():
     assert lo <= s["headline"]["pnl"]["mid"] <= hi
 
 
+def _days_of(eps):
+    """Per-day central rows as summarize() feeds the bootstrap."""
+    days = {}
+    for e in eps:
+        d = days.setdefault(e["settled_ts"].date(), {"pnl_maker": 0.0, "pnl_zero": 0.0, "cost": 0.0})
+        sc = m.score_episode(e)
+        d["pnl_maker"] += sc["maker"]["mid"]
+        d["pnl_zero"] += sc["zero"]["mid"]
+        d["cost"] += e["fill"]["mid"] * e["price"]
+    return [days[k] for k in sorted(days)]
+
+
 def test_day_clustering_single_day_has_no_spread():
     # all episodes settle on one day: resampling days can only return that day
     eps = [_ep(i, day=0, result="yes" if i % 2 else "no") for i in range(6)]
-    p = m.summarize(eps, NOW, draws=300)["headline"]["pnl"]
-    assert p["ci90"][0] == pytest.approx(p["mid"], abs=1e-3)
-    assert p["ci90"][1] == pytest.approx(p["mid"], abs=1e-3)
+    ci = m._bootstrap(_days_of(eps), 7, 300)["pnl_maker"]
+    mid = sum(m.score_episode(e)["maker"]["mid"] for e in eps)
+    assert ci[0] == pytest.approx(mid, abs=1e-3) and ci[1] == pytest.approx(mid, abs=1e-3)
+    # summarize() itself shows no interval on one day (too early, 2A-3 F3)
+    assert m.summarize(eps, NOW, draws=300)["headline"]["pnl"]["ci90"] is None
 
 
 def test_day_clustering_resamples_whole_days():
@@ -347,7 +376,7 @@ def test_day_clustering_resamples_whole_days():
     lose = _ep(1, day=1, result="no", price=0.9, count=10, fill={"lo": 10.0, "mid": 10.0, "hi": 10.0})
     pw = m.score_episode(win)["zero"]["mid"]
     pl = m.score_episode(lose)["zero"]["mid"]
-    ci = m.summarize([win, lose], NOW, draws=400)["headline_zero_fee"]["pnl"]["ci90"]
+    ci = m._bootstrap(_days_of([win, lose]), 7, 400)["pnl_zero"]
     allowed = [2 * pw, pw + pl, 2 * pl]
     assert min(allowed) - 1e-3 <= ci[0] <= max(allowed) + 1e-3
     assert min(allowed) - 1e-3 <= ci[1] <= max(allowed) + 1e-3
@@ -360,8 +389,8 @@ def test_same_day_episodes_are_one_cluster():
     # same total episodes, but spread over more days gives more distinct outcomes
     a = [_ep(i, day=0, result="yes" if i % 2 else "no") for i in range(8)]
     b = [_ep(i, day=i, result="yes" if i % 2 else "no") for i in range(8)]
-    wa = m.summarize(a, NOW, draws=500)["headline"]["pnl"]["ci90"]
-    wb = m.summarize(b, NOW, draws=500)["headline"]["pnl"]["ci90"]
+    wa = m._bootstrap(_days_of(a), 7, 500)["pnl_maker"]
+    wb = m._bootstrap(_days_of(b), 7, 500)["pnl_maker"]
     assert (wb[1] - wb[0]) > (wa[1] - wa[0])
 
 

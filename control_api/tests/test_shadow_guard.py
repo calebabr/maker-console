@@ -137,10 +137,11 @@ def test_spy_transport_full_lifecycle_records_only_public_gets():
     st = FakeStrategy([yes_quote()])
     [ep] = sh.run_cycle(md, st, inp()).upserts                                  # join
     st.quotes = []
-    [ep] = sh.run_cycle(md, st, inp(open_eps=[ep], now=NOW + timedelta(minutes=5))).upserts   # cancel
-    assert ep["end_reason"] == "cancel"
-    [ep] = sh.run_cycle(md, st, inp(ended_unread=[ep], now=NOW + timedelta(minutes=10))).upserts  # trades
-    assert ep["through"] is True and ep["fill"]["mid"] == ep["count"]
+    [ep] = sh.run_cycle(md, st, inp(open_eps=[ep], now=NOW + timedelta(minutes=5))).upserts   # cancel + trades
+    assert ep["end_reason"] == "cancel" and ep["trades_read"] is True           # 2A-3: read in the same cycle
+    [ep] = sh.run_cycle(md, st, inp(ended_unread=[dict(ep, trades_read=False)],
+                                    now=NOW + timedelta(minutes=10))).upserts   # a later read gives the same
+    assert ep["through"] is True and ep["fill"]["hi"] == ep["count"]           # F4: lo/mid depend on the volume
     [ep] = sh.run_cycle(md, st, inp(unsettled=[ep], now=CLOSE + timedelta(hours=1))).upserts    # settle
     assert ep["result"] == "no" and ep["pnl"]["zero"]["mid"] < 0
     assert spy.seen, "no requests reached the transport"
