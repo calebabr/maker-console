@@ -6,14 +6,16 @@ import hmac
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ..auth.audit import audit
 from ..auth.deps import current_user, current_user_stop, require_fresh_2fa
 from ..runner import ConfigInvalid, RunnerDisabled, StopInProgress
+from .periods import window_for
 from ..services import benchmarks as bench
 from ..services import botfiles
+from ..services import periods as per
 from ..services import strategies as strat
 
 router = APIRouter(prefix="/api")
@@ -38,7 +40,11 @@ def _num(v):
 
 
 @router.get("/status")
-async def status(request: Request, user: dict = Depends(current_user)) -> dict:
+async def status(request: Request, period: str | None = Query(None), user: dict = Depends(current_user)) -> dict:
+    """Runner status plus read-only figures. `period=<all|current|id>` (Sprint 2A-2) re-bases the rolling `pnl`
+    block on a period, clipped to its start and attributed by fill date, with a `window` label; omitted = the
+    unchanged settlement-time d7 / d30."""
+    pw = await window_for(request, period) if period is not None else None     # 422 on an unknown id
     r = _runner(request)
     store = request.app.state.store
     out = r.status()
@@ -51,7 +57,10 @@ async def status(request: Request, user: dict = Depends(current_user)) -> dict:
     cfg = r.config or {}
     out["limits"] = {"run_budget": cfg.get("run_budget"), "max_open_frac": cfg.get("max_open_frac")}
     # realised maker P&L (non-taker fills x settlement results, by settlement time); null until data exists
-    out["pnl"] = await r.pnl(taker=False)
+    if period is None:
+        out["pnl"] = await r.pnl(taker=False)
+    else:       # rolling windows clipped to the period; a store error gives null like the default path
+        out["pnl"] = await _safe(per.rolling_pnl(store, pw, now, env=getattr(r, "mode", None)))
     # fill-quality telemetry vs the optional private market baseline (services/benchmarks.py); n=0 until scored
     out["fill_quality"] = r.fill_quality()          # S-23: cached once per pass; no store read here
     # queue-position telemetry (overall only; per series on /markets); cached once per pass, null if unknown

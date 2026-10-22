@@ -179,7 +179,10 @@ async def period_summary(period_id: str, request: Request, env: str | None = Que
     money_spent (cost of all fills), settled_cost, fees, return_on_settled_cost (pnl / settled_cost),
     return_on_all_cost (pnl / money_spent), open_fills, open_at_risk. `cash_flows` holds the deposits and
     withdrawals dated inside the period, shown beside (never netted into) P&L, and equity-based figures when
-    account snapshots exist. Fills are attributed by FILL date."""
+    account snapshots exist. Fills are attributed by FILL date: the headline `pnl` (`pnl_basis` = fill_date) is the
+    period's P&L. `cash_flows.equity_change_ex_flows` is an account-equity move that ALSO includes settlements of
+    positions filled in earlier periods (flagged by `equity_change_includes_earlier_settlements` and explained in
+    `equity_change_label`), so do not read it as the period's P&L."""
     _rate_limit(request, user, "period_summary")
     if source not in P.SOURCES:
         raise HTTPException(422, [{"loc": ["query", "source"], "msg": f"must be one of {list(P.SOURCES)}"}])

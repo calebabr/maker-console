@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth.deps import current_user
 from ..auth.ratelimit import get_limiter
+from .periods import window_for
+from ..services import periods as per
 from ..services import pnl as pnlsvc
 from ..services import strategies as strat
 
@@ -87,26 +89,40 @@ async def changelog(user: dict = Depends(current_user)) -> list[dict]:
 
 # ---------------------------------------------------------------- since you last checked (item 30)
 @router.get("/since")
-async def since_view(request: Request, ts: datetime = Query(...), user: dict = Depends(current_user)) -> dict:
+async def since_view(request: Request, ts: datetime = Query(...), period: str | None = Query(None),
+                     user: dict = Depends(current_user)) -> dict:
     """{fills, settled, pnl_change, since} for the Overview card. `since` echoes the time actually used (clamped to
     the last 35 days and to now). pnl_change = realised bot P&L of markets settled since then (manual trades are
-    reported separately in by_source, never in the bot number). Counts are for the current mode."""
+    reported separately in by_source, never in the bot number). Counts are for the current mode.
+
+    `period=<all|current|id>` (Sprint 2A-2): `since` is clipped to the period start (never earlier), only fills
+    FILLED inside the period count (fill-date attribution, as in the period summary; a position filled earlier
+    that settles now stays with its own period), and the response gains `window` {label, from, to, period_id}
+    and `clipped`. Omitted = unchanged."""
     _rate_limit(request, user, "since")
+    pw = await window_for(request, period) if period is not None else None     # 422 on an unknown id
     now = datetime.now(timezone.utc)
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     s = min(max(ts.astimezone(timezone.utc), now - timedelta(days=SINCE_MAX_DAYS)), now)
+    pstart, pend = per.window_of(pw)
+    clipped = pstart is not None and pstart > s
+    if clipped:
+        s = min(pstart, now)
+    fill_window = (pstart, pend) if period is not None else None
     env = getattr(request.app.state.runner, "mode", None)
     store = request.app.state.store
     try:
-        res, settl, fills = await asyncio.wait_for(pnlsvc.by_source_since(store, s, env=env), STORE_TIMEOUT_S)
+        res, settl, fills = await asyncio.wait_for(pnlsvc.by_source_since(store, s, env=env, fill_window=fill_window),
+                                                  STORE_TIMEOUT_S)
         new_fills = await asyncio.wait_for(store.list_fills(since=s, limit=5000,
                                                             fields=("fill_id", "ts", "env", "source", "strategy",
                                                                     "is_taker")), STORE_TIMEOUT_S)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(503, "store_unavailable") from e
     new_fills = [f for f in new_fills if isinstance(f.get("ts"), datetime) and f["ts"] > s
-                 and (not env or not f.get("env") or f.get("env") == env)]
+                 and (not env or not f.get("env") or f.get("env") == env)
+                 and (fill_window is None or per.in_window(f["ts"], pstart, pend))]
     by_src: dict[str, int] = {}
     for f in new_fills:
         src, sid = strat.fill_label(f)
@@ -114,10 +130,22 @@ async def since_view(request: Request, ts: datetime = Query(...), user: dict = D
         by_src[k] = by_src.get(k, 0) + 1
     settled = [x for x in settl if isinstance(x.get("ts"), datetime) and x["ts"] > s
                and (x.get("market_result") or x.get("result")) in ("yes", "no")]
-    return {"since": s.isoformat(), "fills": len(new_fills), "settled": len(settled),
-            "pnl_change": res.get("bot"),
-            "by_source": {k: {"fills": by_src.get(k, 0), "pnl": res.get(k)} for k in strat.bucket_ids()},
-            "pnl_total": res.get("total")}
+    if fill_window is not None:     # count only markets that have a fill belonging to the period
+        mine = {f.get("ticker") or f.get("market_ticker") for f in fills}
+        settled = [x for x in settled if x.get("ticker") in mine]
+    out = {"since": s.isoformat(), "fills": len(new_fills), "settled": len(settled),
+           "pnl_change": res.get("bot"),
+           "by_source": {k: {"fills": by_src.get(k, 0), "pnl": res.get(k)} for k in strat.bucket_ids()},
+           "pnl_total": res.get("total")}
+    if period is not None:
+        hi = min(pend, now) if pend else now
+        label = ("Since your last visit (all periods)" if pw is None
+                 else f"Since your last visit, within {pw.get('name') or pw['id']}"
+                 + (f" (since {per._day(pstart)})" if clipped else ""))
+        out["window"] = {"label": label, "from": s.isoformat(), "to": hi.isoformat(),
+                         "period_id": pw["id"] if pw else "all"}
+        out["clipped"] = bool(clipped)
+    return out
 
 
 # ---------------------------------------------------------------- account positions (Y3)

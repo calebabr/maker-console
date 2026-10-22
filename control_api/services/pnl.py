@@ -81,6 +81,48 @@ def windows(fills: Iterable[dict], settlements: Iterable[dict], now: datetime, *
     return {"d7": round(d7, 2), "d30": round(d30, 2), "settled_fills": n} if n else None
 
 
+def windows_by_fill(fills: Iterable[dict], settlements: Iterable[dict], *, lo7: datetime, lo30: datetime,
+                    hi: datetime | None, taker: bool = False, env: str | None = None) -> dict:
+    """Period-aware rolling windows: {d7, d30, settled_fills}, attributed by FILL date exactly as the period summary
+    does. d7 = P&L of fills filled in [lo7, hi), d30 = fills filled in [lo30, hi); a fill counts once its market has
+    a yes/no settlement, whenever that happened. d7 / d30 / settled_fills are None / None / 0 when no settled fill
+    of that kind falls in the 30-day window. Manual trades are never a bot statistic (same rule as windows())."""
+    from .strategies import fill_label
+    res = {}
+    for s in settlements:
+        t, r = s.get("ticker"), s.get("market_result") or s.get("result")
+        if t and r in ("yes", "no"):
+            res[t] = r
+    d7 = d30 = 0.0
+    n = n7 = 0
+    want = "arb" if taker else "maker"
+    for f in fills:
+        src, strat = fill_label(f)
+        if src != "bot" or strat != want:
+            continue
+        if env and f.get("env") and f.get("env") != env:
+            continue
+        ts = f.get("ts")
+        if not isinstance(ts, datetime):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=lo30.tzinfo)
+        if ts < lo30 or (hi is not None and ts >= hi):
+            continue
+        r = res.get(f.get("ticker") or f.get("market_ticker"))
+        p = fill_pnl(f, r) if r else None
+        if p is None:
+            continue
+        n += 1
+        d30 += p
+        if ts >= lo7:
+            n7 += 1
+            d7 += p
+    if not n:
+        return {"d7": None, "d30": None, "settled_fills": 0}
+    return {"d7": round(d7, 2) if n7 else None, "d30": round(d30, 2), "settled_fills": n}
+
+
 def realised_by_source(fills: Iterable[dict], settlements: Iterable[dict], *, since: datetime,
                        until: datetime | None = None, env: str | None = None) -> dict:
     """Realised P&L of fills whose market settled in [since, until), split by strategy and 'you':
@@ -156,15 +198,21 @@ FILL_FIELDS = ("fill_id", "ts", "ticker", "market_ticker", "side", "outcome_side
 FILL_LOOKBACK = timedelta(days=35)
 
 
-async def by_source_since(store, since: datetime, *, env: str | None = None, until: datetime | None = None
+async def by_source_since(store, since: datetime, *, env: str | None = None, until: datetime | None = None,
+                          fill_window: tuple[datetime | None, datetime | None] | None = None
                           ) -> tuple[dict, list[dict], list[dict]]:
     """(realised_by_source, settlements, fills) for markets settled since `since`. Bounded, projected reads.
+    `fill_window=(start, end)` (a period, Sprint 2A-2) keeps only fills FILLED in [start, end): the settlement time
+    still picks the markets, the fill date picks which fills belong. Default None = unchanged.
     Raises on store errors (callers wrap it)."""
     settlements = await store.list_settlements(since=since, limit=20000,
                                                fields=("ticker", "market_result", "result", "ts"))
     if not settlements:
         return realised_by_source([], [], since=since, until=until, env=env), [], []
     fills = await store.list_fills(since=since - FILL_LOOKBACK, limit=50000, fields=FILL_FIELDS)
+    if fill_window is not None:
+        from .periods import in_window
+        fills = [f for f in fills if in_window(f.get("ts"), fill_window[0], fill_window[1])]
     return realised_by_source(fills, settlements, since=since, until=until, env=env), settlements, fills
 
 
@@ -187,3 +235,13 @@ async def compute(store, now: datetime, *, taker: bool = False, env: str | None 
         return None
     fills = await store.list_fills(since=now - timedelta(days=60), limit=100000)
     return windows(fills, settlements, now, taker=taker, env=env)
+
+
+async def compute_by_fill(store, lo7: datetime, lo30: datetime, hi: datetime | None, *, taker: bool = False,
+                          env: str | None = None) -> dict:
+    """windows_by_fill() fed from the store (fills filled in [lo30, hi), settlements since lo30). Raises on store
+    errors (callers wrap it)."""
+    fills = await store.list_fills(since=lo30, until=hi, limit=50000, fields=FILL_FIELDS)
+    settlements = await store.list_settlements(since=lo30, limit=20000,
+                                               fields=("ticker", "market_result", "result", "ts")) if fills else []
+    return windows_by_fill(fills, settlements, lo7=lo7, lo30=lo30, hi=hi, taker=taker, env=env)

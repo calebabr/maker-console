@@ -276,7 +276,7 @@ async def test_period_summary_api(env):
     assert s1["period"]["id"] == "p1" and s1["period"]["ended_at"] is not None
     assert (s1["fills"], s1["settled"], s1["wins"], s1["pnl"]) == (2, 2, 1, 1.0)
     assert s1["cash_flows"]["deposits"] == 0.0 and s1["source"] == "bot" and s1["env"] == "demo"
-    expected = {"period", "env", "source", "fills", "contracts", "settled", "wins", "losses", "win_rate", "pnl",
+    expected = {"period", "env", "source", "pnl_basis", "fills", "contracts", "settled", "wins", "losses", "win_rate", "pnl",
                 "money_spent", "settled_cost", "fees", "return_on_settled_cost", "return_on_all_cost", "open_fills",
                 "open_at_risk", "by_source", "total", "cash_flows", "data_from", "data_to", "generated_utc",
                 "truncated"}
