@@ -47,6 +47,7 @@ sudo systemctl enable --now kalshi-book-recorder.timer
 The timer runs one pass every 5 minutes. To change it, edit `OnCalendar` in the timer (for example `*:0/10`), then `sudo systemctl daemon-reload && sudo systemctl restart kalshi-book-recorder.timer`. (If you prefer the script's own `--interval-min` loop, run it as a long-lived service instead; the timer approach is the default.)
 
 ## 6. Check it
+First run the service once and review its sandbox score: `sudo systemctl start kalshi-book-recorder.service`, then `systemd-analyze security kalshi-book-recorder.service | tail -3` (expect exposure under 2.0, OK).
 ```
 systemctl list-timers kalshi-book-recorder.timer
 systemctl status kalshi-book-recorder.service
@@ -62,7 +63,7 @@ scp -i "C:\Users\<you>\.ssh\oracle-recorder.key" -r ubuntu@<PUBLIC_IP>:/var/lib/
 If `ubuntu` cannot read the folder: `sudo chmod -R g+rX /var/lib/book-recorder && sudo usermod -aG recorder ubuntu`, then log out and in.
 
 ## 8. Update, stop, roll back
-- Update: `cd /opt/book-recorder && sudo git pull && sudo systemctl restart kalshi-book-recorder.timer`
+- Update (use a reviewed tag or commit, not blind `main`): `cd /opt/book-recorder && sudo git fetch && sudo git checkout <REVIEWED_TAG_OR_COMMIT>`, then re-copy the units and reload: `sudo cp deploy/vm/kalshi-book-recorder.* /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl restart kalshi-book-recorder.timer`
 - Roll back: `sudo git -C /opt/book-recorder checkout <PREVIOUS_COMMIT>`, then restart the timer.
 - Stop recording: `sudo systemctl disable --now kalshi-book-recorder.timer`. This only reads public data and places no orders, so there is nothing else to stop.
 - Remove: stop the timer, delete the two unit files from `/etc/systemd/system/`, `sudo systemctl daemon-reload`.

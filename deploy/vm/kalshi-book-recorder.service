@@ -40,4 +40,4 @@ RestrictAddressFamilies=AF_INET AF_INET6
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
-UMask=0077
+UMask=0027
