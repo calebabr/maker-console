@@ -319,6 +319,10 @@ def empty_summary(enabled: bool = False, standin: bool = False) -> dict[str, Any
         "caveats": list(CAVEATS),
         "day_basis": "close_day",               # F6: a "day" is the UTC close (settle) day, not the event date
         "fee_modes": {m: 0 for m in FEE_MODES},  # F7: scored episodes per fee mode
+        # hotfix (legacy episodes): the headline basis, and the legacy (pre-cap) episodes kept apart
+        "methodology": 2,
+        "legacy": None,
+        "legacy_banner": None,
         # Sprint 2A-3 wave 2 (interval variants; empty while env SHADOW_VARIANTS is off)
         "variants_enabled": False,
         "variants": [],
@@ -621,6 +625,52 @@ def summarize(episodes, now, *, seed: int = DEFAULT_SEED, draws: int = DEFAULT_D
 
 
 # --------------------------------------------------------------------------
+# hotfix: legacy (methodology 1) episodes, stored before the 2A-3 caps
+# --------------------------------------------------------------------------
+LEGACY_BANNER = "legacy, uncapped, not comparable"
+NO_CORRECTED_DATA = "no_corrected_data"
+_LEGACY_HEADLINE_KEYS = ("pnl", "roi", "fill_rate", "peak_capital", "peak_held_capital", "first_fill_per_market",
+                         "break_even_win_rate", "observed_win_rate", "n_settled_fills")
+
+
+def legacy_block(episodes, now) -> dict[str, Any]:
+    """The legacy episodes' own figures (no interval: they were never capped, so a range of their fills is not a
+    comparable estimate). Same scoring as the headline, reported apart with the banner."""
+    s = summarize(list(episodes or []), now, draws=0)
+    out: dict[str, Any] = {"banner": LEGACY_BANNER, "episodes": len(list(episodes or []))}
+    for name in ("headline", "headline_zero_fee"):
+        h = {k: s[name][k] for k in _LEGACY_HEADLINE_KEYS}
+        h["pnl"] = {k: h["pnl"][k] for k in SCENARIOS}
+        h["roi"] = {k: h["roi"][k] for k in SCENARIOS}
+        out[name] = h
+    out["status"] = {k: s["status"][k] for k in ("settled_episodes", "settled_days", "days_covered",
+                                                 "central_fills", "capped_episodes")}
+    out["by_series"] = s["by_series"]
+    out["daily"] = s["daily"]
+    first = [d for d in (_as_dt(e.get("join_ts")) for e in episodes or []) if d is not None]
+    out["from"] = _iso(min(first)) if first else None
+    out["to"] = _iso(max(first)) if first else None
+    return out
+
+
+def mark_no_corrected_data(out: dict[str, Any]) -> None:
+    """Only legacy episodes in the window: the headline has no corrected data, so its numbers are null."""
+    for name in ("headline", "headline_zero_fee"):
+        h = out[name]
+        for k in ("pnl", "roi"):
+            h[k] = {"lo": None, "mid": None, "hi": None, "ci90": None}
+        h["fill_rate"] = {"lo": None, "mid": None, "hi": None}
+        for k in ("peak_capital", "peak_held_capital", "return_on_held", "break_even_win_rate",
+                  "observed_win_rate"):
+            h[k] = None
+        h["first_fill_per_market"] = {"cost": None, "pnl": None, "roi": None, "markets": 0}
+        h["headline_status"] = NO_CORRECTED_DATA
+        h["ci_reliable"] = False
+    out["status"]["headline_status"] = NO_CORRECTED_DATA
+    out["status"]["too_early"] = True
+
+
+# --------------------------------------------------------------------------
 # 2A-3 wave 2: interval variants (each cadence's own episodes; paired comparison with the baseline)
 # --------------------------------------------------------------------------
 BASELINE_INTERVAL = 10
@@ -885,5 +935,5 @@ _EPS = timedelta(seconds=1)          # an event seen exactly at `top` still coun
 __all__ = [
     "CAVEATS", "fill_scenarios", "maker_fee", "episode_pnl", "score_episode",
     "summarize", "empty_summary", "by_event_day", "day_stats", "reliability_note",
-    "empty_arb", "arb_merge", "arb_view", "variant_blocks",
+    "empty_arb", "arb_merge", "arb_view", "variant_blocks", "legacy_block", "mark_no_corrected_data",
 ]

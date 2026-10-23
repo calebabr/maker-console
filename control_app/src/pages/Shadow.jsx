@@ -340,6 +340,49 @@ function ArbSection({ arb, period }) {
   );
 }
 
+const DASH = '-';
+const lUsd = (v) => (typeof v === 'number' ? money(v, { sign: true }) : DASH);
+const lRoi = (v) => (typeof v === 'number' ? pct(v, { sign: true, digits: 1 }) : DASH);
+const lRate = (v) => (typeof v === 'number' ? pct(v, { sign: false, digits: 1 }) : DASH);
+const lMoney = (v) => (typeof v === 'number' ? money(v) : DASH);
+const lDay = (t) => (typeof t === 'string' && t.length >= 10 ? t.slice(0, 10) : DASH);
+const LEGACY_BANNER = 'legacy, uncapped, not comparable';
+
+// Episodes stored before the caps were applied at creation. Never mixed into the headline.
+function LegacyCard({ legacy }) {
+  if (!legacy) return null;
+  const h = legacy.headline || {};
+  const st = legacy.status || {};
+  const ff = h.first_fill_per_market;
+  const mid = (r) => (r ? r.mid : null);
+  return (
+    <section className="card sh-legacy" data-testid="legacy-card">
+      <details>
+        <summary>
+          <span className="card-title">Legacy episodes (before the fix)</span>
+          <span className="sh-legacy-banner" data-testid="legacy-banner">{legacy.banner || LEGACY_BANNER}</span>
+        </summary>
+        <p className="hint">
+          {legacy.episodes ?? DASH} episodes, {lDay(legacy.from)} to {lDay(legacy.to)}. Shown for reference only; they
+          are not part of the headline above.
+        </p>
+        <dl className="stats" data-testid="legacy-stats">
+          <Stat label="Estimated P&L, middle">{lUsd(mid(h.pnl))}</Stat>
+          <Stat label="Estimated ROI, middle">{lRoi(mid(h.roi))}</Stat>
+          <Stat label="Estimated fill rate, middle">{lRate(mid(h.fill_rate))}</Stat>
+          <Stat label="Peak held capital">{lMoney(h.peak_held_capital)}</Stat>
+          <Stat label="Peak resting bids">{lMoney(h.peak_capital)}</Stat>
+          <Stat label="Break-even win rate">{lRate(h.break_even_win_rate)}</Stat>
+          <Stat label="Observed win rate">{lRate(h.observed_win_rate)}</Stat>
+          <Stat label="First fill per market">{ff ? `${lRoi(ff.roi)} on ${lMoney(ff.cost)} (${ff.markets ?? DASH} markets)` : DASH}</Stat>
+          <Stat label="Settled episodes">{st.settled_episodes ?? DASH}</Stat>
+          <Stat label="Days with fills">{st.days_covered ?? DASH}</Stat>
+        </dl>
+      </details>
+    </section>
+  );
+}
+
 export default function Shadow() {
   const periods = useResource(() => api.getPeriods(), '/api/periods');
   const [periodSel, setPeriodSel] = useState(null); // null = the current period
@@ -364,6 +407,7 @@ export default function Shadow() {
   const st = (data && data.status) || {};
   const h = data && (zeroFee && data.headline_zero_fee ? data.headline_zero_fee : data.headline);
   const tooEarlyNew = !!(h && (h.headline_status === 'too_early' || (!h.headline_status && st.headline_status === 'too_early')));
+  const noCorrected = !!(data && ((h && h.headline_status === 'no_corrected_data') || st.headline_status === 'no_corrected_data'));
   const caveats = data && Array.isArray(data.caveats) && data.caveats.length ? data.caveats : CAVEATS;
 
   return (
@@ -431,7 +475,11 @@ export default function Shadow() {
                 {st.truncated && <p className="hint">Older episodes were left out of this estimate to keep it fast.</p>}
               </Card>
 
-              {!h || (!tooEarlyNew && st.too_early) ? (
+              {noCorrected ? (
+                <div className="notice notice-info" role="status" data-testid="no-corrected">
+                  No corrected data yet for this period
+                </div>
+              ) : !h || (!tooEarlyNew && st.too_early) ? (
                 <div className="notice notice-info" role="status">
                   Too early to estimate. The range needs more days and settled episodes before the figures mean much.
                 </div>
@@ -477,6 +525,7 @@ export default function Shadow() {
                   </Card>
                 </>
               )}
+              <LegacyCard legacy={data.legacy} />
               <VariantSection enabled={data.variants_enabled} variants={data.variants} compare={data.variant_compare} />
               <EventDays days={data.by_event_day} stats={data.day_stats} note={data.reliability_note} />
               <ArbSection arb={data.arb} period={data.period} />

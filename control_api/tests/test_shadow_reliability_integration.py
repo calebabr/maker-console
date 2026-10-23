@@ -36,7 +36,8 @@ def _arm(env, monkeypatch, md, strategy=None):
 
 def _ep(i, join, *, result="yes", fill=5.0, price=0.9, capped=False, count=10.0):
     close = join + timedelta(hours=10)
-    return {"ep_id": f"rie{i}", "env": "prod", "ticker": f"KXDEMOA-R{i}", "series": "KXDEMOA", "side": "yes",
+    return {"methodology": 2,
+            "ep_id": f"rie{i}", "env": "prod", "ticker": f"KXDEMOA-R{i}", "series": "KXDEMOA", "side": "yes",
             "book_side": "bid", "price": price, "order_price": price, "count": count, "cost": count * price,
             "cell": ["a"], "close_time": close, "join_ts": join, "last_seen_ts": join,
             "end_ts": join + timedelta(hours=1), "end_reason": "cancel", "trades_read": True,
@@ -121,6 +122,7 @@ async def test_shadow_capital_from_the_api_drives_the_caps(env, monkeypatch):
     r = _arm(env, monkeypatch, md)
     now = datetime.now(UTC)
     await env.store.shadow_upsert_episodes([{
+        "methodology": 2,
         "ep_id": "held-api", "env": "prod", "ticker": "KXDEMOA-26OCT17-B9", "series": "KXDEMOA", "side": "yes",
         "book_side": "bid", "price": 0.5, "order_price": 0.5, "count": 20, "cost": 10.0,
         "join_ts": now - timedelta(hours=2), "end_ts": now - timedelta(hours=1), "end_reason": "cancel",
@@ -142,7 +144,8 @@ async def test_capped_cycle_stores_a_capped_episode_that_is_never_scored(env, mo
     r = _arm(env, monkeypatch, live_md())
     r.cloud["shadow_capital"] = 20                                  # ceiling max_open_frac x 20
     now = datetime.now(UTC)
-    held = {"ep_id": "held1", "env": "prod", "ticker": "KXDEMOA-26OCT17-B9", "series": "KXDEMOA", "side": "yes",
+    held = {"methodology": 2,
+            "ep_id": "held1", "env": "prod", "ticker": "KXDEMOA-26OCT17-B9", "series": "KXDEMOA", "side": "yes",
             "book_side": "bid", "price": 0.5, "order_price": 0.5, "count": 20, "cost": 10.0,
             "join_ts": now - timedelta(hours=2), "end_ts": now - timedelta(hours=1), "end_reason": "cancel",
             "trades_read": True, "result": None, "fill": {"lo": 20.0, "mid": 20.0, "hi": 20.0},

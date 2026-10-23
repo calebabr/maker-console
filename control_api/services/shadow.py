@@ -57,7 +57,8 @@ SUMMARY_FIELDS = ("result", "fill", "price", "count", "cost", "side", "settled_t
                   "close_time", "series", "cell",
                   # 2A-3: caps (F1), held capital (F5), fee schedule (F7), first fill per market (F1)
                   "capped", "through", "through_ts", "fee_mode", "ticker",
-                  "interval")                       # 2A-3 wave 2: the baseline summary keeps interval 10 only
+                  "interval",                       # 2A-3 wave 2: the baseline summary keeps interval 10 only
+                  "methodology")                    # hotfix: the headline uses methodology-2 episodes only
 SETTLED_STATUSES = ("settled", "finalized", "determined")
 SHADOW_SUMMARY_DAYS = 30
 SHADOW_STORE_TIMEOUT_S = 10.0
@@ -87,6 +88,12 @@ FEE_SCHEDULE_MAX_RULES = 200
 SHADOW_LIMITS_PATH = Path(__file__).resolve().parents[1] / "data" / "shadow_limits.json"
 SHADOW_LIMITS_ENV = "SHADOW_LIMITS_PATH"
 SHADOW_LIMITS_MAX_BYTES = 4 * 1024
+# hotfix (legacy episodes): episodes created by the capped 2A-3 code carry methodology 2; none = 1 (legacy)
+METHODOLOGY = 2
+LEGACY_METHODOLOGY = 1
+# The 2A-3 (capped) backend finished deploying at this time (release run 39865501268, deploy-backend): an
+# episode with no stored methodology that joined at or after it was created by the capped code (owner, no backfill).
+METHODOLOGY2_SINCE = datetime(2026, 10, 22, 22, 33, 41, tzinfo=timezone.utc)
 # 2A-3 wave 2: interval variants (off unless env SHADOW_VARIANTS=true; cadences from cloud shadow_intervals)
 SHADOW_VARIANTS_ENV = "SHADOW_VARIANTS"
 BASELINE_INTERVAL = 10               # the existing shadow cycle; its episodes and passes carry interval 10
@@ -818,7 +825,7 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
             "level_min": level, "level_last": level, "n_obs": 1, "trades_read": False, "traded_vol": 0.0,
             "through": False, "through_ts": None, "through_vol": None, "truncated": False, "fill": None,
             "result": None, "settled_ts": None, "pnl": None, "standin": bool(inp.standin), "ts": now,
-            "capped": False, "cap_reason": None, "interval": int(inp.interval),
+            "capped": False, "cap_reason": None, "interval": int(inp.interval), "methodology": METHODOLOGY,
             "fee_mode": fee_mode_for(f["ticker"], sched)}
         if not ok:                                              # F1: refused by a limit: recorded, never scored
             doc.update({"capped": True, "cap_reason": reason_of.get(f["series"], "run_budget"),
@@ -1008,18 +1015,41 @@ def summary_intervals(cloud: Any) -> list[int] | None:
     return variant_intervals(cloud) if variants_enabled() else None
 
 
+def methodology_of(doc: Any) -> int:
+    """An episode's methodology: a stored 2 is 2. Otherwise (no stored value) it is 2 when the bid joined at or
+    after METHODOLOGY2_SINCE (the capped code was live) and 1 (legacy) before it. The store fills a missing field
+    with 1 on read and the code only ever writes 2, so a 1 (or any other value) is read as "not stored"."""
+    v = doc.get("methodology") if isinstance(doc, dict) else None
+    if not isinstance(v, bool) and v == METHODOLOGY:
+        return METHODOLOGY
+    j = ctsvc.to_utc(doc.get("join_ts")) if isinstance(doc, dict) else None
+    return METHODOLOGY if j is not None and j >= METHODOLOGY2_SINCE else LEGACY_METHODOLOGY
+
+
 def build_summary(episodes: Iterable[dict], passes: Iterable[dict], now: datetime, *, enabled: bool = True,
                   standin: bool = False, intervals: list[int] | None = None) -> dict:
-    """The served summary: the headline from baseline (interval 10) episodes and passes only, exactly as before;
-    with variants on, `variants` (one row per cadence) and `variant_compare` (each variant vs the baseline)."""
+    """The served summary. The headline (and every existing field, `days_covered` and the too-early gate
+    included) comes from baseline (interval 10) episodes of methodology 2 only, plus the baseline passes.
+    Legacy episodes (methodology 1: stored before the caps, so stacked and uncapped) are summarized apart under
+    `legacy` with `legacy_banner`; when there is no corrected episode at all but legacy ones exist, the headline
+    says `headline_status: "no_corrected_data"` with null numbers. With variants on, `variants` and
+    `variant_compare` (corrected episodes only)."""
     eps = [e for e in (episodes or []) if isinstance(e, dict)]
     plist = [p for p in (passes or []) if isinstance(p, dict)]
-    base = [e for e in eps if interval_of(e) == BASELINE_INTERVAL]
+    corrected = [e for e in eps if methodology_of(e) == METHODOLOGY]
+    legacy = [e for e in eps if methodology_of(e) != METHODOLOGY]
+    base = [e for e in corrected if interval_of(e) == BASELINE_INTERVAL]
     bpasses = [p for p in plist if interval_of(p) == BASELINE_INTERVAL]
     out = sm.summarize(base, now, passes=bpasses, enabled=enabled, standin=standin)
+    out["methodology"] = METHODOLOGY
+    if legacy:
+        out["legacy"] = sm.legacy_block(legacy, now)
+        out["legacy_banner"] = sm.LEGACY_BANNER
+        if not corrected:
+            sm.mark_no_corrected_data(out)
     out["variants_enabled"] = intervals is not None
     if intervals is not None:
-        out["variants"], out["variant_compare"] = sm.variant_blocks(eps, now, intervals, passes=plist,
+        out["variants"], out["variant_compare"] = sm.variant_blocks(corrected, now, intervals, passes=plist,
                                                                    interval_of=interval_of)
     return out
 

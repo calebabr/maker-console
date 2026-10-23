@@ -14,7 +14,8 @@ UTC = timezone.utc
 
 def _ep(i, join, *, result="yes", fill=5.0, price=0.9):
     close = join + timedelta(hours=10)
-    return {"ep_id": f"pe{i}", "env": "prod", "ticker": f"KXDEMOA-P{i}", "series": "KXDEMOA", "side": "yes",
+    return {"methodology": 2,
+            "ep_id": f"pe{i}", "env": "prod", "ticker": f"KXDEMOA-P{i}", "series": "KXDEMOA", "side": "yes",
             "book_side": "bid", "price": price, "order_price": price, "count": 10.0, "cost": 10 * price,
             "cell": ["a"], "close_time": close, "join_ts": join, "last_seen_ts": join, "end_ts": join + timedelta(hours=1),
             "end_reason": "cancel", "trades_read": True, "fill": {"lo": fill, "mid": fill, "hi": fill},
