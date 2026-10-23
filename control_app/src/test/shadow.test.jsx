@@ -153,4 +153,61 @@ describe('Shadow estimate page', () => {
     expect(block).toHaveTextContent('no data');
     expect(block).not.toHaveTextContent('0.0%');
   });
+
+  const LEGACY = (over = {}) => ({
+    banner: 'legacy, uncapped, not comparable',
+    episodes: 300,
+    from: '2026-10-18T10:00:00Z',
+    to: '2026-10-22T21:00:00Z',
+    headline: {
+      pnl: R(50, 94.26, 140), roi: R(0.05, 0.1035, 0.15), fill_rate: R(0.2, 0.3, 0.4),
+      peak_capital: 900, peak_held_capital: 773.9, break_even_win_rate: 0.9, observed_win_rate: 1,
+      first_fill_per_market: { cost: 197, pnl: 15, roi: 0.078, markets: 22 },
+    },
+    status: { settled_episodes: 250, days_covered: 4 },
+    ...over,
+  });
+
+  it('keeps legacy numbers out of the headline and shows them in a separate collapsed card', async () => {
+    base(SUMMARY({ headline: NEW_H(), legacy_banner: 'legacy, uncapped, not comparable', legacy: LEGACY() }));
+    renderApp('/shadow');
+    const card = await screen.findByTestId('legacy-card');
+    expect(card).toHaveTextContent('Legacy episodes (before the fix)');
+    expect(screen.getByTestId('legacy-banner')).toHaveTextContent('legacy, uncapped, not comparable');
+    expect(card.querySelector('details')).not.toHaveAttribute('open');
+    expect(screen.getByTestId('legacy-stats')).toHaveTextContent('94.26');
+    expect(screen.getByTestId('headline-block')).not.toHaveTextContent('94.26');
+  });
+
+  it('shows - never 0 for null legacy numbers', async () => {
+    const l = LEGACY({ headline: { pnl: R(null, null, null), roi: R(null, null, null), fill_rate: R(null, null, null) } });
+    base(SUMMARY({ headline: NEW_H(), legacy: l }));
+    renderApp('/shadow');
+    const stats = await screen.findByTestId('legacy-stats');
+    expect(stats).toHaveTextContent('-');
+    expect(stats).not.toHaveTextContent('$0');
+    expect(stats).not.toHaveTextContent('0.0%');
+  });
+
+  it('shows no legacy card when there is no legacy block', async () => {
+    base(SUMMARY({ headline: NEW_H(), legacy: null }));
+    renderApp('/shadow');
+    await screen.findByTestId('honesty-stats');
+    expect(screen.queryByTestId('legacy-card')).toBeNull();
+  });
+
+  it('shows the no-corrected-data state, no headline figures, and still the legacy card', async () => {
+    const nulls = { pnl: R(null, null, null, null), roi: R(null, null, null, null), fill_rate: R(null, null, null),
+      headline_status: 'no_corrected_data', peak_capital: null, peak_held_capital: null };
+    base(SUMMARY({
+      headline: nulls, headline_zero_fee: nulls,
+      status: { ...SUMMARY().status, headline_status: 'no_corrected_data', too_early: true },
+      legacy: LEGACY(),
+    }));
+    renderApp('/shadow');
+    expect(await screen.findByTestId('no-corrected')).toHaveTextContent('No corrected data yet for this period');
+    expect(screen.queryByTestId('headline-block')).toBeNull();
+    expect(screen.queryByText(/too early to estimate/i)).toBeNull();
+    expect(screen.getByTestId('legacy-card')).toBeInTheDocument();
+  });
 });

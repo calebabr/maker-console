@@ -16,3 +16,7 @@
 .sh-notes li { margin-bottom: 6px; }
 
 .sh-grey { opacity: 0.55; }
+
+.sh-legacy { opacity: 0.85; }
+.sh-legacy summary { cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.sh-legacy-banner { color: var(--muted); font-size: 0.75rem; }
