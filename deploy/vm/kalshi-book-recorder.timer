@@ -1,0 +1,13 @@
+# /etc/systemd/system/kalshi-book-recorder.timer
+# Runs the recorder every 5 minutes (change OnCalendar to change the interval).
+[Unit]
+Description=Run the order-book recorder every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=15s
+Persistent=false
+RandomizedDelaySec=10
+
+[Install]
+WantedBy=timers.target
