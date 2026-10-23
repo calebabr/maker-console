@@ -14,6 +14,11 @@ import CollapsibleList from './CollapsibleList.jsx';
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const when = (v) => (v ? dateTime(v) : 'Start of data');
 
+const pad2 = (n) => String(n).padStart(2, '0');
+/** A Date as the local "YYYY-MM-DDTHH:mm" string a datetime-local input uses. */
+const localInput = (d) =>
+  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+
 function Row({ label, children, testId }) {
   return (
     <div className="sum-row" data-testid={testId}>
@@ -76,6 +81,8 @@ export default function PeriodsCard() {
   const [kind, setKind] = useState('deposit');
   const [amount, setAmount] = useState('');
   const [flowNote, setFlowNote] = useState('');
+  const [flowWhen, setFlowWhen] = useState(() => localInput(new Date()));
+  const [whenTouched, setWhenTouched] = useState(false);
   const [busy, setBusy] = useState(null);
   const [formError, setFormError] = useState(null);
 
@@ -141,22 +148,32 @@ export default function PeriodsCard() {
     }
   }
 
+  // Only a time the owner changed is sent; otherwise the server stamps "now" as before.
+  const chosen = whenTouched && flowWhen ? new Date(flowWhen) : null;
+  const chosenValid = chosen && !Number.isNaN(chosen.getTime());
+  const futureTime = !!chosenValid && chosen.getTime() > Date.now();
+  const curPeriod = list.find((p) => p.current);
+  const inCurrent = !!chosenValid && !futureTime && !!curPeriod && (!curPeriod.started_at || chosen.getTime() >= new Date(curPeriod.started_at).getTime());
+
   async function addFlow(e) {
     e.preventDefault();
     const amt = Number(amount);
-    if (!(amt > 0) || busy) return;
+    if (!(amt > 0) || busy || futureTime) return;
     const body = { kind, amount: amt };
+    if (chosenValid) body.ts = chosen.toISOString();
     if (flowNote.trim()) body.note = flowNote.trim();
     const r = await run(
       'Add Cash Flow',
       `Record a ${kind}?`,
-      <p>{kind === 'deposit' ? 'Money added to' : 'Money taken out of'} the account: <strong>{formatMoney(amt)}</strong>. It is recorded for context and never changes P&amp;L.</p>,
+      <p>{kind === 'deposit' ? 'Money added to' : 'Money taken out of'} the account: <strong>{formatMoney(amt)}</strong>{chosenValid ? <> dated <strong>{dateTime(chosen.toISOString())}</strong></> : null}. It is recorded for context and never changes P&amp;L.</p>,
       (code) => api.addCashFlow(body, code),
       'Cash Flow Recorded',
     );
     if (r) {
       setAmount('');
       setFlowNote('');
+      setWhenTouched(false);
+      setFlowWhen(localInput(new Date()));
     }
   }
 
@@ -250,9 +267,23 @@ export default function PeriodsCard() {
               <input id="flow-amount" type="number" inputMode="decimal" min="0.01" max="100000" step="any" value={amount} onChange={(e) => setAmount(e.target.value)} />
             </div>
           </div>
+          <label htmlFor="flow-when">When it happened</label>
+          <input
+            id="flow-when"
+            type="datetime-local"
+            value={flowWhen}
+            max={localInput(new Date())}
+            onChange={(e) => {
+              setFlowWhen(e.target.value);
+              setWhenTouched(true);
+            }}
+          />
+          <p className="hint">Set the real date for past deposits</p>
+          {futureTime && <p className="notice notice-error" role="alert" data-testid="flow-when-future">That time is in the future. Pick now or an earlier time.</p>}
+          {inCurrent && whenTouched && <p className="hint" data-testid="flow-when-current">This changes the capital base of the current period</p>}
           <label htmlFor="flow-note">Note (Optional)</label>
           <input id="flow-note" type="text" maxLength={200} value={flowNote} onChange={(e) => setFlowNote(e.target.value)} />
-          <button type="submit" className="btn block" disabled={!(Number(amount) > 0) || !!busy}>
+          <button type="submit" className="btn block" disabled={!(Number(amount) > 0) || !!busy || futureTime}>
             {busy === 'Add Cash Flow' ? 'Saving…' : <><IconLock /> Add Entry</>}
           </button>
         </form>
