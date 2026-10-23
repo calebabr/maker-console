@@ -328,3 +328,19 @@ async def test_shadow_cloud_settings_validation():
         with pytest.raises(ValueError):
             ka.validate_cloud(bad)
     assert S.DEFAULT_CLOUD_SETTINGS["shadow_capital"] == 150 and S.DEFAULT_CLOUD_SETTINGS["shadow_intervals"] == [10]
+
+
+async def test_methodology_defaults_to_1_and_is_kept(store):
+    await store.shadow_upsert_episodes([ep(1), ep(2, methodology=2)])
+    await store.shadow_upsert_episodes([{"ep_id": "ep2", "n_obs": 3}])
+    got = {d["ep_id"]: d for d in await store.shadow_recent(5)}
+    assert got["ep1"]["methodology"] == 1 and got["ep2"]["methodology"] == 2
+    assert all("methodology" not in p for p in await store.shadow_open_episodes(fields=["price"]))
+    q = {d["ep_id"]: d["methodology"] for d in await store.shadow_open_episodes(fields=["methodology"])}
+    assert q == {"ep1": 1, "ep2": 2}
+
+
+@pytest.mark.parametrize("bad", [0, 3, True, "2", 1.5])
+async def test_bad_methodology_rejected(store, bad):
+    with pytest.raises(ValueError):
+        await store.shadow_upsert_episodes([ep(1, methodology=bad)])
