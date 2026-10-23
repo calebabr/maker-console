@@ -1,0 +1,43 @@
+# /etc/systemd/system/kalshi-book-recorder.service
+# One snapshot pass of public order-book data (keyless, GET-only). Started by kalshi-book-recorder.timer.
+# Check the exact flags with: python3 scripts/book_recorder.py --help  (edit ExecStart if they differ).
+[Unit]
+Description=Public order-book snapshot recorder (one pass)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=recorder
+Group=recorder
+WorkingDirectory=/opt/book-recorder
+# No EnvironmentFile and no secrets: the recorder needs none.
+ExecStart=/usr/bin/python3 /opt/book-recorder/scripts/book_recorder.py --once --series-file /etc/book-recorder/series.txt --out /var/lib/book-recorder
+TimeoutStartSec=240
+
+# ---- Hardening ----
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/book-recorder
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0027

@@ -42,6 +42,12 @@
       "path": ".github/workflows/release.yml",
       "fingerprint": "85e495060cc0",
       "reason": "Intentional defensive masking. The step builds a base64 authorization header from GH_TOKEN, which GitHub does not mask on its own because it is a derived value, and masks it before the git push so it can never appear in a log. Nothing here disables workflow commands (no stop-commands) and no user-controlled text is echoed into the command; the value comes from the workflow token only."
+    },
+    {
+      "rule": "python.lang.security.audit.insecure-file-permissions.insecure-file-permissions",
+      "path": "scripts/book_recorder.py",
+      "fingerprint": "797778d5e18b",
+      "reason": "Deliberate: the recorder's data directory is 0750 (owner full, group read and traverse, no access for others) so the owner's weekly copy-back can read it through the dedicated recorder group; files are 0640 and the process umask is 027. The rule flags any mode above 0644 on a directory; no world access is granted."
     }
   ]
 }
