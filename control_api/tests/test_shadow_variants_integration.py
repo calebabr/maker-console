@@ -60,7 +60,8 @@ async def _summary(env, q=""):
 def _pair_ep(i, iv, d, *, now, result="no", fill=6.0):
     join = now - timedelta(days=d + 2, hours=i)
     close = join + timedelta(hours=20)
-    return {"ep_id": f"vi{iv}-{d}-{i}", "env": "prod", "ticker": f"KXDEMOA-V{d}-{i}", "series": "KXDEMOA", "side": "no",
+    return {"methodology": 2,
+            "ep_id": f"vi{iv}-{d}-{i}", "env": "prod", "ticker": f"KXDEMOA-V{d}-{i}", "series": "KXDEMOA", "side": "no",
             "book_side": "bid", "price": 0.9, "order_price": 0.9, "count": 10.0, "cost": 9.0, "cell": ["c"],
             "join_ts": join, "end_ts": join + timedelta(hours=1), "end_reason": "cancel", "close_time": close,
             "settled_ts": close, "trades_read": True, "result": result, "interval": iv, "capped": False,

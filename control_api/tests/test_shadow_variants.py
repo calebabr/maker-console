@@ -196,6 +196,7 @@ async def test_runner_variant_has_its_own_episodes_position_and_summary_rows(set
     r.cloud["shadow_capital"] = 20
     now = datetime.now(UTC)
     await store.shadow_upsert_episodes([{                      # a large held BASELINE position
+        "methodology": 2,
         "ep_id": "held-base", "env": "prod", "ticker": "KXDEMOA-26OCT17-B9", "series": "KXDEMOA", "side": "yes",
         "book_side": "bid", "price": 0.5, "order_price": 0.5, "count": 20, "cost": 10.0,
         "join_ts": now - timedelta(hours=2), "end_ts": now - timedelta(hours=1), "end_reason": "cancel",
@@ -229,7 +230,7 @@ async def test_runner_variant_has_its_own_episodes_position_and_summary_rows(set
 # ================================================================ summary blocks: math
 def _ep(i, *, iv, day, result="no", price=0.9, fill=6.0):
     base = datetime(2026, 10, 1, 8, 0, tzinfo=UTC) + timedelta(days=day)
-    return {"ep_id": f"{iv}-{i}", "ticker": f"KXDEMOA-{day}-{i}", "series": "KXDEMOA", "side": "no",
+    return {"methodology": 2, "ep_id": f"{iv}-{i}", "ticker": f"KXDEMOA-{day}-{i}", "series": "KXDEMOA", "side": "no",
             "result": result, "price": price, "count": 10.0, "cost": 10 * price, "cell": ["c"],
             "join_ts": base, "end_ts": base + timedelta(hours=1), "close_time": base + timedelta(hours=20),
             "settled_ts": base + timedelta(hours=20), "fill": {"lo": fill, "mid": fill, "hi": fill}, "interval": iv}

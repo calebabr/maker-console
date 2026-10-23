@@ -157,7 +157,8 @@ def test_summary_top_level_keys_match_contract():
                       # additive (Sprint 2A-2 S2/S3); the contract fields above are unchanged
                       "by_event_day", "day_stats", "reliability_note", "arb",
                       # additive (Sprint 2A-3)
-                      "day_basis", "fee_modes", "variants_enabled", "variants", "variant_compare"}
+                      "day_basis", "fee_modes", "variants_enabled", "variants", "variant_compare",
+                      "methodology", "legacy", "legacy_banner"}
     assert set(s["status"]) == {"days_covered", "settled_episodes", "central_fills", "too_early",
                                 "last_pass_ts", "pass_ok_pct", "truncated",
                                 "headline_status", "capped_episodes", "settled_days"}
