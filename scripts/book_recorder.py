@@ -31,6 +31,8 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import math
+import os
 import random
 import re
 import shutil
@@ -49,21 +51,25 @@ BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 MAX_RPS = 5.0
 DEFAULT_RPS = 4.0
 MAX_ATTEMPTS = 6
+MAX_RETRY_AFTER = 300.0  # seconds; a server-supplied Retry-After is never honoured beyond this
+FILE_MODE = 0o640        # new output files: owner read/write, group read (for the weekly copy-back)
+DIR_MODE = 0o750
 PAGE_LIMIT = 1000
 LEVELS = 3
 USER_AGENT = "book-recorder/1 (read-only public data; GET only)"
 
 TICKER_RE = r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}"
-SERIES_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-TICKER_OK = re.compile(rf"^{TICKER_RE}$")
+# Always used with fullmatch: `$` would also match before a trailing newline.
+SERIES_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+TICKER_OK = re.compile(TICKER_RE)
 # The only paths this program can ever request.
 ALLOWED_PATH_RES = (
-    re.compile(r"^/markets$"),
-    re.compile(rf"^/markets/{TICKER_RE}/orderbook$"),
-    re.compile(r"^/series$"),
-    re.compile(r"^/series/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"),
+    re.compile(r"/markets"),
+    re.compile(rf"/markets/{TICKER_RE}/orderbook"),
+    re.compile(r"/series"),
+    re.compile(r"/series/[A-Za-z0-9][A-Za-z0-9_-]{0,63}"),
 )
-FILE_RE = re.compile(r"^book-\d{8}T\d{2}\.jsonl\.gz$")
+FILE_RE = re.compile(r"book-\d{8}T\d{2}\.jsonl\.gz")
 
 
 class FetchError(Exception):
@@ -115,6 +121,19 @@ def _urlopen(url: str) -> tuple[int, dict, bytes]:
         return e.code, dict(e.headers or {}), b""
 
 
+def retry_delay(headers: dict, attempt: int) -> float:
+    """Backoff seconds: exponential with jitter; Retry-After is honoured only when it is a finite positive
+    number and never beyond MAX_RETRY_AFTER."""
+    try:
+        ra = float(headers.get("Retry-After", 0))
+    except (TypeError, ValueError, AttributeError):
+        ra = 0.0
+    if not (math.isfinite(ra) and ra > 0):
+        ra = 0.0
+    ra = min(ra, MAX_RETRY_AFTER)
+    return max(ra, min(60.0, 1.5 * 2 ** attempt)) * (0.75 + 0.5 * random.random())
+
+
 class Client:
     def __init__(self, rps: float = DEFAULT_RPS, opener: Callable[[str], tuple[int, dict, bytes]] | None = None,
                  sleep: Callable[[float], None] = time.sleep, stop: threading.Event | None = None,
@@ -128,7 +147,7 @@ class Client:
 
     @staticmethod
     def allowed(path: str) -> bool:
-        return any(r.match(path) for r in ALLOWED_PATH_RES)
+        return isinstance(path, str) and any(r.fullmatch(path) for r in ALLOWED_PATH_RES)
 
     def get(self, path: str, params: dict | None = None) -> dict:
         if not self.allowed(path):
@@ -147,7 +166,10 @@ class Client:
                 status, headers, body = 0, {}, str(e).encode()
             if status == 200:
                 try:
-                    return json.loads(body)
+                    parsed = json.loads(body)
+                    if isinstance(parsed, dict):
+                        return parsed
+                    last = "json is not an object"
                 except ValueError:
                     last = "bad json"
             elif status == 404:
@@ -157,11 +179,7 @@ class Client:
             else:
                 raise FetchError(f"{path} http {status}")
             self.retries += 1
-            try:
-                ra = float(headers.get("Retry-After", 0))
-            except (TypeError, ValueError):
-                ra = 0.0
-            self._sleep(max(ra, min(60.0, 1.5 * 2 ** attempt)) * (0.75 + 0.5 * random.random()))
+            self._sleep(retry_delay(headers, attempt))
         raise FetchError(f"{path} failed after {MAX_ATTEMPTS} attempts ({last})")
 
 
@@ -172,7 +190,7 @@ def read_series_file(path: Path) -> list[str]:
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        if not SERIES_RE.match(line):
+        if not SERIES_RE.fullmatch(line):
             raise ValueError(f"bad series entry in {path}: {line!r}")
         if line.upper() not in out:
             out.append(line.upper())
@@ -183,7 +201,8 @@ def read_series_file(path: Path) -> list[str]:
 
 def _levels(raw) -> list[list[str]]:
     """API lists are ascending by price (best bid last); return the best LEVELS, best first."""
-    items = [[str(p), str(s)] for p, s in (raw or []) if p is not None]
+    items = [[str(e[0]), str(e[1])] for e in (raw or []) if isinstance(e, (list, tuple)) and len(e) == 2
+             and e[0] is not None]
     return list(reversed(items))[:LEVELS]
 
 
@@ -208,7 +227,7 @@ def open_markets(client: Client, series: str, cap: int) -> list[dict]:
     cursor = ""
     while True:
         j = client.get("/markets", {"series_ticker": series, "status": "open", "limit": PAGE_LIMIT, "cursor": cursor})
-        out += [m for m in (j.get("markets") or []) if TICKER_OK.match(str(m.get("ticker", "")))]
+        out += [m for m in (j.get("markets") or []) if isinstance(m, dict) and TICKER_OK.fullmatch(str(m.get("ticker", "")))]
         cursor = j.get("cursor") or ""
         if not cursor or not j.get("markets") or len(out) >= cap:
             break
@@ -243,11 +262,11 @@ def snapshot_pass(client: Client, series_list: list[str], now: Callable[[], floa
                     break
                 try:
                     book = client.get(f"/markets/{m['ticker']}/orderbook", {"depth": LEVELS})
-                except FetchError as e:
-                    stats["errors"] += 1
-                    log(f"orderbook {m['ticker']}: {e}")
+                    recs.append(make_record(m, book, s, snap, now()))
+                except (FetchError, ValueError, TypeError, AttributeError, KeyError) as e:
+                    stats["errors"] += 1  # one bad market never aborts the pass
+                    log(f"orderbook {m.get('ticker')!r}: {type(e).__name__}")
                     continue
-                recs.append(make_record(m, book, s, snap, now()))
             if stats["partial"]:
                 break
     except Stopped:
@@ -259,6 +278,16 @@ def snapshot_pass(client: Client, series_list: list[str], now: Callable[[], floa
 
 
 # ------------------------------------------------------------------------------------------ output
+def ensure_dir(out: Path) -> None:
+    """Create the output directory 0750 (a directory that already exists is left alone)."""
+    if not out.exists():
+        out.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+        try:
+            os.chmod(out, DIR_MODE)
+        except OSError:
+            pass
+
+
 def hourly_path(out: Path, epoch: float) -> Path:
     return out / f"book-{datetime.fromtimestamp(epoch, tz=timezone.utc).strftime('%Y%m%dT%H')}.jsonl.gz"
 
@@ -267,11 +296,16 @@ def write_records(out: Path, records: list[dict], epoch: float) -> Path | None:
     """Append one gzip member per pass to the hour's file (gzip members concatenate cleanly)."""
     if not records:
         return None
-    out.mkdir(parents=True, exist_ok=True)
+    ensure_dir(out)
     p = hourly_path(out, epoch)
     payload = ("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records)).encode("utf-8")
-    with open(p, "ab") as raw, gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=6) as gz:
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, FILE_MODE)  # the process umask can only tighten it
+    with os.fdopen(fd, "ab") as raw, gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=6) as gz:
         gz.write(payload)
+    try:
+        os.chmod(p, FILE_MODE)  # exact mode even under a looser umask
+    except OSError:
+        pass
     return p
 
 
@@ -294,7 +328,7 @@ def rotate(out: Path, max_bytes: int, keep: Path | None = None) -> list[str]:
 
 
 def free_ok(out: Path, min_free_bytes: int) -> bool:
-    out.mkdir(parents=True, exist_ok=True)
+    ensure_dir(out)
     return shutil.disk_usage(out).free >= min_free_bytes
 
 
@@ -371,4 +405,5 @@ def main(argv: list[str] | None = None, client: Client | None = None, sleep: Cal
 
 
 if __name__ == "__main__":
+    os.umask(0o027)  # new files default to 0640, directories to 0750 (no access for other users)
     raise SystemExit(main())

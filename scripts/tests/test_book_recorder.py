@@ -317,3 +317,126 @@ def test_all_requests_are_get_on_allowlisted_paths(tmp_path):
     assert api.calls
     assert all(br.Client.allowed(p) for p, _ in api.calls)
     assert all(not ({"key", "token", "signature"} & set(q)) for _, q in api.calls)
+
+
+# ------------------------------------------------------------------ security review fixes (R5 R6 R7, plus R8)
+import math  # noqa: E402
+import os  # noqa: E402
+import stat  # noqa: E402
+
+
+def test_retry_after_is_finite_positive_and_capped():
+    for bad in ("inf", "-inf", "nan", "-5", "0", "abc", ""):
+        d = br.retry_delay({"Retry-After": bad}, 0)
+        assert 0 < d <= 1.5 * 1.25 + 1e-9, bad
+    assert 75 <= br.retry_delay({"Retry-After": "100"}, 0) <= 125
+    assert br.retry_delay({"Retry-After": "1e9"}, 0) <= br.MAX_RETRY_AFTER * 1.25
+    sleeps = []
+    calls = []
+
+    def opener(url):
+        calls.append(url)
+        return (429, {"Retry-After": "inf"}, b"") if len(calls) == 1 else (200, {}, b"{}")
+
+    br.Client(opener=opener, sleep=sleeps.append, throttle=br.Throttle(5, sleep=lambda s: None)).get("/series")
+    assert sleeps and math.isfinite(sleeps[0]) and sleeps[0] <= 5
+
+
+def test_patterns_use_fullmatch_so_a_trailing_newline_is_rejected():
+    assert br.TICKER_OK.fullmatch("ABC") and not br.TICKER_OK.fullmatch("ABC\n")
+    assert br.SERIES_RE.fullmatch("ABC") and not br.SERIES_RE.fullmatch("ABC\n")
+    assert br.Client.allowed("/markets") and not br.Client.allowed("/markets\n")
+    assert not br.Client.allowed("/markets/ABC\n/orderbook") and not br.Client.allowed("/markets/ABC/orderbook\n")
+    assert not br.Client.allowed(None) and not br.Client.allowed(b"/markets")
+    with pytest.raises(ValueError):
+        client(FakeApi()).get("/markets\n")
+
+
+def test_series_file_entry_with_embedded_newline_characters_is_rejected(tmp_path):
+    p = tmp_path / "s.txt"
+    p.write_bytes(b"AAA\r\nBBB\x00\n")  # a NUL inside an entry must not be accepted
+    with pytest.raises(ValueError):
+        br.read_series_file(p)
+
+
+def test_bad_ticker_or_book_never_aborts_the_pass():
+    api = FakeApi()
+    api.add("AAA", 2)
+    api.markets["AAA"].append({"ticker": "ABC\n", "status": "active"})   # newline ticker from the API
+    good = api.markets["AAA"][0]["ticker"]
+    api.books[api.markets["AAA"][1]["ticker"]] = [1, 2, 3]               # book is a list, not an object
+    api.books[good] = {"orderbook_fp": {"yes_dollars": [["0.9", "1", "extra"], ["0.8", "2"]], "no_dollars": []}}
+    recs, stats = br.snapshot_pass(client(api), ["AAA"], now=lambda: NOW)
+    assert stats["records"] == len(recs) and not stats["partial"]
+    assert [r["ticker"] for r in recs] == [good] or stats["errors"] >= 1
+    assert all("\n" not in r["ticker"] for r in recs)
+    # the 3-item level is skipped, the 2-item one is kept
+    assert recs[0]["yes_levels"] == [["0.8", "2"]]
+
+
+def test_non_object_json_is_retried_and_not_a_crash():
+    calls = []
+
+    def opener(url):
+        calls.append(url)
+        return 200, {}, (b"[1,2]" if len(calls) == 1 else b"{}")
+
+    c = br.Client(opener=opener, sleep=lambda s: None, throttle=br.Throttle(5, sleep=lambda s: None))
+    assert c.get("/series") == {} and c.retries == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+@pytest.mark.parametrize("umask", [0o000, 0o077])
+def test_output_modes_are_0640_files_and_0750_dir_whatever_the_umask(tmp_path, umask):
+    api = FakeApi()
+    api.add("AAA", 1)
+    out = tmp_path / "newdir" / "out"
+    old = os.umask(umask)
+    try:
+        br.main(["--once", "--series-file", str(write_series(tmp_path, "AAA\n")), "--out", str(out)],
+                client=client(api), now=lambda: NOW)
+    finally:
+        os.umask(old)
+    f = next(out.glob("book-*.jsonl.gz"))
+    assert stat.S_IMODE(f.stat().st_mode) == 0o640
+    assert stat.S_IMODE(out.stat().st_mode) == 0o750
+
+
+def test_main_block_sets_umask_027():
+    src = Path(br.__file__).read_text(encoding="utf-8")
+    assert "os.umask(0o027)" in src.split('if __name__ == "__main__":')[1]
+
+
+def test_redirect_is_refused_against_a_real_local_server(monkeypatch):
+    import http.server
+    import threading
+
+    hits = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            if self.path.startswith("/series/redir"):
+                self.send_response(302)
+                self.send_header("Location", "/series/hit")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(br, "BASE_URL", f"http://127.0.0.1:{srv.server_address[1]}")
+        c = br.Client(sleep=lambda s: None, rps=5)
+        with pytest.raises(br.FetchError):
+            c.get("/series/redir")
+        assert hits == ["/series/redir"]   # the Location target was never requested
+    finally:
+        srv.shutdown()
+        srv.server_close()
