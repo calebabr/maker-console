@@ -129,7 +129,7 @@ SHADOW_SCORED_RESULTS = ("yes", "no")
 # Sprint 2A-3 additive episode fields. Old episodes lack them; reads fill the defaults (a partial write never
 # resets a stored value, so the defaults are applied on read only).
 SHADOW_EPISODE_DEFAULTS = {"through_vol": None, "capped": False, "cap_reason": None, "interval": 10,
-                           "fee_mode": None}
+                           "fee_mode": None, "methodology": 1}   # methodology 1 = legacy (uncapped), 2 = capped
 SHADOW_INTERVALS_ALLOWED = (5, 7, 10)
 SHADOW_CAP_REASON_MAX = 200
 
@@ -155,6 +155,10 @@ def _check_shadow_fields(out: dict) -> None:
             if not isinstance(out[k], str):
                 raise ValueError(f"{k} must be text or null")
             out[k] = out[k][:SHADOW_CAP_REASON_MAX]
+    if "methodology" in out:
+        m = out["methodology"]
+        if isinstance(m, bool) or not isinstance(m, int) or m not in (1, 2):
+            raise ValueError("methodology must be 1 or 2")
     if "interval" in out:
         iv = out["interval"]
         if isinstance(iv, bool) or not isinstance(iv, int) or not 1 <= iv <= 1440:
