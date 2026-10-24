@@ -97,3 +97,34 @@ def check_arb(op_cost: Any, op_series: Any, positions_exposure_by_series: Mappin
     if day + cost > day_cap + 1e-9:
         return False, f"day cap {day:.2f} + {cost:.2f} > {day_cap:.2f}"
     return True, "ok"
+
+
+# ---- opposite sets on one event (owner decision 2026-10-24). Kalshi nets opposite YES/NO positions in one market
+# into $1 pairs, so a YES set on an event that already holds an executed NO set (or the reverse) pays fees to hold
+# positions that hedge each other. Always on (no setting). Same-kind repeat sets stay governed by the caps above.
+OPPOSITE_KIND = {"YES": "NO", "NO": "YES"}
+HELD_PREFIXES = ("FILLED", "PARTIAL", "ERROR")   # sets that may hold positions ("FILLED (completed)" too;
+#                                                ERROR: an errored set may have left legs filled)
+
+
+def held_sets(docs: Iterable[Mapping[str, Any]] | None, mode: str) -> dict[str, set[str]]:
+    """{event: {"YES" and/or "NO"}} from stored arb opportunity docs of `mode` ("live" / "demo-execute") whose
+    `executed` starts with FILLED, PARTIAL or ERROR. log-only and skipped docs never count."""
+    out: dict[str, set[str]] = {}
+    for d in docs or []:
+        if not isinstance(d, Mapping) or d.get("mode") != mode:
+            continue
+        if not str(d.get("executed") or "").startswith(HELD_PREFIXES):
+            continue
+        ev, kind = d.get("event"), d.get("kind")
+        if isinstance(ev, str) and ev and kind in OPPOSITE_KIND:
+            out.setdefault(ev, set()).add(kind)
+    return out
+
+
+def opposite_set_held(event: Any, kind: Any, held: Mapping[str, Any] | None) -> bool:
+    """True if `event` already holds an executed set of the opposite kind. Fails closed: unknown state (None), an
+    unknown kind or a missing event count as held."""
+    if held is None or kind not in OPPOSITE_KIND or not isinstance(event, str) or not event:
+        return True
+    return OPPOSITE_KIND[kind] in (held.get(event) or ())

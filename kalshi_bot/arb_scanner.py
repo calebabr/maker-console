@@ -5,7 +5,8 @@ An event with N mutually exclusive, exhaustive brackets pays $1 on exactly one b
   YES-arb: buy YES on every bracket at its ask (1 - best NO bid). Exactly one YES pays $1.
 This stand-in only looks at the best level of each book (no depth walk) and uses Kalshi's published general
 taker fee. It has the interface the control API uses: DEFAULT_SERIES, KILL_PATH, LOG_PATH, Opportunity,
-scan_once (never executes by itself when client is None) and execute. The private overlay replaces this file.
+scan_once (never executes by itself when client is None) and execute (optional one-shot leg completion through
+the caller's `complete` gate). The private overlay replaces this file.
 """
 from __future__ import annotations
 
@@ -86,8 +87,69 @@ def live_enabled() -> bool:
             and not KILL_PATH.exists())
 
 
-def execute(client, op: Opportunity) -> str:
-    """All legs as limit orders (smallest first). Any partial fill -> arb kill switch (legging risk) + report."""
+def _demo_client(client) -> bool:
+    """Defense in depth for leg completion: the client's base URL names the Kalshi DEMO exchange host. The runner
+    already gates demo-only; a missing URL or any other host refuses."""
+    from urllib.parse import urlsplit
+    host = (urlsplit(str(getattr(client, "base_url", "") or "").strip().lower()).hostname or "")
+    return ".demo." in f".{host}" or host.startswith("demo-")
+
+
+def _complete_legs(client, op: Opportunity, filled: dict, complete) -> tuple[bool, str]:
+    """ONE attempt to buy a partial set's missing contracts at the current best level (stand-in: no depth walk).
+    Only if the completed set (filled legs at their limits, new legs at the re-read best price, fees rounded up per
+    order) still has profit >= 0 and complete.approve(extra) returns None; complete.ok() before each order.
+    Updates `filled` in place. Returns (completed, reason). Never raises."""
+    if not _demo_client(client):
+        return False, "refused: not the demo exchange"
+    try:
+        payout = (len(op.legs) - 1) if op.kind == "NO" else 1
+        spent = 0.0
+        for t, side, p, _n in op.legs:
+            f = filled.get(t, 0.0)
+            if f > 1e-9:
+                per = 1.0 - p if side == "ask" else p
+                spent += f * per + taker_fee(f, per)
+        plan, extra = [], 0.0
+        for t, side, _p, n in op.legs:
+            m = round(float(n) - filled.get(t, 0.0), 6)
+            if m <= 1e-9:
+                continue
+            ob = client.get_orderbook(t) or {}
+            lv = best_level(ob.get("orderbook_fp") or ob.get("orderbook") or {}, "yes" if op.kind == "NO" else "no")
+            if lv is None or lv[1] + 1e-9 < m:
+                return False, f"no depth on {t}"
+            per = 1.0 - lv[0]
+            extra += m * per + taker_fee(m, per)
+            plan.append((t, side, round(lv[0] if op.kind == "NO" else per, 4), m))
+        if not plan:
+            return False, "nothing missing"
+        profit = payout * float(op.contracts) - spent - extra
+        if not profit >= -1e-9:                         # also refuses NaN (H3S-5)
+            return False, f"unprofitable {profit:.4f}"
+        why = complete.approve(round(extra, 6))
+        if why is not None:            # anything but None refuses (fail closed)
+            return False, f"refused: {why}"
+        for t, side, limit_yes, m in plan:
+            if not complete.ok():
+                return False, "refused mid-way: stopped"
+            r = client.create_order(ticker=t, side=side, count=f"{m:.2f}", price=f"{limit_yes:.4f}",
+                                    client_order_id=f"arb-{uuid.uuid4().hex[:16]}")
+            o = r.get("order", r)
+            got = float(o.get("fill_count_fp") or o.get("fill_count") or 0)
+            filled[t] = filled.get(t, 0.0) + got
+            if got + 1e-9 < m:
+                return False, f"completion leg {t} filled {got:g} of {m:g}"
+        op.profit, op.cost = round(profit, 4), round(spent + extra, 4)
+        return True, "ok"
+    except Exception as ex:  # noqa: BLE001   (legging risk: the caller trips the kill switch)
+        return False, f"error {type(ex).__name__}"
+
+
+def execute(client, op: Opportunity, complete=None) -> str:
+    """All legs as limit orders (smallest first). Any partial fill -> arb kill switch (legging risk) + report.
+    complete (default None = unchanged behavior): approve(extra_cost) -> None | reason and ok() -> bool; with it a
+    partial set gets ONE completion attempt and, if every missing leg fills, is reported "FILLED (completed) ..."."""
     filled = {}
     for t, book_side, limit_yes, n in sorted(op.legs, key=lambda x: x[3]):
         r = client.create_order(ticker=t, side=book_side, count=f"{n:.2f}", price=f"{limit_yes:.4f}",
@@ -95,9 +157,18 @@ def execute(client, op: Opportunity) -> str:
         o = r.get("order", r)
         filled[t] = float(o.get("fill_count_fp") or o.get("fill_count") or 0)
         if filled[t] + 1e-9 < n:
+            if complete is None:
+                KILL_PATH.write_text(json.dumps({"reason": "partial fill / legging risk", "event": op.event,
+                                                 "fills": filled, "utc": datetime.now(timezone.utc).isoformat()}))
+                return f"PARTIAL {filled}"
+            planned = (op.profit, op.cost)
+            ok, why = _complete_legs(client, op, filled, complete)
+            if ok:
+                return f"FILLED (completed) {filled} planned profit {planned[0]} cost {planned[1]}"
             KILL_PATH.write_text(json.dumps({"reason": "partial fill / legging risk", "event": op.event,
-                                             "fills": filled, "utc": datetime.now(timezone.utc).isoformat()}))
-            return f"PARTIAL {filled}"
+                                             "fills": filled, "completion": why,
+                                             "utc": datetime.now(timezone.utc).isoformat()}))
+            return f"PARTIAL {filled} completion: {why}"
     return f"FILLED {filled}"
 
 

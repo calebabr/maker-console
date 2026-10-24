@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from . import botfiles
 
 ARB_FIELDS = ("arb_max_contracts", "arb_min_profit", "arb_series", "arb_poll_seconds", "arb_scan_cap", "arb_day_cap",
-              "arb_series_cap_frac", "arb_demo_execute")
+              "arb_series_cap_frac", "arb_demo_execute", "arb_complete_legs")
 DEFAULT_MAX_CONTRACTS = 5          # small on purpose: a NO-arb set of N brackets costs about (N-1) x contracts $
 DEFAULT_MIN_PROFIT = 0.25
 DEFAULT_POLL_SECONDS = 15
@@ -45,7 +45,7 @@ def defaults() -> dict:
     return {"arb_max_contracts": DEFAULT_MAX_CONTRACTS, "arb_min_profit": DEFAULT_MIN_PROFIT,
             "arb_series": list(scanner().DEFAULT_SERIES), "arb_poll_seconds": DEFAULT_POLL_SECONDS,
             "arb_scan_cap": DEFAULT_SCAN_CAP, "arb_day_cap": DEFAULT_DAY_CAP,
-            "arb_series_cap_frac": DEFAULT_SERIES_CAP_FRAC, "arb_demo_execute": False}
+            "arb_series_cap_frac": DEFAULT_SERIES_CAP_FRAC, "arb_demo_execute": False, "arb_complete_legs": False}
 
 
 _GATE_DEFAULTS = {"arb_scan_cap": DEFAULT_SCAN_CAP, "arb_day_cap": DEFAULT_DAY_CAP,
@@ -93,6 +93,11 @@ def schema(settings: Any) -> dict:
         "arb_demo_execute": {"type": "boolean", "unit": "demo exchange only",
                              "help": "In demo mode, place the sets on the Kalshi DEMO exchange (play money) "
                                      "instead of only logging them. Never touches real money.", "editable": True},
+        "arb_complete_legs": {"type": "boolean", "unit": "demo exchange only",
+                              "help": "With demo-execute on: if a set fills only partly, try ONCE to buy the missing "
+                                      "legs at the current price, only when the whole set still cannot lose money "
+                                      "and the caps allow it. Otherwise the kill switch stops arbitrage as before. "
+                                      "Never used in live mode.", "editable": True},
     }
 
 
@@ -153,9 +158,9 @@ def validate(cur: dict, update: dict, settings: Any) -> dict:
                 errs.append(f"{k}: {unit}, must be {lo:g}-{hi:g}")
             else:
                 out[k] = round(float(v), 4)
-        elif k == "arb_demo_execute":
+        elif k in ("arb_demo_execute", "arb_complete_legs"):
             if not isinstance(v, bool):
-                errs.append("arb_demo_execute: must be true/false")
+                errs.append(f"{k}: must be true/false")
             else:
                 out[k] = v
     if errs:
