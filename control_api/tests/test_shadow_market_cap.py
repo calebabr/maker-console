@@ -96,9 +96,9 @@ def _held_ep(ticker, cost_dollars, *, price=0.5, side="yes", eid=None):
             "fill": {"lo": n, "mid": n, "hi": n}}
 
 
-def _cycle(md, st, *, held=(), market_limit=LIMIT, series=("KXDEMOA",), now=NOW):
+def _cycle(md, st, *, held=(), market_limit=LIMIT, series=("KXDEMOA",), now=NOW, run_budget=40.0):
     return sh.run_cycle(md, st, sh.CycleInput(
-        series=list(series), run_budget=40.0, max_order=15.0, now=now, held=list(held), capital=CAPITAL,
+        series=list(series), run_budget=run_budget, max_order=15.0, now=now, held=list(held), capital=CAPITAL,
         max_open_frac=FRAC, fee_schedule=None, series_share_limit=None, market_share_limit=market_limit))
 
 
@@ -217,6 +217,98 @@ def test_a_market_cap_never_loosens_the_series_budget():
     assert res.upserts[0]["cost"] <= 3.0 + 1e-9
 
 
+# ================================================================ budget flow (the strategy's ADV-1)
+class HundredthStrategy:
+    """One yes bid per market, in list order, sized like the real per-order rule: min(max_order, budget left) / price
+    floored to 0.01, debiting its OWN (uncapped) cost from the budget. The shadow asks it one market at a time."""
+
+    def __init__(self, prices):
+        self.prices = prices
+
+    def desired_quotes(self, markets, books, now, max_order_dollars, budget):
+        out, left = [], float(budget)
+        for mk in markets:
+            p = self.prices[mk["ticker"]]
+            n = int(min(max_order_dollars, left) / p * 100 + 1e-9) / 100
+            if left < 1.0 or n < 1:
+                continue
+            out.append(Quote(mk["ticker"], "yes", p, n, "bid", p, ("c", 1)))
+            left -= round(n * p, 2)
+        return out
+
+
+def _flow_md():
+    return _md(("KXDEMOA", [T1, T2, "KXDEMOA-26OCT19-T4"]))
+
+
+T4 = "KXDEMOA-26OCT19-T4"
+
+
+def _by_ticker(res):
+    return {u["ticker"]: u for u in res.upserts}
+
+
+def test_a_capped_market_frees_its_budget_for_the_next_market():
+    # budget 20, max order 15: A wants 15 (capped to the 9.0 cap), so B is sized from 11 left, then capped itself
+    st = HundredthStrategy({T1: 0.95, T2: 0.95, T4: 0.95})
+    res = _cycle(_flow_md(), st, run_budget=20.0)
+    by = _by_ticker(res)
+    assert by[T1]["count"] == pytest.approx(9.47) and by[T2]["count"] == pytest.approx(9.47)
+    assert by[T4]["count"] == pytest.approx(2.10)                                   # 20 - 9.0 - 9.0 = 2.0 / 0.95
+    # without the cap (limit absent) B only gets what A's full order left of the 20
+    res0 = _cycle(_flow_md(), st, run_budget=20.0, market_limit=None)
+    by0 = _by_ticker(res0)
+    assert by0[T1]["count"] == pytest.approx(15 / 0.95, abs=0.01) and by0[T2]["count"] == pytest.approx(5 / 0.95, abs=0.01)
+
+
+def test_a_fully_capped_market_debits_nothing():
+    st = HundredthStrategy({T1: 0.95, T2: 0.95, T4: 0.95})
+    res = _cycle(_flow_md(), st, run_budget=12.0, held=[_held_ep(T1, 9.0, price=0.95)])
+    by = _by_ticker(res)
+    assert by[T1]["capped"] is True and by[T1]["cap_reason"] == "market_cap"
+    assert by[T2]["capped"] is False and by[T2]["count"] == pytest.approx(9.47)   # sized from the whole 12, then capped
+    assert by[T4]["capped"] is False and by[T4]["count"] == pytest.approx(3.15)  # 12 - 9.0 left = 3.0 / 0.95
+
+
+def test_the_series_budget_and_max_order_still_bound_the_flow():
+    st = HundredthStrategy({T1: 0.95, T2: 0.95, T4: 0.95})
+    res = _cycle(_flow_md(), st, run_budget=12.0)
+    live = [u for u in res.upserts if not u["capped"]]
+    assert sum(u["cost"] for u in live) <= 12.0 + sh.CAP_TOL                      # the run budget
+    assert all(u["cost"] <= 9.0 + 1e-9 for u in live)                              # the market cap
+    res = _cycle(_flow_md(), st, run_budget=60.0)                                  # max_order 15 binds the sizes
+    assert all(u["cost"] <= 15.0 + 1e-9 for u in res.upserts if not u["capped"])
+
+
+def test_sizing_stops_when_less_than_a_dollar_is_left():
+    st = HundredthStrategy({T1: 0.95, T2: 0.95, T4: 0.95})
+    res = _cycle(_flow_md(), st, run_budget=9.5)                                   # A takes 9.0 -> 0.5 left
+    by = _by_ticker(res)
+    assert by[T1]["capped"] is False and by[T1]["count"] == pytest.approx(9.47)
+    assert all(t not in by or by[t]["capped"] is True for t in (T2, T4))           # nothing live past the budget
+
+
+def test_the_flow_is_the_plain_answer_when_no_cap_binds():
+    st = HundredthStrategy({T1: 0.6, T2: 0.7, T4: 0.8})
+    a = _cycle(_flow_md(), st, run_budget=30.0, market_limit=0.9)                  # cap 67.5: nothing binds
+    b = _cycle(_flow_md(), st, run_budget=30.0, market_limit=None)
+    key = lambda r: sorted((u["ticker"], u["count"], u["capped"]) for u in r.upserts)  # noqa: E731
+    assert key(a) == key(b)
+    assert a.pass_doc["market_capped"] == []
+
+
+def test_flow_passes_are_stable_and_have_no_hysteresis():
+    sim = Sim(_flow_md(), HundredthStrategy({T1: 0.95, T2: 0.95, T4: 0.95}), series=["KXDEMOA"],
+              market_limit=LIMIT, run_budget=20.0)
+    sim.cycle(NOW)
+    ids = sorted(e["ep_id"] for e in sim.live())
+    assert len(ids) == 3
+    for k in range(1, 4):
+        res = sim.cycle(NOW + timedelta(minutes=10 * k))
+        assert res.pass_doc["new_eps"] == 0 and res.pass_doc["ended_eps"] == 0
+        assert sorted(e["ep_id"] for e in sim.live()) == ids
+
+
 # ================================================================ stability over passes
 def test_two_identical_passes_do_not_cancel_or_replace():
     sim = Sim(_md(("KXDEMOA", [T1])), FixedStrategy([(T1, "yes", "bid", 0.5, 60)]), series=["KXDEMOA"],
@@ -284,4 +376,5 @@ def test_property_held_plus_resting_per_market_never_exceeds_the_cap(seed):
         sim.cycle(now)
         for t in tickers:
             assert sim.held(t) + sim.resting(t) <= cap + sh.CAP_TOL + 1e-6, (seed, k, t)
+        assert sim.resting() <= sim.run_budget + sh.CAP_TOL + 1e-6, (seed, k)     # the run budget bounds the flow
     assert sim.passes[-1]["market_capped"] is not None
