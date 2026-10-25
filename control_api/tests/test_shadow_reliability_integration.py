@@ -69,6 +69,11 @@ async def _as_period_one_history(env, eps):
 
 
 # ================================================================ (a) cloud settings through the API
+
+def _midday():
+    """A fixed time of day (12:00 UTC, yesterday): day-bucketed assertions must not depend on when the test runs."""
+    return (datetime.now(UTC) - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+
 async def test_shadow_cloud_settings_round_trip_with_fresh_2fa(env):
     r = await env.client.put("/api/cloud", headers=await env.h2fa(),
                              json={"shadow_capital": 300, "shadow_intervals": [10, 5]})
@@ -196,7 +201,7 @@ async def test_stacking_one_market_stops_at_the_cap_and_the_summary_excludes_cap
 
 
 async def test_headline_gate_needs_7_filled_days_and_30_filled_episodes(env):
-    now = datetime.now(UTC)
+    now = _midday()
     # 7 close days x 5 filled episodes = 35: both conditions met
     ok = _day_eps(7, 5)
     await _as_period_one_history(env, ok)
@@ -222,7 +227,7 @@ async def test_headline_gate_needs_7_filled_days_and_30_filled_episodes(env):
 
 
 async def test_unfilled_days_do_not_count_toward_the_gate(env):
-    now = datetime.now(UTC)
+    now = _midday()
     eps = _day_eps(6, 6) + [_ep(f"z{k}", now - timedelta(days=9 + k), fill=0.0) for k in range(3)]
     await env.store.set_shadow_summary(sh.build_summary(eps, [], now))
     s = await _summary(env, "?period=all")
@@ -295,7 +300,7 @@ async def test_fee_modes_reach_the_summary_and_the_api(env):
 
 # ================================================================ (e) the period filter with the new fields
 async def test_period_filter_scopes_capped_count_and_headline_gate_fields(env):
-    now = datetime.now(UTC)
+    now = _midday()
     old = [_ep("o1", now - timedelta(days=6)), _ep("o2", now - timedelta(days=6, hours=2), capped=True, fill=0.0),
            _ep("o3", now - timedelta(days=5), capped=True, fill=0.0)]
     new = [_ep("n1", now - timedelta(days=1), fill=8.0), _ep("n2", now - timedelta(days=1, hours=1), fill=4.0)]
