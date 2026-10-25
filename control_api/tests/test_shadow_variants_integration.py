@@ -68,6 +68,11 @@ def _pair_ep(i, iv, d, *, now, result="no", fill=6.0):
             "fill": {"lo": fill, "mid": fill, "hi": fill}, "standin": False, "ts": join}
 
 
+
+def _midday():
+    """A fixed time of day (12:00 UTC, yesterday): day-bucketed assertions must not depend on when the test runs."""
+    return (datetime.now(UTC) - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+
 # ================================================================ (c) off by default: only the baseline
 async def test_variants_off_only_the_baseline_runs(env, real_strategy, monkeypatch):
     monkeypatch.delenv(sh.SHADOW_VARIANTS_ENV, raising=False)
@@ -134,7 +139,7 @@ async def test_variants_on_each_cadence_records_tagged_episodes_and_the_summary_
 
 
 async def test_variant_compare_paired_ci_through_the_period_api(env, variants_on):
-    now = datetime.now(UTC)
+    now = _midday()
     eps = []
     for d in range(8):
         for i in range(5):

@@ -436,7 +436,7 @@ def _simulate(seed):
             unsettled=[e for e in cur if e.get("result") is None and e.get("close_time") and e["close_time"] <= now],
             held=[e for e in cur if e.get("end_ts") is not None and e.get("result") is None],
             capital=cfg["capital"], max_open_frac=cfg["max_open_frac"], fee_schedule=None,
-            series_share_limit=cfg["series_cap"])
+            series_share_limit=cfg["series_cap"], market_share_limit=None)
         for u in sh.run_cycle(md, st, inp).upserts:
             eps[u["ep_id"]] = {**eps.get(u["ep_id"], {}), **u}
         snaps.append((now, {i: dict(e) for i, e in eps.items()}))
@@ -537,7 +537,7 @@ def test_v1_minimal_reproduction_capped_cancel_frees_room_it_already_used():
                             open_eps=[e for e in cur if e.get("end_ts") is None],
                             ended_unread=[e for e in cur if e.get("end_ts") is not None and not e.get("trades_read")],
                             held=[e for e in cur if e.get("end_ts") is not None and e.get("result") is None],
-                            capital=150.0, max_open_frac=0.2, fee_schedule=None, series_share_limit=None)
+                            capital=150.0, max_open_frac=0.2, fee_schedule=None, series_share_limit=None, market_share_limit=None)
         for u in sh.run_cycle(md, st, inp).upserts:
             eps[u["ep_id"]] = {**eps.get(u["ep_id"], {}), **u}
         snaps.append((now, {i: dict(e) for i, e in eps.items()}))
