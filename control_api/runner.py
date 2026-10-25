@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import inspect
 import io
 import json
 import logging
@@ -73,6 +74,7 @@ CANCEL_TIMEOUT_S = 25.0             # same bound as Stop's own cancel
 # Kalshi can each hold one for up to CANCEL_TIMEOUT_S and a new tap still gets a thread.
 STOP_WORKERS = 4
 ARB_SCAN_TIMEOUT_S = 120.0          # an arb scan is abandoned after this (its thread stays on the 1-worker arb pool)
+ARB_HELD_READ_MAX = 20000           # executed-opportunity rows read to rebuild the opposite-set gate (more: refuse)
 ARB_SENT_PREFIXES = ("FILLED", "PARTIAL", "ERROR")   # executed values whose cost counts toward the day's arb spend
 ARB_SKIP_PERSIST_EVERY = timedelta(hours=1)          # a repeated skip (same event + reason kind) is stored once/hour
 ARB_SKIP_SEEN_MAX = 2000
@@ -325,6 +327,75 @@ class ConfigInvalid(RuntimeError):
 INVALID_CONFIG_PREFIXES = ("stored config failed validation", "monitor wrote an invalid config")
 
 
+class ArbCompletionGate:
+    """H3-B: the runner's re-checks for arb_scanner.execute's ONE-shot completion of a partial DEMO-EXECUTE set.
+    approve(extra_cost) -> None (go) | reason: once only; the demo-execute re-checks (stop generation, not stopping,
+    not shutting down, leader + R1 fence, kill switch, maker and arb in demo, the setting still on), the demo
+    exchange asserted on the client, then the account risk gate on the extra spend with fresh balance and positions,
+    re-checked under the budget lock and reserved before any order (counted on top of the set's reservation).
+    ok() -> bool: the same re-checks, called by the scanner right before each completion order. Never raises.
+    Never built for live: the runner passes it only for kind "demo-execute"."""
+
+    def __init__(self, runner: "Runner", client: Any, event: str, gen: int, budget: dict, frac: float) -> None:
+        self.runner, self.client, self.event, self.gen = runner, client, event, gen
+        self.budget, self.frac = budget, frac
+        self.used = False
+
+    def ok(self) -> bool:
+        r = self.runner
+        try:
+            return bool(not (self.budget or {}).get("abandoned") and r._arb_demo_ok(self.gen)
+                        and r._arb_complete_wanted() and r.mode == "demo" and arbsvc.demo_base_ok(self.client))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def approve(self, extra_cost: Any) -> str | None:
+        if self.used:
+            return "already attempted"
+        self.used = True
+        if not self.ok():
+            return "stopped"
+        try:
+            extra = float(extra_cost)
+        except (TypeError, ValueError):
+            return "bad input"
+        try:
+            cash = float((self.client.get_balance() or {}).get("balance") or 0) / 100.0
+        except Exception as e:  # noqa: BLE001
+            return f"balance {type(e).__name__}"
+        try:
+            body = self.client.get_positions() if callable(getattr(self.client, "get_positions", None)) else None
+            truncated = isinstance(body, dict) and body.get("truncated") is True
+            by_series = riskgate.exposure_by_series((body or {}).get("market_positions")
+                                                    if isinstance(body, dict) else None)
+        except Exception:  # noqa: BLE001
+            return "gate positions unreadable"
+        if truncated:
+            return "gate positions truncated"
+        r = self.runner
+        day = (self.budget or {}).get("day")
+        if day is None:
+            return "gate day spend unknown"
+        with r._arb_budget_lock:
+            ok, why = riskgate.check_arb(extra, riskgate.series_of(self.event), by_series, cash, self.frac,
+                                         self.budget["scan"], day["amount"], arbsvc.gate_caps(r.arb_settings()))
+            if not ok:
+                return f"gate {why}"
+            if not self.ok():
+                return "stopped"
+            self.budget["scan"] += extra
+            day["amount"] = round(day["amount"] + extra, 6)
+        return None
+
+
+def _scanner_can_complete(scanner: Any) -> bool:
+    """The installed arb_scanner.execute takes `complete` (an older overlay without it never completes)."""
+    try:
+        return "complete" in inspect.signature(scanner.execute).parameters
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 class Runner:
     def __init__(self, settings: Any, store: Any, kalshi_factory: Callable[[str], Any] | None = None,
                  alerter: Alerter | None = None, public_factory: Callable[[str], Any] | None = None,
@@ -395,6 +466,8 @@ class Runner:
         self.arb_recent: deque = deque(maxlen=200)   # in-memory copy, used if the store is unreachable
         # risk gate: today's arb spend per kind ("live" / "demo-execute"): {date, amount, mark}; see _arb_day_state
         self._arb_day: dict[str, dict] = {}
+        # opposite-set gate: per kind, {date, mark, events: {event: {"YES"/"NO"}}} of executed sets; see _arb_held_state
+        self._arb_held: dict[str, dict] = {}
         self._arb_budget_lock = threading.Lock()
         self._arb_skip_seen: dict[tuple[str, str], datetime] = {}   # (event, reason kind) -> last stored skip
         # strategy write-path results of the last pass (write_errors: / series_capped: / trading_paused lines)
@@ -2339,6 +2412,10 @@ class Runner:
         return (self.arb_mode == "demo" and self.mode == "demo"
                 and self.arb_settings().get("arb_demo_execute") is True)
 
+    def _arb_complete_wanted(self) -> bool:
+        """H3-B: the arb_complete_legs setting is on (demo-execute only; never consulted for live)."""
+        return self.arb_settings().get("arb_complete_legs") is True
+
     def _arb_demo_ok(self, gen: int) -> bool:
         """Same re-checks as _arb_live_ok, for demo-execute. Never true while the maker or arb is LIVE."""
         return (self.settings.runner_enabled and self.arb_desired == "running" and self._arb_demo_wanted()
@@ -2368,6 +2445,8 @@ class Runner:
         ok_now = self._arb_demo_ok if demo else self._arb_live_ok
         if kind not in ("live", "demo-execute") or not ok_now(gen):
             return "skipped: stopped"
+        if (budget or {}).get("abandoned"):
+            return "skipped: scan abandoned"            # H3S-2: its results would never be stored or alerted
         if demo:
             if not self._demo_keys_ok():
                 return "skipped: no demo keys"
@@ -2395,20 +2474,30 @@ class Runner:
         # account risk gate (services/riskgate.py): ceiling, series cap, scan cap, day cap. Fails closed.
         try:
             body = client.get_positions() if callable(getattr(client, "get_positions", None)) else None
+            truncated = isinstance(body, dict) and body.get("truncated") is True
             by_series = riskgate.exposure_by_series((body or {}).get("market_positions")
                                                     if isinstance(body, dict) else None)
         except Exception:  # noqa: BLE001
             return "skipped: gate positions unreadable"
+        if truncated:
+            return "skipped: gate positions truncated"     # S2: a partial read understates exposure (fail closed)
         if budget is None or budget.get("day") is None:
             return "skipped: gate day spend unknown"
         with self._arb_budget_lock:
             day = budget["day"]
+            held = budget.get("held")
+            if held is None:
+                return "skipped: gate held sets unknown"
+            if riskgate.opposite_set_held(op.event, op.kind, held):
+                return "skipped: gate opposite set held on event"
             ok, why = riskgate.check_arb(op.cost, riskgate.series_of(op.event), by_series, cash, frac,
                                          budget["scan"], day["amount"], arbsvc.gate_caps(self.arb_settings()))
             if not ok:
                 return f"skipped: gate {why}"
             if not ok_now(gen):
                 return "skipped: stopped"
+            if budget.get("abandoned"):
+                return "skipped: scan abandoned"
             if demo:
                 if not (self.mode == "demo" and arbsvc.demo_base_ok(client)):
                     return "skipped: not the demo exchange"
@@ -2416,8 +2505,15 @@ class Runner:
                 return "skipped: live not allowed"       # S-19: second live check right before execution
             budget["scan"] += float(op.cost)             # reserved before sending (a partial set still counts)
             day["amount"] = round(day["amount"] + float(op.cost), 6)
+        kw: dict = {}
+        if demo and self._arb_complete_wanted() and _scanner_can_complete(scanner):
+            kw["complete"] = ArbCompletionGate(self, client, op.event, gen, budget, frac)   # H3-B, demo only
         try:
-            return str(scanner.execute(client, op))       # arb_scanner trips its own kill switch on a partial set
+            out = str(scanner.execute(client, op, **kw))  # arb_scanner trips its own kill switch on a partial set
+            if out.startswith(riskgate.HELD_PREFIXES):
+                with self._arb_budget_lock:
+                    budget["held"].setdefault(str(op.event), set()).add(str(op.kind))
+            return out
         except Exception as e:  # noqa: BLE001
             # an order error mid-set may leave a leg filled: legging risk, so trip the arb kill switch
             try:
@@ -2426,6 +2522,8 @@ class Runner:
                                                           "utc": utcnow().isoformat()}), encoding="utf-8")
             except OSError:
                 pass
+            with self._arb_budget_lock:                  # H3S-1: an errored set may hold legs
+                budget["held"].setdefault(str(op.event), set()).add(str(op.kind))
             return f"ERROR {type(e).__name__}"
 
     def _arb_scan_sync(self, cfg: dict, live: Any, gen: int, data_env: str,
@@ -2469,6 +2567,34 @@ class Runner:
         self._arb_day[kind] = state
         return state
 
+    async def _arb_held_state(self, kind: str) -> dict | None:
+        """{event: {"YES"/"NO"}} of executed (FILLED / PARTIAL) sets of `kind` since 00:00 UTC YESTERDAY (an event
+        can span a UTC midnight), in memory. Rebuilt from the store's executed opportunities the first time it is
+        needed after a restart, a leadership change or a new UTC day; a same-day rebuild is merged with memory. None if the
+        store cannot be read or the read hits its row limit (the opposite-set gate then refuses: fail closed)."""
+        now = utcnow()
+        today = now.date().isoformat()
+        mark = (self.lease.generation, self.lease.transitions)
+        cur = self._arb_held.get(kind)
+        if cur is not None and cur["date"] == today and cur["mark"] == mark:
+            return cur["events"]
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        try:
+            docs = await asyncio.wait_for(self.store.list_arb_opportunities(
+                since=since, limit=ARB_HELD_READ_MAX, executed_only=True), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("arb held sets rebuild failed: %s", type(e).__name__)
+            return None
+        if not isinstance(docs, list) or len(docs) >= ARB_HELD_READ_MAX:
+            log.warning("arb held sets rebuild unusable (truncated or bad)")
+            return None
+        events = riskgate.held_sets(docs, kind)
+        if cur is not None and cur["date"] == today:        # same day (leadership change): never forget a set
+            for ev, kinds in cur["events"].items():
+                events.setdefault(ev, set()).update(kinds)
+        self._arb_held[kind] = {"date": today, "mark": mark, "events": events}
+        return events
+
     def _arb_skip_persist_ok(self, event: Any, executed: str, now: datetime) -> bool:
         """S2A1-1: a `skipped: ...` result is stored at most once per (event, reason kind) per ARB_SKIP_PERSIST_EVERY,
         so a stale book seen on every scan cannot flood the store (or push real sets out of a rebuild). Everything
@@ -2506,7 +2632,8 @@ class Runner:
             data_env = "live" if live else self.mode
             budget = None
             if kind is not None:
-                budget = {"scan": 0.0, "day": await self._arb_day_state(kind)}
+                budget = {"scan": 0.0, "day": await self._arb_day_state(kind),
+                          "held": await self._arb_held_state(kind)}
             self.arb_running_scan = True
             try:
                 # CA-2: own 1-worker pool. A scan abandoned at the timeout keeps that worker until it ends, so the
@@ -2515,7 +2642,12 @@ class Runner:
                     self._arb_executor, self._arb_scan_sync, self.arb_settings(), kind, gen, data_env, budget)
                 results = await asyncio.wait_for(fut, timeout=ARB_SCAN_TIMEOUT_S)
                 self.arb_last_error = None
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001
+                if budget is not None:
+                    # H3S-2: the worker thread may keep running; it must start no new set and no completion
+                    budget["abandoned"] = True
+                if not isinstance(e, Exception):
+                    raise
                 self.arb_last_error = type(e).__name__
                 log.error("arb scan failed: %s", type(e).__name__)
                 return {"scanned": False, "reason": "error", "error": type(e).__name__}
@@ -2538,7 +2670,9 @@ class Runner:
                                             f"{op.event}: {executed}", priority="urgent")
                 elif executed.startswith("FILLED"):
                     where = " (demo exchange)" if kind == "demo-execute" else ""
-                    await self.alerter.send("Arbitrage executed", f"{op.event} {op.kind} profit ${op.profit}{where}")
+                    done = " (missing legs completed)" if executed.startswith("FILLED (completed)") else ""
+                    await self.alerter.send("Arbitrage executed",
+                                            f"{op.event} {op.kind} profit ${op.profit}{where}{done}")
             if self.arb_kill_switch() and self.arb_desired == "running":
                 await self._arb_tripped()
             return {"scanned": True, "found": len(results)}

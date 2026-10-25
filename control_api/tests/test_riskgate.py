@@ -125,3 +125,31 @@ class C:
 def test_demo_base_ok(url, ok):
     assert arbsvc.demo_base_ok(C(url)) is ok
     assert arbsvc.demo_base_ok(object()) is False
+
+
+# ---------------------------------------------------------------- opposite sets on one event (always on)
+def _doc(event="E1", kind="NO", executed="FILLED {}", mode="demo-execute"):
+    return {"event": event, "kind": kind, "executed": executed, "mode": mode}
+
+
+def test_held_sets_counts_only_executed_sets_of_the_mode():
+    docs = [_doc(), _doc(kind="YES", executed="PARTIAL {}", event="E2"),
+            _doc(kind="YES", executed="FILLED (completed) {}", event="E3"),
+            _doc(kind="YES", executed="skipped: gate day cap", event="E4"), _doc(kind="YES", executed="log-only",
+                                                                               event="E5"),
+            _doc(kind="YES", executed="ERROR RuntimeError", event="E6"), _doc(kind="YES", mode="live", event="E7"),
+            "junk", _doc(kind="MAYBE", event="E8")]
+    assert rg.held_sets(docs, "demo-execute") == {"E1": {"NO"}, "E2": {"YES"}, "E3": {"YES"},
+                                                  "E6": {"YES"}}                 # ERROR may hold legs
+    assert rg.held_sets(docs, "live") == {"E7": {"YES"}}
+    assert rg.held_sets(None, "live") == {}
+
+
+def test_opposite_set_held():
+    held = {"E1": {"NO"}}
+    assert rg.opposite_set_held("E1", "YES", held) is True               # opposite blocked
+    assert rg.opposite_set_held("E1", "NO", held) is False               # same kind allowed (caps govern it)
+    assert rg.opposite_set_held("E2", "YES", held) is False              # another event allowed
+    assert rg.opposite_set_held("E1", "YES", None) is True               # unknown state: fail closed
+    assert rg.opposite_set_held("E1", "BOTH", held) is True
+    assert rg.opposite_set_held("", "YES", held) is True

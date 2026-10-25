@@ -77,7 +77,8 @@ async def test_get_arb_defaults_log_only_off(arb_env):
     assert b["settings"]["enabled"] is False and b["settings"]["live"] is False
     assert b["status"]["state"] == "stopped" and b["status"]["live_allowed"] is False
     assert set(b["schema"]) == {"arb_max_contracts", "arb_min_profit", "arb_series", "arb_poll_seconds",
-                                "arb_scan_cap", "arb_day_cap", "arb_series_cap_frac", "arb_demo_execute"}
+                                "arb_scan_cap", "arb_day_cap", "arb_series_cap_frac", "arb_demo_execute",
+                                "arb_complete_legs"}
     s = b["settings"]
     assert s["arb_scan_cap"] == 15 and s["arb_day_cap"] == 45 and s["arb_series_cap_frac"] == 0.35
     assert s["arb_demo_execute"] is False and b["status"]["demo_execute"] is False
