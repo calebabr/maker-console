@@ -1,6 +1,8 @@
 # kalshi_bot (public stand-in)
 
-This folder is a **demo placeholder**. It has the module names and interface the control API uses, a generic
+This folder is a **demo placeholder**. The real trading strategy is private and installed at deploy time; nothing about it is described here.
+
+It has the module names and interface the control API uses, a generic
 Kalshi API client, and no trading strategy:
 
 | File | What it is |
