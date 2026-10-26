@@ -32,7 +32,7 @@ API runs the bot in-process and a React PWA lets the owner start, stop and super
      |
      | HTTPS + Bearer JWT (+ 2FA code for sensitive actions)
      v
- Render free web service (Docker)
+ Render free web service (native Python runtime)
    FastAPI control_api  +  in-process bot runner
      |        |             ^               ^
      |        |             | POST /api/tick | self-ping
@@ -77,7 +77,7 @@ every test run without it. The build-time overlay mechanism is described in `kal
 | API and runner | Python 3.11, FastAPI, Uvicorn, Pydantic |
 | Phone app | React, Vite, installable PWA, hosted on Vercel (Hobby) |
 | Database | MongoDB Atlas M0 (async PyMongo), in-memory store for tests |
-| Hosting | Render free web service (Docker) |
+| Hosting | Render free web service (native Python runtime) |
 | Keep-awake and alerts | self-ping, cron-job.org, ntfy.sh, Web Push |
 | Auth | single owner, Argon2 password hash, TOTP 2FA, JWT sessions, rate limiting |
 | Tests | pytest, Vitest and Testing Library, Playwright |
