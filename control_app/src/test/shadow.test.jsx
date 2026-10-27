@@ -49,6 +49,23 @@ describe('Shadow estimate page', () => {
     expect(screen.queryByTestId('shadow-band')).toBeNull();
   });
 
+  it('says Shadow is not estimating when the simulated ceiling is full, instead of an estimate', async () => {
+    base(SUMMARY({ status: { ...SUMMARY().status, ceiling_full: true, held_cost: 248.51, ceiling: 75 } }));
+    renderApp('/shadow');
+    const note = await screen.findByTestId('ceiling-full');
+    expect(note).toHaveTextContent('Shadow is not estimating: its simulated ceiling is full.');
+    expect(note).toHaveTextContent('$248.51');
+    expect(screen.queryByTestId('headline-block')).toBeNull();
+    expect(screen.queryByTestId('shadow-band')).toBeNull();
+  });
+
+  it('shows the estimate as before when the ceiling is not full', async () => {
+    base(SUMMARY({ status: { ...SUMMARY().status, ceiling_full: false } }));
+    renderApp('/shadow');
+    expect(await screen.findByTestId('headline-block')).toBeInTheDocument();
+    expect(screen.queryByTestId('ceiling-full')).toBeNull();
+  });
+
   it('explains how to turn shadow on when disabled', async () => {
     base(SUMMARY({ enabled: false, headline: null }));
     renderApp('/shadow');
