@@ -62,6 +62,7 @@ ORDER_LOOKUPS_PER_SYNC = 20         # GET /portfolio/orders/{id} for fills no lo
 SOURCE_BACKFILL_MAX = 20_000        # fills relabelled by the startup backfill
 SOURCE_BACKFILL_BUDGET_S = 60
 PNL_TODAY_TTL_S = 60                # /status today P&L cache
+PNL_TODAY_CACHE_MAX = 16            # entries kept, one per (mode, validated time zone); oldest dropped first
 RECENT_PASSES = 12
 FILL_ALERT_MAX_LINES = 3
 # release process (docs/RELEASE_CONTRACT.md section 2): lease, fencing, graceful handover
@@ -478,7 +479,7 @@ class Runner:
         # UX sprint: fill sources, today P&L cache, alert history + web push, daily summary
         self._maker_oids: dict[str, None] = {}       # journal maker order ids (insertion ordered, bounded)
         self.source_backfill: dict | None = None
-        self._pnl_today: tuple[float, str, dict | None] | None = None    # (monotonic t, env, value)
+        self._pnl_today: dict[tuple[str, str], tuple[float, dict, str]] = {}   # (env, tz) -> (monotonic t, value, since)
         self.push = PushService(settings, store)
         self._daily_sent: str | None = None          # local date of the last daily summary
         # S-25: telemetry Kalshi reads on their own pool (threads start on first use; shut down in shutdown())
@@ -1601,24 +1602,35 @@ class Runner:
         return res
 
     # ---- today P&L + recent passes (/status, UX item 25)
-    async def pnl_today(self) -> dict | None:
-        """Realised P&L of markets settled since 00:00 UTC, split {maker, arb, you, bot, total}. Cached
-        PNL_TODAY_TTL_S per mode; None if the store read fails."""
+    async def pnl_today_view(self, tz: str | None = None) -> dict:
+        """Today's realised P&L from the viewer's LOCAL midnight: {value: {maker, arb, you, bot, total} | None, tz,
+        since}. `tz` is an IANA name from the client; unknown or malformed means UTC (pnl.resolve_tz). Settlements and
+        storage stay UTC; only the boundary moves. Cached PNL_TODAY_TTL_S per (mode, validated zone), at most
+        PNL_TODAY_CACHE_MAX entries. value is None if the store read fails (not cached)."""
+        zone, tzname = pnlsvc.resolve_tz(tz)
         t, env = time.monotonic(), self.mode
-        c = self._pnl_today
-        if c and c[1] == env and 0 <= t - c[0] < PNL_TODAY_TTL_S:
-            return c[2]
-        now = utcnow()
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        key = (env, tzname)
+        c = self._pnl_today.get(key)
+        if c and 0 <= t - c[0] < PNL_TODAY_TTL_S:
+            return {"value": c[1], "tz": tzname, "since": c[2]}
+        since = pnlsvc.local_midnight_utc(utcnow(), zone)
         try:
-            res, _, _ = await asyncio.wait_for(pnlsvc.by_source_since(self.store, midnight, env=env), 5)
+            res, _, _ = await asyncio.wait_for(pnlsvc.by_source_since(self.store, since, env=env), 5)
         except Exception as e:  # noqa: BLE001
             log.warning("today pnl failed: %s", type(e).__name__)
-            return None
+            return {"value": None, "tz": tzname, "since": iso(since)}
         val = {k: res.get(k) for k in strat.bucket_ids()}
         val.update({"bot": res.get("bot"), "total": res.get("total")})
-        self._pnl_today = (t, env, val)
-        return val
+        for k in [k for k, v in self._pnl_today.items() if not 0 <= t - v[0] < PNL_TODAY_TTL_S]:
+            del self._pnl_today[k]                                     # drop expired entries first
+        while len(self._pnl_today) >= PNL_TODAY_CACHE_MAX:
+            del self._pnl_today[min(self._pnl_today, key=lambda k: self._pnl_today[k][0])]
+        self._pnl_today[key] = (t, val, iso(since))
+        return {"value": val, "tz": tzname, "since": iso(since)}
+
+    async def pnl_today(self, tz: str | None = None) -> dict | None:
+        """Just the figures of pnl_today_view(); None if the store read fails."""
+        return (await self.pnl_today_view(tz))["value"]
 
     async def recent_passes(self, n: int = RECENT_PASSES) -> list[dict]:
         """Last n passes, newest last: {ts, ok, late, errors}. late = the gap since the previous pass was more than
@@ -2136,6 +2148,15 @@ class Runner:
         except Exception as e:  # noqa: BLE001
             log.warning("pnl compute failed: %s", type(e).__name__)
             return None
+
+    async def pnl_pair(self) -> tuple[dict | None, dict | None]:
+        """(maker, arbitrage) d7/d30 realised P&L by settlement time in the current mode, from one pair of store
+        reads. (None, None) if no data or error."""
+        try:
+            return await asyncio.wait_for(pnlsvc.compute_pair(self.store, utcnow(), env=self.mode), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("pnl compute failed: %s", type(e).__name__)
+            return None, None
 
     # ---- bracket arbitrage
     def _arb_skip_reason(self) -> str | None:
