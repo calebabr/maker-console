@@ -1,6 +1,6 @@
 """Update Local Data: copy everything useful for analysis from the store (MongoDB Atlas) into a git-ignored folder.
 
-    python -m control_api.tools.pull_data [--days 90] [--out local_data] [--seed-demo]
+    python -m control_api.tools.pull_data [--days 90] [--out local_data] [--seed-demo] [--shadow]
 
 Reads MONGODB_URI / MONGODB_DB from the environment, else from `.env.local` at the repo root
 (KEY=VALUE lines). Use a READ-ONLY Atlas database user (built-in role `read` on the bot database)
@@ -14,6 +14,7 @@ Output (all datetimes ISO-8601 UTC; read DATA_DICTIONARY.md first):
   SUMMARY.md, DATA_DICTIONARY.md, state.json, journal.csv, fills.csv, fill_pnl.csv, settlements.csv,
   account_snapshots.csv, heartbeats.csv, quote_episodes.csv, arb_opportunities.csv, monitor_summaries.json,
   config_versions.json, audit.csv, and analytics_summary.json when control_api.services.analytics exists.
+  With --shadow also: shadow_episodes.csv and shadow_passes.csv (scrubbed Shadow-mode rows; read-only).
 """
 from __future__ import annotations
 
@@ -45,6 +46,12 @@ SECRET_KEYS = {"password_hash", "password", "totp_secret", "totp_secret_enc", "t
 SECRET_PARTS = ("password", "passwd", "secret", "totp", "private_key", "privatekey", "api_key", "apikey", "jwt",
                 "mongodb_uri", "token", "bearer", "credential", "_ip", "ip_addr")
 AUDIT_KEYS = ["ts", "user", "action", "ok", "details"]
+# --shadow: the only Shadow episode fields exported (ids, the hypothetical bid, caps, timing, fill and settlement state)
+SHADOW_EPISODE_KEYS = ["ep_id", "ticker", "series", "side", "price", "count", "cost", "methodology", "capped",
+                       "cap_reason", "join_ts", "end_ts", "end_reason", "close_time", "trades_read", "fill",
+                       "result", "settled_ts", "settle_checked_ts"]
+SHADOW_EXPORT_EPISODES = 20_000            # newest episodes exported (Atlas keeps 30 days, at most ~1500 new a day)
+SHADOW_EXPORT_PASSES = 5_000               # newest pass docs exported
 BIG = 10_000_000
 FILL_LOOKBACK = timedelta(days=7)          # = analytics.LOOKBACK - window
 # Strings that might hold a secret get the full logbuffer.redact() pass; the rest skip it (speed on big pulls).
@@ -178,8 +185,15 @@ def _r(v, nd=2):
     return None if v is None else round(v, nd)
 
 
-async def collect(store, days: int) -> dict:
-    """Read-only: only get_*/list_*/last_* calls. Never touches users or revoked tokens."""
+async def collect_shadow(store) -> dict:
+    """Read-only (shadow_recent, shadow_recent_passes): the newest Shadow episodes (any state) and pass docs."""
+    return {"shadow_episodes": list(await store.shadow_recent(SHADOW_EXPORT_EPISODES, None) or []),
+            "shadow_passes": list(await store.shadow_recent_passes(SHADOW_EXPORT_PASSES) or [])}
+
+
+async def collect(store, days: int, shadow: bool = False) -> dict:
+    """Read-only: only get_*/list_*/last_* calls (plus shadow_recent* with `shadow`). Never touches users or
+    revoked tokens."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
     lister = getattr(store, "list_monitor_summaries", None)
     if lister is not None:
@@ -209,6 +223,8 @@ async def collect(store, days: int) -> dict:
         lister = getattr(store, f"list_{name}", None)
         data[name] = list(await lister()) if lister is not None else []
     data["fills"] = [f for f in data["fills_lookback"] if (_ts(f) or since) >= since]
+    if shadow:
+        data.update(await collect_shadow(store))
     return data
 
 
@@ -642,6 +658,33 @@ FILES_DOC["archive/"] = ("archive/YYYY-MM-DD/ (UTC date of the pull): copies of 
                          "are kept; older ones are deleted.", {})
 FILES_DOC["pull.log"] = ("Output of the scheduled daily pull (scripts/schedule_pull_data.ps1), appended each run. "
                          "Check it when the data looks stale. Absent until the schedule has run.", {})
+FILES_DOC["shadow_episodes.csv"] = (
+    "Only with --shadow. One row per Shadow-mode hypothetical bid (an 'episode'; nothing real was ordered), newest "
+    "20,000 of the last 30 days, scrubbed fields only. Use it to see which episodes are capped, ended, unread or "
+    "unsettled.", {
+        "ep_id": "Episode id (sha256 hex).", "ticker": "Market ticker.", "series": "Series.",
+        "side": "Side the hypothetical bid buys: yes | no.", "price": "Bid price for that side, dollars.",
+        "count": "Contracts the bid would have been for.", "cost": "count x price, dollars.",
+        "methodology": "1 = legacy (uncapped, joined before the capped code); 2 = capped. The headline uses 2 only.",
+        "capped": "true if a limit refused the bid (recorded, never scored).",
+        "cap_reason": "series_cap | market_cap | open_cap | run_budget when capped, else empty.",
+        "join_ts": "When the bid joined (" + TS + ").", "end_ts": "When the bid ended (" + TS + "); empty while open.",
+        "end_reason": "cancel | closed | shadow_off | stale.", "close_time": "Market close (" + TS + ").",
+        "trades_read": "true once the public trades after the join were read for the fill estimate.",
+        "fill": "Fill estimate JSON {lo, mid, hi} in contracts; empty = unknown.",
+        "result": "yes | no | void once settled; empty = not yet settled.",
+        "settled_ts": "When the result was read (" + TS + ").",
+        "settle_checked_ts": "When settlement was last looked up for this episode (" + TS + ").",
+    })
+FILES_DOC["shadow_passes.csv"] = (
+    "Only with --shadow. One row per Shadow cycle (newest 5,000): counts, errors and the held-position figures.", {
+        "ts": "Cycle time (" + TS + ").", "ok": "true if the cycle ran without error.",
+        "held_cost": "Dollars the simulated held position counted this cycle.",
+        "ceiling": "Simulated open-exposure ceiling, dollars.", "headroom": "Ceiling room left for new bids, dollars.",
+        "held_stale_ignored": "Ended episodes left out of the held position as legacy or long past close.",
+        "capped_new": "New bids refused by a limit this cycle.", "settled": "Episodes settled this cycle.",
+        "voided": "Episodes voided this cycle.", "errors": "Error type names JSON (no messages).",
+    })
 GENERIC = {"fills.csv": "Kalshi fill field passed through unchanged (see Kalshi API docs).",
            "settlements.csv": "Kalshi settlement field passed through unchanged (see Kalshi API docs).",
            "arb_opportunities.csv": "Extra field recorded by the arbitrage scanner."}
@@ -706,6 +749,12 @@ def write_all(data: dict, out: Path, days: int, source: str) -> dict:
         headers[fname] = write_csv(out / fname, tables[name], AUDIT_KEYS if name == "audit" else None,
                                    FLATTEN.get(name, ()))
         counts[fname] = len(tables[name])
+    if "shadow_episodes" in data:                             # --shadow: scrubbed, fixed field list for episodes
+        headers["shadow_episodes.csv"] = write_csv(out / "shadow_episodes.csv", data["shadow_episodes"],
+                                                   SHADOW_EPISODE_KEYS)
+        counts["shadow_episodes.csv"] = len(data["shadow_episodes"])
+        headers["shadow_passes.csv"] = write_csv(out / "shadow_passes.csv", data["shadow_passes"])
+        counts["shadow_passes.csv"] = len(data["shadow_passes"])
     for name in ("monitor_summaries", "config_versions", "periods", "cash_flows"):
         (out / f"{name}.json").write_text(json.dumps(clean(data[name]), indent=2), encoding="utf-8")
         counts[f"{name}.json"] = len(data[name])
@@ -734,7 +783,7 @@ def write_all(data: dict, out: Path, days: int, source: str) -> dict:
     return counts
 
 
-async def run(days: int, out: Path, seed_demo: bool) -> dict:
+async def run(days: int, out: Path, seed_demo: bool, shadow: bool = False) -> dict:
     if days < 1:
         raise SystemExit("--days must be >= 1")
     if seed_demo:
@@ -754,7 +803,7 @@ async def run(days: int, out: Path, seed_demo: bool) -> dict:
         store = get_store(SimpleNamespace(store="mongo", mongodb_uri=uri, mongodb_db=db))
         source = "MongoDB Atlas"
     try:
-        data = await collect(store, days)
+        data = await collect(store, days, shadow)
     finally:
         await store.close()
     return write_all(data, out, days, source)
@@ -765,9 +814,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--days", type=int, default=90)
     p.add_argument("--out", default=str(REPO_ROOT / "local_data"))
     p.add_argument("--seed-demo", action="store_true", help="use fake in-memory data instead of Atlas")
+    p.add_argument("--shadow", action="store_true",
+                   help="also export shadow_episodes.csv and shadow_passes.csv (scrubbed, read-only)")
     a = p.parse_args(argv)
     out = Path(a.out).resolve()
-    counts = asyncio.run(run(a.days, out, a.seed_demo))
+    counts = asyncio.run(run(a.days, out, a.seed_demo, a.shadow))
     print(f"Wrote {out}")
     for k, v in counts.items():
         print(f"  {k:24s} {v}")

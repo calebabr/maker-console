@@ -203,7 +203,7 @@ async def test_stacking_one_market_stops_at_the_cap_and_the_summary_excludes_cap
 async def test_headline_gate_needs_7_filled_days_and_30_filled_episodes(env):
     now = _midday()
     # 7 close days x 5 filled episodes = 35: both conditions met
-    ok = _day_eps(7, 5)
+    ok = _day_eps(7, 5, now=now)
     await _as_period_one_history(env, ok)
     s = await _summary(env, "?period=all")
     assert s["status"]["headline_status"] == "ok" and s["headline"]["headline_status"] == "ok"
@@ -212,14 +212,14 @@ async def test_headline_gate_needs_7_filled_days_and_30_filled_episodes(env):
     assert isinstance(s["headline"]["pnl"]["ci90"], list) and len(s["headline"]["pnl"]["ci90"]) == 2
     assert s["day_basis"] == "close_day"
     # 7 days x 4 = 28 filled: too few episodes
-    few = _day_eps(7, 4)
+    few = _day_eps(7, 4, now=now)
     await env.store.set_shadow_summary(sh.build_summary(few, [], now))
     s = await _summary(env, "?period=all")
     assert s["headline"]["headline_status"] == "too_early" and s["headline"]["n_settled_fills"] == 28
     assert s["headline"]["pnl"]["ci90"] is None and s["headline"]["roi"]["ci90"] is None
     assert s["headline"]["ci_reliable"] is False
     # 6 days x 6 = 36 filled: too few days
-    short = _day_eps(6, 6)
+    short = _day_eps(6, 6, now=now)
     await env.store.set_shadow_summary(sh.build_summary(short, [], now))
     s = await _summary(env, "?period=all")
     assert s["headline"]["headline_status"] == "too_early" and s["status"]["days_covered"] == 6
@@ -228,7 +228,7 @@ async def test_headline_gate_needs_7_filled_days_and_30_filled_episodes(env):
 
 async def test_unfilled_days_do_not_count_toward_the_gate(env):
     now = _midday()
-    eps = _day_eps(6, 6) + [_ep(f"z{k}", now - timedelta(days=9 + k), fill=0.0) for k in range(3)]
+    eps = _day_eps(6, 6, now=now) + [_ep(f"z{k}", now - timedelta(days=9 + k), fill=0.0) for k in range(3)]
     await env.store.set_shadow_summary(sh.build_summary(eps, [], now))
     s = await _summary(env, "?period=all")
     assert s["status"]["days_covered"] == 6 and s["status"]["settled_days"] >= 7

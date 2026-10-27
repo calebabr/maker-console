@@ -74,6 +74,12 @@ SHADOW_ARB_READ_RESERVE_S = CLIENT_TIMEOUT_S * (CLIENT_MAX_RETRIES + 1)   # L1: 
 DEADLINE_MARGIN_S = 5.0              # the worker stops itself this long before the cycle budget runs out
 # 2A-3 F1: held positions and exposure caps (the real strategy's limits, applied to an assumed capital)
 SHADOW_HELD_SCAN = 3000              # ended, unsettled episodes read per cycle to rebuild the held position
+# A bid still unsettled this long after its market closed is out of the held position (the real bot's capital would
+# have been released or the market voided), and so is a legacy (methodology 1) episode. Counted in the pass doc.
+SHADOW_HELD_GRACE = timedelta(hours=36)
+# The summary says the ceiling is full once this many of the newest baseline passes in a row were full (no
+# headroom, or more capped than uncapped new bids): Shadow is then not estimating.
+SHADOW_CEILING_FULL_CYCLES = 2
 SHADOW_CAPITAL_DEFAULT = 150.0       # cloud setting shadow_capital (validated 20-100000 by the cloud schema)
 SHADOW_CAPITAL_MIN, SHADOW_CAPITAL_MAX = 20.0, 100000.0
 DEFAULT_MAX_OPEN_FRAC = 0.5
@@ -489,6 +495,16 @@ def held_cost(ep: dict) -> float:
     return max(0.0, count * price)
 
 
+def held_ignored(ep: dict, now: datetime) -> bool:
+    """True for an ended episode that no longer counts toward the simulated held position: a legacy (methodology 1,
+    uncapped) one, or one whose market closed more than SHADOW_HELD_GRACE ago, whether or not a result was read.
+    An episode with no stored methodology and no close time (a bare fixture) is never ignored."""
+    if "methodology" in ep and methodology_of(ep) != METHODOLOGY:
+        return True
+    close = _dt(ep.get("close_time"))
+    return close is not None and now - close > SHADOW_HELD_GRACE
+
+
 def series_of(ep: dict) -> str:
     return str(ep.get("series") or str(ep.get("ticker") or "").split("-", 1)[0])
 
@@ -751,9 +767,14 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
     held_series: dict[str, float] = {}
     held_markets: set[tuple[str, str]] = set()
     held_ticker: dict[str, float] = {}                          # H2: a market's held cost, both sides together
+    held_stale_ignored, held_stale_cost = 0, 0.0
     for ep in held_eps.values():
         h = held_cost(ep)
         if h <= 0:
+            continue
+        if held_ignored(ep, now):                               # legacy, or long past its close: not held capital
+            held_stale_ignored += 1
+            held_stale_cost += h
             continue
         held_total += h
         sk = series_of(ep)
@@ -970,7 +991,8 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
                 "errors": list(dict.fromkeys(errors)),
                 # 2A-3 F1
                 "capped_new": capped_new, "held_cost": round(held_for_doc, 4), "held_markets": len(held_markets),
-                "ceiling": round(ceiling, 4), "headroom": round(headroom, 4), "series_capped": series_capped}
+                "ceiling": round(ceiling, 4), "headroom": round(headroom, 4), "series_capped": series_capped,
+                "held_stale_ignored": held_stale_ignored, "held_stale_cost": round(held_stale_cost, 4)}
     if mcap is not None:                                        # H2: additive, only when a market cap is in force
         pass_doc["market_capped"] = sorted(market_capped)[:PASS_MARKET_CAPPED_MAX]
     arb = None
@@ -1158,6 +1180,26 @@ def methodology_of(doc: Any) -> int:
     return METHODOLOGY if j is not None and j >= METHODOLOGY2_SINCE else LEGACY_METHODOLOGY
 
 
+def pass_ceiling_full(p: dict) -> bool:
+    """One baseline pass was ceiling-full: no headroom left, or it refused more new bids than it opened."""
+    new, capped = qp._f(p.get("new_eps")) or 0.0, qp._f(p.get("capped_new")) or 0.0
+    head = qp._f(p.get("headroom"))
+    return (head is not None and head <= 0) or (capped > 0 and capped > new - capped)
+
+
+def ceiling_status(passes: Iterable[dict]) -> dict:
+    """status fields: `ceiling_full` is true when the newest SHADOW_CEILING_FULL_CYCLES baseline passes were all
+    ceiling-full (then Shadow is not estimating); `held_cost` and `ceiling` come from the newest pass."""
+    ordered = sorted((p for p in passes if _dt(p.get("ts")) is not None), key=lambda p: _dt(p["ts"]), reverse=True)
+    last = ordered[:SHADOW_CEILING_FULL_CYCLES]
+    full = len(last) >= SHADOW_CEILING_FULL_CYCLES and all(pass_ceiling_full(p) for p in last)
+    out: dict[str, Any] = {"ceiling_full": full}
+    if full:
+        out["held_cost"] = qp._f(last[0].get("held_cost"))
+        out["ceiling"] = qp._f(last[0].get("ceiling"))
+    return out
+
+
 def build_summary(episodes: Iterable[dict], passes: Iterable[dict], now: datetime, *, enabled: bool = True,
                   standin: bool = False, intervals: list[int] | None = None) -> dict:
     """The served summary. The headline (and every existing field, `days_covered` and the too-early gate
@@ -1174,6 +1216,7 @@ def build_summary(episodes: Iterable[dict], passes: Iterable[dict], now: datetim
     bpasses = [p for p in plist if interval_of(p) == BASELINE_INTERVAL]
     out = sm.summarize(base, now, passes=bpasses, enabled=enabled, standin=standin)
     out["methodology"] = METHODOLOGY
+    out["status"].update(ceiling_status(bpasses))
     if legacy:
         out["legacy"] = sm.legacy_block(legacy, now)
         out["legacy_banner"] = sm.LEGACY_BANNER

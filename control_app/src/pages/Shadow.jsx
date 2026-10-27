@@ -59,6 +59,7 @@ function Range({ label, r, fmt }) {
 }
 
 const winText = (v) => (typeof v === 'number' ? pct(v, { sign: false, digits: 1 }) : '—');
+export const CEILING_FULL_TEXT = 'Shadow is not estimating: its simulated ceiling is full.';
 export const TOO_EARLY_REASON = 'Too early to trust: needs at least 7 close days with a fill and 30 filled episodes.';
 
 function Honesty({ h, st, data }) {
@@ -407,6 +408,7 @@ export default function Shadow() {
   const st = (data && data.status) || {};
   const h = data && (zeroFee && data.headline_zero_fee ? data.headline_zero_fee : data.headline);
   const tooEarlyNew = !!(h && (h.headline_status === 'too_early' || (!h.headline_status && st.headline_status === 'too_early')));
+  const ceilingFull = st.ceiling_full === true;
   const noCorrected = !!(data && ((h && h.headline_status === 'no_corrected_data') || st.headline_status === 'no_corrected_data'));
   const caveats = data && Array.isArray(data.caveats) && data.caveats.length ? data.caveats : CAVEATS;
 
@@ -475,7 +477,17 @@ export default function Shadow() {
                 {st.truncated && <p className="hint">Older episodes were left out of this estimate to keep it fast.</p>}
               </Card>
 
-              {noCorrected ? (
+              {ceilingFull ? (
+                <div className="notice notice-error" role="alert" data-testid="ceiling-full">
+                  {CEILING_FULL_TEXT}
+                  {typeof st.held_cost === 'number' && typeof st.ceiling === 'number' && (
+                    <span className="hint">
+                      {' '}
+                      Held {money(st.held_cost)} against a ceiling of {money(st.ceiling)}.
+                    </span>
+                  )}
+                </div>
+              ) : noCorrected ? (
                 <div className="notice notice-info" role="status" data-testid="no-corrected">
                   No corrected data yet for this period
                 </div>
