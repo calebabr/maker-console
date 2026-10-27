@@ -40,7 +40,7 @@ Shared UI pieces FE-Shell exports in wave 1 for wave 2 to reuse: `components/Fol
 ## 5. Backend API additions (owner: Backend; all read endpoints behind `current_user`, writes follow settings rules)
 
 **`GET /api/status`** adds (no existing field removed or renamed):
-- `pnl_today`: realised P&L since local-midnight UTC day, `{maker: n|null, arb: n|null, you: n|null, total: n|null}`.
+- `pnl_today`: realised P&L of markets settled since local midnight in the viewer's zone (`?tz=<IANA name>`, UTC when absent or invalid), `{maker: n|null, arb: n|null, you: n|null, total: n|null}`. `null` = nothing settled (the app says "No settlements yet today"); `0` = settled and netted to zero. Sibling fields `pnl_today_tz` (zone used) and `pnl_today_since` (UTC instant). Also additive: `pnl_arb` (arbitrage, same shape as `pnl`) and `pnl_total` (`{d7, d30}` maker + arbitrage). The app labels the 30-day tile "Maker P&L (30 days)" and prints a one-line scope under each P&L figure from `utils/pnlScopes.js`.
 - `recent_passes`: last 12 passes, newest last: `[{ts, ok: bool, late: bool, errors: int}]`; `[]` if none.
 - `next_run_at`: ISO or null; `last_run_at`: ISO or null.
 - Check what `/status` and the runner already return before adding anything.

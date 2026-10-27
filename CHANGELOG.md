@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased - honest P&L labels
+- Overview: the 30-day tile is now "Maker P&L (30 days)" with a combined Maker + Arbitrage total and a Maker / Arbitrage split; every P&L figure on Overview, Analytics, Account, Arbitrage and Shadow carries a one-line scope (what it measures, date rule) from one registry, `utils/pnlScopes.js`.
+- Today's P&L starts at the viewer's local midnight (`GET /api/status?tz=`, UTC fallback for any unknown name) and says "No settlements yet today" instead of a dash; `$0.00` means settled and netted to zero.
+- Arbitrage: realized profit beside guaranteed profit, with a note on why they differ. Shadow: "No estimate yet" instead of a zeroed headline.
+- API (additive): `pnl_arb`, `pnl_total`, `pnl_today_tz`, `pnl_today_since` on `/api/status`.
+
 ## Unreleased - release pipeline and CI (Sprint 1)
 - `release` workflow: manual, main only. Gate (CI green on the exact commit, running server healthy, no arbitrage set executing, handover-capable or stopped), pending release approved in the app with 2FA (30 minutes), backend deploy and verify, frontend deploy and verify, ntfy, tag and notes.
 - Render: auto-deploy off, 120 s shutdown delay, new env names `APP_VERSION`, `HANDOVER_HMAC_KEY`, `DEPLOY_STATUS_KEY`, `RELEASE_TOKEN` (values only in the dashboard).
