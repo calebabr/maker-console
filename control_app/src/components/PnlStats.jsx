@@ -1,5 +1,6 @@
 import { money } from '../utils/format.js';
 import HelpIcon from './HelpIcon.jsx';
+import PnlScope from './PnlScope.jsx';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
@@ -9,11 +10,12 @@ function cls(v) {
 }
 
 /**
+ * `scope` (a utils/pnlScopes.js id) adds the one-line "what this measures" label under the figures.
  * 7- and 30-day P&L from `pnl: {d7, d30} | null` (GET /api/status, GET /api/arb).
  * Null (or a missing / non-numeric value) renders as a dash with a short reason,
  * never as $0.00.
  */
-export default function PnlStats({ pnl, big = true, emptyText = 'No settled fills yet.' }) {
+export default function PnlStats({ pnl, big = true, emptyText = 'No settled fills yet.', scope = null }) {
   const d7 = pnl && pnl.d7;
   const d30 = pnl && pnl.d30;
   const any = isNum(d7) || isNum(d30);
@@ -34,6 +36,7 @@ export default function PnlStats({ pnl, big = true, emptyText = 'No settled fill
           {w30 && <dd className="hint pnl-window" data-testid="pnl-window-30">{w30}</dd>}
         </div>
       </dl>
+      {scope && <PnlScope id={scope} />}
       {!any && <p className="hint">{emptyText}</p>}
     </>
   );

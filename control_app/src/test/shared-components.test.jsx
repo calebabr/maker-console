@@ -341,7 +341,7 @@ describe('waking screen (item 35)', () => {
     expect(stale).toHaveTextContent('Stale');
     expect(stale).toHaveTextContent('Cash $212.40');
     expect(stale).toHaveTextContent('At Risk $37.60');
-    expect(stale).toHaveTextContent('30-Day P&L +$17.12');
+    expect(stale).toHaveTextContent('Maker P&L (30 days) +$17.12');
     expect(stale).toHaveTextContent(/as of \d{1,2}:\d{2} (AM|PM)/);
     expect(screen.getByText('Stop still works.')).toBeInTheDocument();
     // The bar advances with time and never reaches 100% while the server is still asleep.

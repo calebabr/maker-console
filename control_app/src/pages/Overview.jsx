@@ -6,6 +6,7 @@ import StatusCard from '../components/StatusCard.jsx';
 import StatusWidget from '../components/StatusWidget.jsx';
 import SinceCard from '../components/SinceCard.jsx';
 import SourcePnl from '../components/SourcePnl.jsx';
+import PnlScope from '../components/PnlScope.jsx';
 import PeriodSelect from '../components/PeriodSelect.jsx';
 import Sparkline from '../components/Sparkline.jsx';
 import PnlStats from '../components/PnlStats.jsx';
@@ -225,7 +226,11 @@ export default function Overview() {
             {periodList.length > 0 && (
               <PeriodSelect periods={periodList} value={pnlPeriod} onChange={setPnlPeriodSel} label="P&L period" id="pnl-period-select" />
             )}
-            <PnlStats pnl={periodPnl || status.pnl} emptyText="No settled fills yet. P&L appears once fills settle." />
+            <PnlStats
+              pnl={periodPnl || status.pnl}
+              scope={periodPnl && periodPnl.basis === 'fill_date' ? 'makerByFill' : 'maker'}
+              emptyText="No settled fills yet. P&L appears once fills settle."
+            />
             {periodPnl && periodPnl.basis === 'fill_date' && (
               <p className="hint" data-testid="pnl-basis">Counted by fill date: a position belongs to the period it was filled in.</p>
             )}
@@ -240,6 +245,7 @@ export default function Overview() {
               positions={positions.data}
               totalLabel={period === 'all' ? 'Total Today' : 'Total'}
             />
+            <PnlScope id={period === 'all' ? 'bySource' : 'bySourcePeriod'} ctx={{ tz: status.pnl_today_tz }} />
             {equity.length > 1 && (
               <>
                 <Sparkline

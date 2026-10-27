@@ -74,7 +74,7 @@ export default function StatusWidget({ status, cardRef }) {
         </span>
         <span className={`sw-pnl ${pnlClass(today)}`}>
           <span className="sw-pnl-label">Today</span>
-          {formatMoney(today, { sign: true })}
+          {typeof today === 'number' ? formatMoney(today, { sign: true }) : 'None yet'}
         </span>
       </button>
       {open && (

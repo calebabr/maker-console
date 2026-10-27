@@ -15,10 +15,16 @@ All routes need a normal login; every POST/DELETE below needs fresh 2FA and is a
 The write routes return the same body as `GET /api/periods` plus `created` or `deleted`. Errors: 400 (validation messages), 409, 422 (unknown period), 503 `store_unavailable`.
 
 ## Period filter
-`period=<id>|current|all` (default `all`, response unchanged) on `/api/analytics/summary`, `/trades`, `/trades.csv`, `/my-trades`, `/api/activity`, `/api/history`, `/api/pnl/by-source`. Attribution is by fill date. With a period, `days` is replaced by the smallest allowed value reaching the period start. `/api/status` `pnl` and `/api/since` are not period-aware.
+`period=<id>|current|all` (default `all`, response unchanged) on `/api/analytics/summary`, `/trades`, `/trades.csv`, `/my-trades`, `/api/activity`, `/api/history`, `/api/pnl/by-source`. Attribution is by fill date. With a period, `days` is replaced by the smallest allowed value reaching the period start. `/api/status` `pnl` is period-aware only with `?period=`; `/api/since` is not.
 
 ## Arbitrage
 `GET/PUT /api/arb`: settings gain `arb_scan_cap` (15), `arb_day_cap` (45), `arb_series_cap_frac` (0.35), `arb_demo_execute` (false, schema type `boolean`); `ceilings` carries their maxima; `status.demo_execute`. `pnl` is live only; `pnl_demo_execute` `{d7,d30,sets,demo:true}` is separate. Opportunity `mode` is `live`, `demo-execute` or `log-only`; gate refusals read `skipped: gate <reason>`. Changing any of these needs fresh 2FA.
+
+## P&L scopes and Today's boundary (`GET /api/status`, additive)
+- `tz=<IANA name>` (optional query): Today's P&L (`pnl_today`) counts markets settled since the viewer's local midnight. The name is checked against the tz database (letters, digits, `_+-/`, at most 64 characters); anything unknown, malformed or oversized silently means UTC (never an error). Storage, settlements, the journal and reconciliation stay UTC.
+- `pnl_today_tz`: the zone actually used (`"UTC"` after a fallback). `pnl_today_since`: the UTC instant of that local midnight. `pnl_today` fields stay `null` when nothing settled in the window; a real net of zero is `0.0`. Cached 60 s per (mode, zone), at most 16 entries.
+- `pnl_arb`: the arbitrage block in the same shape as `pnl` (`{d7,d30,settled_fills}` by settlement time; period-aware like `pnl`). `pnl_total`: `{d7,d30}` = maker + arbitrage, same date rule. Both `null` when nothing settled. `pnl` is unchanged (maker only).
+- What each figure measures (the app prints these under the numbers): Overview Maker P&L = realized maker fills by settlement date (UTC); Today = realized, bot and manual, settled since local midnight; Analytics totals = maker + arbitrage by settlement date (UTC); period summary = by fill date (UTC); Arbitrage `pnl` = guaranteed profit of filled sets by execution time, not realized.
 
 ## Other
 - `POST /api/bot/start`: 409 `invalid_config: <reasons>` if the reloaded config fails validation (the bot stays stopped). To stop: `POST /api/bot/stop` or the app's Stop button (no 2FA).

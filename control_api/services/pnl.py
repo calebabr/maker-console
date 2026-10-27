@@ -6,8 +6,49 @@ maker strategy; taker fills are the arbitrage legs (and any manual taker trades,
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import re
+import zoneinfo
+from datetime import datetime, time, timedelta, timezone, tzinfo
+from functools import lru_cache
 from typing import Iterable
+
+
+# ---- viewer time zone (Today's P&L day boundary). Storage, settlements and everything else stay UTC; only the
+# "since local midnight" instant is computed in the viewer's zone. Anything unknown or malformed means UTC.
+TZ_MAX_LEN = 64
+_TZ_RE = re.compile(r"^[A-Za-z0-9_+\-]+(?:/[A-Za-z0-9_+\-]+){0,2}$")
+
+
+@lru_cache(maxsize=1)
+def _known_zones() -> frozenset[str]:
+    try:
+        return frozenset(zoneinfo.available_timezones())
+    except Exception:  # noqa: BLE001   (no tz database on this host: everything falls back to UTC)
+        return frozenset()
+
+
+def resolve_tz(name) -> tuple[tzinfo, str]:
+    """(tzinfo, canonical name) for an IANA zone name from the client; (UTC, "UTC") for anything missing, too long,
+    malformed or not in the tz database. Never raises. The returned name is always a validated database key (or
+    "UTC"), so it is safe to use in a cache key."""
+    if isinstance(name, str) and 0 < len(name) <= TZ_MAX_LEN and _TZ_RE.fullmatch(name) and name in _known_zones():
+        try:
+            return zoneinfo.ZoneInfo(name), name
+        except Exception:  # noqa: BLE001
+            pass
+    return timezone.utc, "UTC"
+
+
+def local_midnight_utc(now: datetime, tz: tzinfo) -> datetime:
+    """The first instant of `now`'s calendar day in `tz`, as an aware UTC datetime. DST-safe: on a fall-back day the
+    first occurrence of 00:00 is used; where DST skips midnight the day starts at the first real instant."""
+    local = now.astimezone(tz)
+    start = datetime.combine(local.date(), time.min, tzinfo=tz).astimezone(timezone.utc)
+    for _ in range(16):                     # midnight does not exist (a gap): step to the first instant of the day
+        if start.astimezone(tz).date() >= local.date():
+            break
+        start += timedelta(minutes=15)
+    return start
 
 
 def _f(v) -> float | None:
@@ -245,3 +286,34 @@ async def compute_by_fill(store, lo7: datetime, lo30: datetime, hi: datetime | N
     settlements = await store.list_settlements(since=lo30, limit=20000,
                                                fields=("ticker", "market_result", "result", "ts")) if fills else []
     return windows_by_fill(fills, settlements, lo7=lo7, lo30=lo30, hi=hi, taker=taker, env=env)
+
+
+async def compute_pair(store, now: datetime, *, env: str | None = None) -> tuple[dict | None, dict | None]:
+    """(maker, arbitrage) settlement-time windows from ONE pair of store reads (same maths as compute() twice).
+    Raises on store errors (callers wrap it)."""
+    settlements = await store.list_settlements(since=now - timedelta(days=30), limit=100000)
+    if not settlements:
+        return None, None
+    fills = await store.list_fills(since=now - timedelta(days=60), limit=100000)
+    return (windows(fills, settlements, now, taker=False, env=env),
+            windows(fills, settlements, now, taker=True, env=env))
+
+
+async def compute_by_fill_pair(store, lo7: datetime, lo30: datetime, hi: datetime | None, *,
+                               env: str | None = None) -> tuple[dict, dict]:
+    """(maker, arbitrage) fill-date windows from ONE pair of store reads (same maths as compute_by_fill() twice)."""
+    fills = await store.list_fills(since=lo30, until=hi, limit=50000, fields=FILL_FIELDS)
+    settlements = await store.list_settlements(since=lo30, limit=20000,
+                                               fields=("ticker", "market_result", "result", "ts")) if fills else []
+    return (windows_by_fill(fills, settlements, lo7=lo7, lo30=lo30, hi=hi, taker=False, env=env),
+            windows_by_fill(fills, settlements, lo7=lo7, lo30=lo30, hi=hi, taker=True, env=env))
+
+
+def combine_windows(*blocks: dict | None) -> dict | None:
+    """Sum of d7 / d30 across P&L blocks (maker + arbitrage); a window with no figure in any block stays None.
+    None if no block has any figure."""
+    out = {}
+    for k in ("d7", "d30"):
+        vals = [b[k] for b in blocks if isinstance(b, dict) and isinstance(b.get(k), (int, float))]
+        out[k] = round(sum(vals), 2) if vals else None
+    return out if any(v is not None for v in out.values()) else None

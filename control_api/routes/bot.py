@@ -16,6 +16,7 @@ from .periods import window_for
 from ..services import benchmarks as bench
 from ..services import botfiles
 from ..services import periods as per
+from ..services import pnl as pnlsvc
 from ..services import strategies as strat
 
 router = APIRouter(prefix="/api")
@@ -40,10 +41,13 @@ def _num(v):
 
 
 @router.get("/status")
-async def status(request: Request, period: str | None = Query(None), user: dict = Depends(current_user)) -> dict:
+async def status(request: Request, period: str | None = Query(None), tz: str | None = Query(None),
+                 user: dict = Depends(current_user)) -> dict:
     """Runner status plus read-only figures. `period=<all|current|id>` (Sprint 2A-2) re-bases the rolling `pnl`
     block on a period, clipped to its start and attributed by fill date, with a `window` label; omitted = the
-    unchanged settlement-time d7 / d30."""
+    unchanged settlement-time d7 / d30. `tz=<IANA name>` moves only the Today boundary to the viewer's local
+    midnight; an unknown or malformed name silently means UTC (never an error). `pnl_arb` / `pnl_total` are the
+    arbitrage and maker + arbitrage blocks beside `pnl` (additive)."""
     pw = await window_for(request, period) if period is not None else None     # 422 on an unknown id
     r = _runner(request)
     store = request.app.state.store
@@ -58,9 +62,11 @@ async def status(request: Request, period: str | None = Query(None), user: dict 
     out["limits"] = {"run_budget": cfg.get("run_budget"), "max_open_frac": cfg.get("max_open_frac")}
     # realised maker P&L (non-taker fills x settlement results, by settlement time); null until data exists
     if period is None:
-        out["pnl"] = await r.pnl(taker=False)
+        out["pnl"], out["pnl_arb"] = await r.pnl_pair()
     else:       # rolling windows clipped to the period; a store error gives null like the default path
-        out["pnl"] = await _safe(per.rolling_pnl(store, pw, now, env=getattr(r, "mode", None)))
+        out["pnl"], out["pnl_arb"] = await _safe(per.rolling_pnl_pair(store, pw, now, env=getattr(r, "mode", None)),
+                                                 default=(None, None))
+    out["pnl_total"] = pnlsvc.combine_windows(out["pnl"], out["pnl_arb"])      # maker + arbitrage, same date rule
     # fill-quality telemetry vs the optional private market baseline (services/benchmarks.py); n=0 until scored
     out["fill_quality"] = r.fill_quality()          # S-23: cached once per pass; no store read here
     # queue-position telemetry (overall only; per series on /markets); cached once per pass, null if unknown
@@ -68,7 +74,9 @@ async def status(request: Request, period: str | None = Query(None), user: dict 
     out["expected_roi"] = bench.default_roi()        # private benchmark file only; null without it
     out["strategy_installed"] = not botfiles.is_standin()   # false = public stand-in: LIVE is refused
     # UX sprint item 25 (additive): today's realised P&L by source, the last 12 passes, timing in contract names
-    out["pnl_today"] = await r.pnl_today() or dict.fromkeys(strat.bucket_ids() + ["bot", "total"])   # 60 s cache
+    today = await r.pnl_today_view(tz)                                  # 60 s cache per (mode, validated zone)
+    out["pnl_today"] = today["value"] or dict.fromkeys(strat.bucket_ids() + ["bot", "total"])
+    out["pnl_today_tz"], out["pnl_today_since"] = today["tz"], today["since"]   # zone actually used ("UTC" = fallback)
     out["recent_passes"] = await r.recent_passes()
     out["last_run_at"] = out.get("last_run_utc")
     trading = r.desired == "running" and not out.get("kill_switch") and r.settings.runner_enabled

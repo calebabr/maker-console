@@ -17,6 +17,7 @@ import { useMyTrades } from '../components/analytics/useMyTrades.js';
 import { useStatus } from '../context/StatusContext.jsx';
 import { useCancellableResource } from '../hooks/useCancellableResource.js';
 import { useResource } from '../hooks/useResource.js';
+import PnlScope from '../components/PnlScope.jsx';
 import { api, query } from '../services/api.js';
 import { ago, formatMoney, formatPct, num } from '../utils/format.js';
 import { DAY_OPTIONS, rate, signCls } from '../utils/analytics.js';
@@ -89,6 +90,7 @@ function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days }) {
       {!empty && <EdgeHolding summary={s} />}
       <Card title="Totals" subtitle="Bot trades only.">
         <Totals t={totals} />
+        <PnlScope id="analytics" />
         <p className="hint">
           {num(totals.settled_fills)} settled fills
           <HelpIcon term="settlement" /> · {num(totals.open_fills)} still open
@@ -137,6 +139,7 @@ function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days }) {
             ))}
           </div>
           <PnlCurve points={curve} kind={hasSplit ? kind : 'all'} />
+          <PnlScope id="analytics" />
           <p className="hint">
             Maker = resting bids that got filled; taker = arbitrage legs
             <HelpIcon term="maker-taker" />.

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Card from '../components/Card.jsx';
 import ShadowBand from '../components/ShadowBand.jsx';
+import PnlScope from '../components/PnlScope.jsx';
 import PeriodSelect from '../components/PeriodSelect.jsx';
 import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
 import { useResource } from '../hooks/useResource.js';
@@ -29,8 +30,16 @@ const rate = (v) => (typeof v === 'number' ? pct(v, { sign: false, digits: 1 }) 
 const roi = (v) => (typeof v === 'number' ? pct(v, { sign: true }) : NO_DATA);
 const cellLabel = (c) => (Array.isArray(c) ? c.join(' / ') : String(c ?? ''));
 
-function Range({ label, r, fmt }) {
+function Range({ label, r, fmt, empty = false }) {
   if (!r) return null;
+  if (empty) {
+    return (
+      <div>
+        <h3 className="subhead">{label}</h3>
+        <p className="muted" data-testid="range-empty">{NO_ESTIMATE_TEXT}</p>
+      </div>
+    );
+  }
   const ci = Array.isArray(r.ci90) ? r.ci90 : null;
   return (
     <div>
@@ -59,6 +68,8 @@ function Range({ label, r, fmt }) {
 }
 
 const winText = (v) => (typeof v === 'number' ? pct(v, { sign: false, digits: 1 }) : '—');
+export const NO_ESTIMATE_TEXT = 'No estimate yet';
+export const NO_ESTIMATE_REASON = 'Nothing has settled yet, so there is no estimate. A zero here would mean no data, not a result.';
 export const CEILING_FULL_TEXT = 'Shadow is not estimating: its simulated ceiling is full.';
 export const TOO_EARLY_REASON = 'Too early to trust: needs at least 7 close days with a fill and 30 filled episodes.';
 
@@ -409,6 +420,8 @@ export default function Shadow() {
   const h = data && (zeroFee && data.headline_zero_fee ? data.headline_zero_fee : data.headline);
   const tooEarlyNew = !!(h && (h.headline_status === 'too_early' || (!h.headline_status && st.headline_status === 'too_early')));
   const ceilingFull = st.ceiling_full === true;
+  // No settled simulated fills at all: the zeroed headline is "no data", never an estimate of $0.00.
+  const noEstimate = !!(h && tooEarlyNew && !(h.n_settled_fills > 0) && !(st.settled_episodes > 0));
   const noCorrected = !!(data && ((h && h.headline_status === 'no_corrected_data') || st.headline_status === 'no_corrected_data'));
   const caveats = data && Array.isArray(data.caveats) && data.caveats.length ? data.caveats : CAVEATS;
 
@@ -518,9 +531,20 @@ export default function Shadow() {
                         Zero fees
                       </button>
                     </div>
-                    <Range label={zeroFee ? 'Estimated P&L, zero fees' : 'Estimated P&L, after maker fees'} r={h.pnl} fmt={usd} />
+                    {noEstimate && (
+                      <div className="notice notice-info" role="status" data-testid="no-estimate">
+                        {NO_ESTIMATE_REASON}
+                      </div>
+                    )}
+                    <Range
+                      label={zeroFee ? 'Estimated P&L, zero fees' : 'Estimated P&L, after maker fees'}
+                      r={h.pnl}
+                      fmt={usd}
+                      empty={noEstimate}
+                    />
+                    <PnlScope id="shadow" />
                     <Range label="Estimated ROI" r={h.roi} fmt={roi} />
-                    <Range label="Estimated fill rate" r={h.fill_rate} fmt={rate} />
+                    <Range label="Estimated fill rate" r={h.fill_rate} fmt={rate} empty={noEstimate} />
                     <Honesty h={h} st={st} data={data} />
                     </div>
                   </Card>

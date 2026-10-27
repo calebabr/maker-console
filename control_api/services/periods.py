@@ -394,3 +394,12 @@ async def rolling_pnl(store, period: dict | None, now: datetime, *, taker: bool 
     res = await pnlsvc.compute_by_fill(store, utc(w7["from"]), utc(w30["from"]), hi, taker=taker, env=env)
     return {**res, "basis": "fill_date", "period": public_period(period) if period else None,
             "window": {"d7": w7, "d30": w30}}
+
+
+async def rolling_pnl_pair(store, period: dict | None, now: datetime, *, env: str | None = None) -> tuple[dict, dict]:
+    """(maker, arbitrage) blocks, each exactly the shape rolling_pnl() returns, from one pair of store reads."""
+    w7, w30 = rolling_window(period, 7, now), rolling_window(period, 30, now)
+    maker, arb = await pnlsvc.compute_by_fill_pair(store, utc(w7["from"]), utc(w30["from"]), utc(w30["to"]), env=env)
+    extra = {"basis": "fill_date", "period": public_period(period) if period else None,
+             "window": {"d7": w7, "d30": w30}}
+    return {**maker, **extra}, {**arb, **extra}
