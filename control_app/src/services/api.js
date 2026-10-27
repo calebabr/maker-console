@@ -191,7 +191,7 @@ async function transport(method, path, init) {
  *  - path: starts with "/api/..." or "/healthz"
  *  - code: 6-digit TOTP code -> X-2FA-Code header
  *  - auth: send the Bearer token (default true)
- *  - cache: write the response to sessionStorage (default: GET only)
+ *  - cache: write the response to sessionStorage (default: GET only); cacheKey: store it under this key, not the path
  *  - raw: return {text, header(name)} instead of parsed JSON (non-JSON downloads, never cached)
  *  - signal: optional AbortSignal from the caller. Aborting it cancels the request and
  *    rejects with an ApiError whose `aborted` is true (callers should ignore it).
@@ -293,7 +293,7 @@ export async function request(method, path, opts = {}) {
     };
     return { text: rawText, header };
   }
-  if (cache) writeCache(path, data);
+  if (cache) writeCache(opts.cacheKey || path, data);
   return data;
 }
 
@@ -329,7 +329,12 @@ export const api = {
 
   // Status & control
   healthz: () => request('GET', '/healthz', { auth: false, cache: false }),
-  status: ({ period } = {}) => request('GET', `/api/status${query({ period })}`, period ? { cache: false } : undefined),
+  // The plain call also sends the viewer's IANA time zone so Today's P&L starts at local midnight (the API ignores
+  // an unknown name and uses UTC). Cached under the plain path so the offline fallback still finds it.
+  status: ({ period } = {}) =>
+    period
+      ? request('GET', `/api/status${query({ period })}`, { cache: false })
+      : request('GET', `/api/status${query({ tz: viewerTimeZone() })}`, { cacheKey: '/api/status' }),
   stop: () => request('POST', '/api/bot/stop'), // never needs 2FA
   start: (code) => request('POST', '/api/bot/start', { code }),
   runOnce: () => request('POST', '/api/bot/run-once'),
@@ -431,6 +436,16 @@ export const api = {
 };
 
 // {a: 1, b: '', c: null} -> "?a=1" (empty / null / undefined values are left out).
+/** The device's IANA time zone name (e.g. "America/Chicago"), or undefined when it cannot be read. */
+export function viewerTimeZone() {
+  try {
+    const z = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof z === 'string' && z.length > 0 && z.length <= 64 ? z : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function query(params) {
   const parts = Object.entries(params || {})
     .filter(([, v]) => v !== undefined && v !== null && v !== '')

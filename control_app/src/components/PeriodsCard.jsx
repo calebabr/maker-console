@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import Card from './Card.jsx';
+import PnlScope from './PnlScope.jsx';
 import PeriodSelect from './PeriodSelect.jsx';
 import { IconLock } from './Icons.jsx';
 import { ErrorNotice, Loading, StaleNotice } from './Notices.jsx';
@@ -56,15 +57,19 @@ export function PeriodSummary({ summary }) {
           </>
         )}
       </dl>
+      <PnlScope id="period" />
       {summary.pnl_basis === 'fill_date' && (
         <p className="hint" data-testid="ps-basis">
           Profit &amp; Loss is counted by fill date: a position belongs to the period it was filled in, even if it settles later.
         </p>
       )}
       {cf.equity_change_label && isNum(cf.equity_change_ex_flows) && (
-        <p className="hint" data-testid="ps-equity-change">
-          Equity change {formatMoney(cf.equity_change_ex_flows, { sign: true })}: {cf.equity_change_label}
-        </p>
+        <>
+          <p className="hint" data-testid="ps-equity-change">
+            Equity change {formatMoney(cf.equity_change_ex_flows, { sign: true })}: {cf.equity_change_label}
+          </p>
+          <PnlScope id="equity" />
+        </>
       )}
       <p className="hint">Deposits and withdrawals are listed for context. They are never added to or taken out of P&amp;L.</p>
     </div>

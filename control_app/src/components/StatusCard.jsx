@@ -4,6 +4,9 @@ import Chip from './Chip.jsx';
 import HelpIcon from './HelpIcon.jsx';
 import HeartbeatStrip from './HeartbeatStrip.jsx';
 import StopButton from './StopButton.jsx';
+import PnlScope from './PnlScope.jsx';
+import PnlCombined from './PnlCombined.jsx';
+import { TODAY_EMPTY } from '../utils/pnlScopes.js';
 import { IconLock } from './Icons.jsx';
 import { formatAgo, formatMoney, formatUntil } from '../utils/format.js';
 import { abnormalities, isRunning, overallState, ringProgress, runTimes } from '../utils/overview.js';
@@ -140,17 +143,24 @@ const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRun
       <dl className="ov-tiles" data-testid="status-tiles">
         <div>
           <dt>Today's P&amp;L</dt>
-          <dd className={pnlClass(today)}>{formatMoney(today, { sign: true })}</dd>
+          {status && !isNum(today) ? (
+            <dd className="ov-empty" data-testid="today-empty">{TODAY_EMPTY}</dd>
+          ) : (
+            <dd className={pnlClass(today)}>{formatMoney(today, { sign: true })}</dd>
+          )}
+          <PnlScope id="todayShort" ctx={{ tz: status && status.pnl_today_tz }} as="dd" />
         </div>
         <div>
-          <dt>30-Day P&amp;L</dt>
+          <dt>Maker P&amp;L (30 days)</dt>
           <dd className={pnlClass(d30)}>{formatMoney(d30, { sign: true })}</dd>
+          <PnlScope id="maker" as="dd" />
         </div>
         <div>
           <dt>At Risk</dt>
           <dd>{formatMoney(a && a.exposure)}{isNum(limit) && isNum(a && a.exposure) && a.exposure > limit ? <span className="error-text"> !</span> : null}</dd>
         </div>
       </dl>
+      <PnlCombined status={status} />
 
       <HeartbeatStrip passes={status && status.recent_passes} />
 

@@ -441,11 +441,15 @@ function status() {
     account: { cash, exposure, headroom: +(S.config.max_open_frac * (cash + exposure) - exposure).toFixed(2) },
     limits: { run_budget: S.config.run_budget, max_open_frac: S.config.max_open_frac },
     pnl: { d7: 4.83, d30: 17.12 },
+    pnl_arb: { d7: 0.9, d30: 2.4 },
+    pnl_total: { d7: 5.73, d30: 19.52 },
     expected_roi: null,
     queue_stats: queueStats(),
     arb: { state: arbState(), last_scan_utc: arbState() !== 'stopped' ? iso(now() - 9 * 1000) : null },
     // UX contract section 5 additions (read-only).
     pnl_today: { maker: 1.4, arb: 0.35, you: -0.8, bot: 1.75, total: 0.95 },
+    pnl_today_tz: 'UTC',
+    pnl_today_since: iso(new Date(new Date(now()).setUTCHours(0, 0, 0, 0))),
     recent_passes: recentPasses(),
     // Release handshake + lease (real field names from the API).
     api_version: '2026.10.16-1',

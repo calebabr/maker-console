@@ -3,6 +3,8 @@ import { IconLock } from '../components/Icons.jsx';
 import Card from '../components/Card.jsx';
 import HelpIcon from '../components/HelpIcon.jsx';
 import PnlStats from '../components/PnlStats.jsx';
+import PnlScope from '../components/PnlScope.jsx';
+import { useStatus } from '../context/StatusContext.jsx';
 import StopButton, { STOPPED_EVENT } from '../components/StopButton.jsx';
 import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
@@ -134,6 +136,7 @@ export default function Arbitrage() {
   const arb = useResource(() => api.getArb(), '/api/arb');
   const opps = useResource(() => api.getArbOpportunities(OPP_LIMIT), `/api/arb/opportunities?limit=${OPP_LIMIT}`);
   const { confirm, twoFactor, notify } = useDialogs();
+  const { status: appStatus } = useStatus();
   const [busy, setBusy] = useState(null);
   const [draft, setDraft] = useState({});
   const [saveError, setSaveError] = useState(null);
@@ -529,7 +532,18 @@ export default function Arbitrage() {
           </Card>
 
           <Card title={<>Profit &amp; loss<HelpIcon term="realised-pnl" /></>} subtitle="Executed arbitrage sets only.">
-            <PnlStats pnl={data.pnl} big={false} emptyText="No executed sets yet." />
+            <h3 className="subhead">Guaranteed Profit</h3>
+            <PnlStats pnl={data.pnl} big={false} emptyText="No executed sets yet." scope="arbGuaranteed" />
+            <h3 className="subhead">Realized Profit</h3>
+            <div data-testid="arb-realized">
+              <PnlStats pnl={appStatus && appStatus.pnl_arb} big={false} emptyText="No arbitrage fills have settled yet." scope="arbRealized" />
+              <p className="hint">
+                Guaranteed is what the scanner promised for sets that filled, counted when they were executed. Realized is
+                what settled fills actually paid, counted when the market settled, so the two cover different sets and
+                dates until every executed set has settled.
+                {appStatus && appStatus.mode !== 'live' ? ' The app is in demo mode, so this is play money.' : ''}
+              </p>
+            </div>
             {data.pnl_demo_execute && (
               <div data-testid="demo-pnl">
                 <h3 className="subhead">Demo Orders (Play Money)</h3>

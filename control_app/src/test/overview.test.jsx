@@ -130,7 +130,7 @@ describe('Overview headline and status card', () => {
     const tiles = await screen.findByTestId('status-tiles');
     expect(within(tiles).getByText("Today's P&L")).toBeInTheDocument();
     expect(within(tiles).getByText('+$0.95')).toBeInTheDocument();
-    expect(within(tiles).getByText('30-Day P&L')).toBeInTheDocument();
+    expect(within(tiles).getByText('Maker P&L (30 days)')).toBeInTheDocument();
     expect(within(tiles).getByText('+$17.12')).toBeInTheDocument();
     expect(within(tiles).getByText('At Risk')).toBeInTheDocument();
     expect(within(tiles).getByText('$37.60')).toBeInTheDocument();

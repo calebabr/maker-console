@@ -14,7 +14,7 @@ function staleNumbers() {
   const parts = [];
   if (s.account && typeof s.account.cash === 'number') parts.push(['Cash', formatMoney(s.account.cash)]);
   if (s.account && typeof s.account.exposure === 'number') parts.push(['At Risk', formatMoney(s.account.exposure)]);
-  if (s.pnl && typeof s.pnl.d30 === 'number') parts.push(['30-Day P&L', formatMoney(s.pnl.d30, { sign: true })]);
+  if (s.pnl && typeof s.pnl.d30 === 'number') parts.push(['Maker P&L (30 days)', formatMoney(s.pnl.d30, { sign: true })]);
   return parts.length ? { parts, at: c.ts } : null;
 }
 
