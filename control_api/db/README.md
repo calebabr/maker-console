@@ -6,7 +6,7 @@ Database name: `kalshi_control` (`MONGODB_DB`). The URI comes only from `setting
 | File | What |
 |---|---|
 | `__init__.py` | `get_store(settings)` returns `MongoStore` when `settings.store == "mongo"`, otherwise `MemoryStore`. It never connects. |
-| `store.py` | Abstract async `Store` (the contract in `DASHBOARD_PLAN.md`) and `MemoryStore` (in-process, for dev and tests) |
+| `store.py` | Abstract async `Store` (the interface described in `docs/ARCHITECTURE.md`) and `MemoryStore` (in-process, for dev and tests) |
 | `mongo.py` | `MongoStore(uri, db_name)` built on `pymongo.AsyncMongoClient(tz_aware=True, serverSelectionTimeoutMS=5000)` |
 | `schemas.py` | Collection names, document shapes, defaults, `row_hash(row)`, normalisation helpers that both stores share |
 | `seed.py` | `await seed(store)` writes realistic fake data. `python -m control_api.db.seed` prints the counts. |

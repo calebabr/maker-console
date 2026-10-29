@@ -255,11 +255,11 @@ Not yet verified: whether cron-job.org or Atlas ask for a card at signup; Atlas 
 
 The Analytics page can compare each cell with an optional private benchmark file (`cell_expectations.json`, also the source of `expected_roi` and the fill-quality baseline). Nothing to do for the demo. The file is never in this repo; supply it to Render as a **secret file**: in Render > Environment > Secret Files add `cell_expectations.json`, then set the optional env var `CELL_EXPECTATIONS_PATH=/etc/secrets/cell_expectations.json`. If the file is missing the page still works; there is simply no comparison ("expectations not loaded"). Never put this file in a public repo.
 
-## Local data tool (read-only) and OneDrive warning
+## Local data tool (read-only) and cloud-sync warning
 
 `python -m control_api.tools.pull_data` copies data from Atlas into git-ignored `local_data/` for analysis (project skill `update-local-data`). It reads `MONGODB_URI` from `.env.local`.
 - Use a **separate read-only Atlas user**, never the Render read/write URI (S-12/S-13).
-- **This repo lives in OneDrive, which uploads every file, `.env.local` and `local_data/` included.** Keep `.env.local` outside the synced folder (set `MONGODB_URI` in the terminal session instead), or make sure OneDrive excludes it; and move or exclude `local_data/` too.
+- **If the repo sits in a cloud-synced folder such as OneDrive, every file is uploaded, `.env.local` and `local_data/` included.** Keep `.env.local` outside the synced folder (set `MONGODB_URI` in the terminal session instead), or make sure OneDrive excludes it; and move or exclude `local_data/` too.
 - `--seed-demo` runs it with fake data and needs no Atlas.
 
 ### Scheduled "Update Local Data" (optional, Windows)
@@ -268,5 +268,5 @@ The Analytics page can compare each cell with an optional private benchmark file
 - It runs **only while you are logged in** (no password is stored) and catches up after a missed run at the next logon or wake.
 - It is read-only toward Atlas and uses the read-only URI in `.env.local`.
 - Each run keeps `local_data/history/` (append-only CSVs) and dated snapshots in `local_data/archive/` (newest 90).
-- **OneDrive caveat (S-13):** the task runs code from wherever the repo sits and writes `local_data/` there. In a OneDrive folder that uploads your data (including `state.json`, which holds the real strategy cells) and `.env.local`. Recommended: clone the repo outside OneDrive (for example `C:\dev\trading`), keep `.env.local` there, and register the task from that copy.
+- **Cloud-sync caveat (S-13):** the task runs code from wherever the repo sits and writes `local_data/` there. In a synced folder that uploads your data (including `state.json`, which holds your bot configuration) and `.env.local`. Recommended: clone the repo outside OneDrive (for example `C:\dev\trading`), keep `.env.local` there, and register the task from that copy.
 - Not registered by default; registering it is your decision. Nothing here can start the bot; to stop trading use the app's Stop button (last resort: suspend the service in Render, or `stop_maker.ps1` for the desktop fallback).
