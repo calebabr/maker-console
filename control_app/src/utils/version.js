@@ -1,4 +1,4 @@
-// App version handshake (docs/RELEASE_CONTRACT.md section 5). The version is injected at build time from
+// App version handshake (docs/RELEASE_PROCESS.md section 5). The version is injected at build time from
 // package.json (vite.config.js `define`); unknown builds fall back to 0.0.0.
 /* global __APP_VERSION__ */
 export const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';

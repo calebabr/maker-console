@@ -20,4 +20,4 @@
 - Terminology search v2 and help popover.
 - Alert history, alert settings (daily summary, mode, quiet hours), web push (VAPID, no new dependency).
 - Settings change preview and Undo Last Change.
-- API: new endpoints and env vars `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` are described in the Summary-first UX section of `docs/UX_CONTRACT.md`.
+- API: new endpoints and env vars `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` are described in `docs/DEPLOY.md`.

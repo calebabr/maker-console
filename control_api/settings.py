@@ -90,7 +90,7 @@ class Settings:
     # Web push (UX item 45). The VAPID private key is a secret: env only, never logged, stored or returned.
     vapid_private_key: str | None = None
     vapid_subject: str | None = None
-    # Release process (docs/RELEASE_CONTRACT.md section 2). Secrets: env only, never logged, stored or returned.
+    # Release process (docs/RELEASE_PROCESS.md section 4). Secrets: env only, never logged, stored or returned.
     lease_ttl_s: float = 60.0
     lease_renew_s: float = 20.0
     pass_budget_s: float = 25.0

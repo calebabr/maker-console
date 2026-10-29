@@ -65,7 +65,7 @@ PNL_TODAY_TTL_S = 60                # /status today P&L cache
 PNL_TODAY_CACHE_MAX = 16            # entries kept, one per (mode, validated time zone); oldest dropped first
 RECENT_PASSES = 12
 FILL_ALERT_MAX_LINES = 3
-# release process (docs/RELEASE_CONTRACT.md section 2): lease, fencing, graceful handover
+# release process (docs/RELEASE_PROCESS.md section 4): lease, fencing, graceful handover
 FENCE_MARGIN_S = 5.0                # a pass starts only if the lease outlives PASS_BUDGET_S + this margin
 SHUTDOWN_TAIL_S = 10.0              # after the order step: time for the pass's journal/heartbeat writes
 SHUTDOWN_STORE_TIMEOUT_S = 5.0

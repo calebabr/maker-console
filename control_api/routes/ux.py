@@ -1,4 +1,4 @@
-"""UX sprint read-only routes (docs/UX_CONTRACT.md section 5): strategy registry, changelog, "since you last
+"""UX read-only routes: strategy registry, changelog, "since you last
 checked" and the read-only Kalshi account view. All behind a signed-in session; none of them writes anything."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""UX sprint API additions (docs/UX_CONTRACT.md section 5): /status fields, since=, /since, strategies, changelog,
+"""UX API additions: /status fields, since=, /since, strategies, changelog,
 config versions + undo, toast fields, alert history/settings, push routes, account positions, my-trades + notes."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Single-leader lease + fencing (release process R1; docs/RELEASE_CONTRACT.md sections 1-2).
+"""Single-leader lease + fencing (docs/RELEASE_PROCESS.md section 4).
 
 Every API instance runs a ``LeaseManager``. Only the instance that holds the lease (the *leader*) may run maker
 passes, arbitrage executions or non-Stop cancels; every other instance is a *standby* that serves the API and the

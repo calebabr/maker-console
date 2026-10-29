@@ -280,7 +280,7 @@ All variables are listed with placeholders in `deploy/env.example`; real values 
 
 - **Storage:** `STORE`, `MONGODB_URI`, `MONGODB_DB`
 - **Auth:** `JWT_SECRET`, `TOTP_ENC_KEY`, `ALLOWED_ORIGIN`, `DEV_MODE`
-- **Scheduler and alerts:** `TICK_TOKEN`, `CRONJOB_API_KEY`, `PUBLIC_URL`, `NTFY_TOPIC`, `NTFY_SERVER`
+- **Scheduler and alerts:** `TICK_TOKEN`, `CRONJOB_API_KEY`, `PUBLIC_URL`, `NTFY_TOPIC`, `NTFY_SERVER`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (Web Push, see `docs/DEPLOY.md`)
 - **Runner limits:** `RUNNER_ENABLED`, `MAX_RUN_BUDGET`, `MAX_OPEN_FRAC`, `MAX_POLL_MINUTES`, `MAX_ARB_CONTRACTS`
 - **Kalshi:** `KALSHI_DEMO_*` and `KALSHI_PROD_*` key ids and private keys, `KALSHI_LIVE_CONFIRM`
 - **Release:** `APP_VERSION`, `HANDOVER_HMAC_KEY`, `DEPLOY_STATUS_KEY`, `RELEASE_TOKEN`
@@ -316,7 +316,7 @@ marked `slow`; skip them while iterating with `-m "not slow"`, but run everythin
 | `docs/API.md` | Request and response details for the periods and cash-flow endpoints; the endpoint list above covers the rest |
 | `docs/PHONE.md` | Installing the PWA and what each screen does |
 | `docs/RELEASE_PROCESS.md` | CI/CD, release workflow, lease handover, compatibility rules |
-| `docs/SHADOW_CONTRACT.md`, `docs/ANALYTICS_CONTRACT.md`, `docs/UX_CONTRACT.md`, `docs/RELEASE_CONTRACT.md` | Design contracts for those features |
+| `docs/SHADOW_CONTRACT.md`, `docs/ANALYTICS_CONTRACT.md` | Design and interface of Shadow mode, and what the analytics endpoints return |
 | `deploy/*.md` | Per-service setup notes (Atlas, Vercel, cron-job.org, release secrets, private overlay, optional VM) |
 | `CONTRIBUTING.md`, `CHANGELOG.md` | Commit conventions and release notes |
 

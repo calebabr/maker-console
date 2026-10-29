@@ -385,7 +385,7 @@ export const api = {
     request('GET', `/api/shadow/episodes?limit=${encodeURIComponent(limit)}${state ? `&state=${encodeURIComponent(state)}` : ''}`),
   syncPinger: (code) => request('POST', '/api/cloud/pinger/sync', { code }),
 
-  // Release approval (docs/RELEASE_CONTRACT.md section 3). Never cached: a stale approval card would mislead.
+  // Release approval (docs/RELEASE_PROCESS.md section 3). Never cached: a stale approval card would mislead.
   getReleasePending: () => request('GET', '/api/release/pending', { cache: false }),
   approveRelease: (id, code) => request('POST', `/api/release/pending/${enc(id)}/approve`, { code, cache: false }),
   rejectRelease: (id) => request('POST', `/api/release/pending/${enc(id)}/reject`, { cache: false }),

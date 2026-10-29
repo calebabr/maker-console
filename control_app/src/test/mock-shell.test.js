@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 const OLD_NAME = ['Long', 'shot'].join('');   // the retired app name, never spelled out in the repo
 
-// The dev mock backend (VITE_MOCK=1) must follow docs/UX_CONTRACT.md section 5 for the endpoints FE-Shell owns.
+// The dev mock backend (VITE_MOCK=1) must match the real API shapes for the UX endpoints.
 let mockFetch;
 beforeAll(async () => {
   ({ mockFetch } = await import('../services/mock.js'));
