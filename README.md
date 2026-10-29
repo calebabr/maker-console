@@ -123,7 +123,7 @@ The only money in the system is the funding of the Kalshi account.
 ## Project Structure
 
 ```
-maker-console/
+prior/
 ├── control_api/            # FastAPI control API + bot runner
 │   ├── main.py             # app factory, /healthz
 │   ├── runner.py           # in-process bot runner, passes, Stop, lease use

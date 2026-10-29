@@ -1,7 +1,7 @@
 # gitleaks config: the default ruleset plus narrow allowlists for the FAKE secrets that tests feed into the code on
 # purpose and the documented placeholders. Every allowance needs BOTH a path and an EXACT value (condition = AND), so a
 # different value in the same file, or the same value in another file, is still reported.
-title = "maker-console gitleaks"
+title = "prior gitleaks"
 
 [extend]
 useDefault = true
