@@ -1,6 +1,6 @@
 # Release process (CI/CD): updating Keel while the bot runs
 
-_Status: **design approved, owner decisions made 2026-10-13 (A2, B2, C = 120 s); built (Sprint 1, 2026-10-16).** The real first-run verification happens in the dress rehearsal (three dummy releases in demo, see the Demo-Day Checklist in DEPLOY.md). Owner: lead (infra, backend, security, tests, docs). Written 2026-10-13._
+_Status: **design approved and built (2026-10-16); my decisions (A2, B2, C = 120 s) were made 2026-10-13.** The real first-run verification happens in the dress rehearsal (three dummy releases in demo, see the Demo-Day Checklist in DEPLOY.md). Written 2026-10-13._
 
 Goal: ship backend or frontend updates **while the bot is running (demo or live)** without double trading, lost orders, a stuck Stop or a broken app. If any check fails, the system fails **safe** (no new orders) instead of failing open.
 
@@ -21,8 +21,8 @@ Other risks during an update:
 
 | Role | Can | Cannot |
 |---|---|---|
-| **Owner** (`calebabr`) | Approve a release, trigger production deploys, roll back, go live, Stop | n/a |
-| **Agents** (Claude Code team) | Write code, tests, docs, open commits and PRs, run local and CI checks | Deploy, change Render/Vercel/Atlas settings, touch secrets, change `cells`/strategy without approval, push with failing checks |
+| **Me** (`calebabr`) | Approve a release, trigger production deploys, roll back, go live, Stop | n/a |
+| **AI coding agents** | Write code, tests, docs, open commits and PRs, run local and CI checks | Deploy, change Render/Vercel/Atlas settings, touch secrets, change `cells`/strategy without approval, push with failing checks |
 | **CI** (GitHub Actions) | Run every check; be the only path that marks a commit releasable | Hold production secrets beyond a deploy-hook URL and a read-only status key |
 | **Render / Vercel** | Build and run what CI approved | Auto-deploy unchecked commits |
 
@@ -36,11 +36,11 @@ Other risks during an update:
    - **Mock end-to-end checks,** plus the real-API end-to-end checks against the dev server.
    - **Dependency checks:** hash-locked installs and lock agreement, plus `pip-audit`.
    - **CSP check.**
-   - **Cells unchanged:** fails if `cells` changed without an owner-signed tag.
+   - **Cells unchanged:** fails if `cells` changed without a tag signed by me.
    - **Compatibility check:** the new API must still answer every request the currently deployed app makes (contract tests), and must read data written by the previous release (fixture of the previous schema).
 3. **Render "Auto-Deploy: After CI Checks Pass"** on `main`. If zero checks are detected or any check fails, no deploy happens.
-   - **Option:** set it to Off and deploy only through a release workflow the owner triggers by hand. See decision B.
-4. **Vercel** production builds only from the `release` branch (Vercel Settings > Environments > Production > Branch Tracking = `release`; DEPLOY.md step 12). The release workflow's `promote-frontend` job fast-forwards `release` to the approved commit, only after the CI gate, the owner's 2FA approval and the verified backend deploy; it never forces, and it is the only job besides the tag job with `contents: write`. Pushes to `main` make previews only. Until the owner flips the setting, a push to `release` just makes a preview. Rollback: Vercel Instant Rollback to the last good production deployment; setting Production Branch back to `main` re-opens the unapproved path and is a last resort.
+   - **Option:** set it to Off and deploy only through a release workflow I trigger by hand. See decision B.
+4. **Vercel** production builds only from the `release` branch (Vercel Settings > Environments > Production > Branch Tracking = `release`; DEPLOY.md step 12). The release workflow's `promote-frontend` job fast-forwards `release` to the approved commit, only after the CI gate, my 2FA approval and the verified backend deploy; it never forces, and it is the only job besides the tag job with `contents: write`. Pushes to `main` make previews only. Until I flip the setting, a push to `release` just makes a preview. Rollback: Vercel Instant Rollback to the last good production deployment; setting Production Branch back to `main` re-opens the unapproved path and is a last resort.
 5. **Order:** when a change touches both, the **backend deploys first**, then the frontend. The release workflow enforces this.
 6. **Post-deploy verification (automated):**
    - `/healthz` reports the new version.
@@ -48,7 +48,7 @@ Other risks during an update:
    - Heartbeats resume.
    - No errors in the first passes.
 
-   The owner gets an ntfy alert "Release vX deployed, healthy". If verification fails: alert, and the bot stays safe (section 4).
+   I get an ntfy alert "Release vX deployed, healthy". If verification fails: alert, and the bot stays safe (section 4).
 7. **Rollback:** Render "rollback to previous deploy", using the same handover rules. Releases are tagged (`vYYYY.MM.DD-n`) so the running version is always known.
 
 ## 4. Running-bot handover (no double trading)
@@ -94,12 +94,12 @@ The release workflow refuses to deploy unless all of these hold:
 - The lease and handover code is present: a version check on the running server confirms it supports handover. **Before the first deploy that has handover,** the gate requires the bot to be **stopped**. That is the original rule, kept until handover is proven.
 - No arbitrage set is executing.
 - The running server is healthy. If it isn't, the deploy proceeds only with the bot stopped.
-- The owner approved the run. A manual approval step in GitHub Actions records who and when.
+- I approved the run. A manual approval step in GitHub Actions records who and when.
 
 The checks use a **read-only deploy-status key** with these properties:
 - It's scoped to one endpoint that reports `{version, lease_holder, running, mode, arb_executing}`, plus nothing else.
 - It's stored as a GitHub secret and in Render.
-- It is never the owner's login, and it is never public.
+- It is never my login, and it is never public.
 
 ## 7. Live mode across planned deploys (decision A)
 
@@ -123,7 +123,7 @@ Today (S-21), any restart drops LIVE to demo, and you re-arm from the phone. Wit
   - Stop works mid-deploy.
 - **Security review** of the lease, the handover token and the deploy-status key.
 
-## 9. Decisions for the owner
+## 9. Decisions
 
 - **A. Live across planned deploys:**
   - **(1) keep S-21:** every deploy drops to demo and you re-arm;
@@ -133,12 +133,12 @@ Today (S-21), any restart drops LIVE to demo, and you re-arm from the phone. Wit
   - **(2) a manual release workflow** you approve each time (recommended at first).
 - **C. Shutdown delay:** 90 s (recommended), or longer.
 
-## 10. Owner decisions (2026-10-13)
+## 10. My decisions (2026-10-13)
 
 | Decision | Choice | What the team builds |
 |---|---|---|
 | **A** Live across planned deploys | **A2: signed handover** | The old instance writes an HMAC-signed handover token (secret only in Render env, never in Atlas). The new instance keeps LIVE only if the token is valid, < 5 min old, same config hash, no Stop since. Crashes, unplanned restarts and rollbacks without a valid token still drop to demo (S-21 remains the default). Forgery and replay tests, plus security review |
-| **B** Who triggers deploys | **B2: manual release workflow** | Render auto-deploy **Off**. A GitHub Actions "release" workflow with an owner approval step (approvable from the phone) runs: CI green on the exact commit → safety gate → backend deploy hook → verify → frontend deploy → verify → ntfy "Release vX healthy" → tag. Agents can open PRs but never run or approve it |
+| **B** Who triggers deploys | **B2: manual release workflow** | Render auto-deploy **Off**. A GitHub Actions "release" workflow with an approval step by me (approvable from the phone) runs: CI green on the exact commit → safety gate → backend deploy hook → verify → frontend deploy → verify → ntfy "Release vX healthy" → tag. AI coding agents can open PRs but never run or approve it |
 | **C** Shutdown delay | **120 s** | `render.yaml` shutdown delay 120 s; pass budget 25 s; handover must complete well inside it (tested) |
 
 > **Free-plan limit found 2026-10-17:** Render rejects `maxShutdownDelaySeconds` on the free plan, so the 120 s window above needs a paid plan. On free, Render's default shutdown window applies; a shutdown that is cut short is covered by the successor's takeover cancel. This is fine for the demo (demo mode only). Before LIVE, either move to a paid plan and restore `maxShutdownDelaySeconds: 120`, or shorten the runner shutdown to fit the default window.
@@ -146,20 +146,20 @@ Today (S-21), any restart drops LIVE to demo, and you re-arm from the phone. Wit
 ### B2 mechanics (checked 2026-10-13)
 
 GitHub's native "required reviewers" on deployment environments is **not available for private repos on GitHub Free/Pro/Team** ([GitHub docs](https://docs.github.com/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment)). So B2 for the private repo works like this:
-1. **Start:** the owner runs the `release` workflow (`workflow_dispatch`) from **GitHub Mobile** (Repository → Actions → release → Run workflow), choosing the commit or tag. Only accounts with write access can run it.
+1. **Start:** I run the `release` workflow (`workflow_dispatch`) from **GitHub Mobile** (Repository → Actions → release → Run workflow), choosing the commit or tag. Only accounts with write access can run it.
 2. **Gate:** the workflow checks that CI is green on that exact commit and runs the safety gate.
-3. **Approve with 2FA in Keel:** the workflow posts a *pending release* (version, commit, change summary, CI result) to the API. The Server page shows it with **Approve** / **Reject**; Approve needs fresh 2FA. The workflow polls the API using a release-scoped token and proceeds only after approval; it times out (no deploy) after 30 min. Agents can never approve (no 2FA), even though their commits appear under the owner's git name.
+3. **Approve with 2FA in Keel:** the workflow posts a *pending release* (version, commit, change summary, CI result) to the API. The Server page shows it with **Approve** / **Reject**; Approve needs fresh 2FA. The workflow polls the API using a release-scoped token and proceeds only after approval; it times out (no deploy) after 30 min. AI coding agents can never approve (no 2FA), even though their commits appear under the owner's git name.
 4. **Deploy:** backend deploy hook → verify → frontend → verify → ntfy "Release vX healthy" → tag.
 
 After the public/private split, the public `tradingControlApp` repo could use GitHub's native required reviewers (free on public repos) as an extra layer.
 
-## Branching rule (owner-approved 2026-10-13)
+## Branching rule (decided 2026-10-13)
 - **Before the first deploy:** work on `main`, all tests green.
 - **After the first deploy (demo or live):**
-  - **Large features** → branch → PR → owner merges.
+  - **Large features** → branch → PR → I merge.
   - **Always branch** for: strategy / cells / orders, Stop / auth / security, database schema, release / handover code.
   - **Small changes** (docs, copy, small UI, tests, contained fixes) may go to `main` with all tests passing locally.
-- **New strategies or markets:** validated in the private repo → owner approves → demo → small live. Strategy code and research stay in the private repo.
-- **Agents** never merge PRs or run releases.
+- **New strategies or markets:** validated in the private repo → I approve → demo → small live. Strategy code and research stay in the private repo.
+- AI coding agents never merge PRs or run releases.
 
 **Releasing a change that only touches the private strategy.** The release builds the public tip and overlays the private repository's main at build time, so a private-only change needs a new public commit to give the release workflow a new SHA to approve. Make a small public commit (a docs line is enough), wait for CI, then release that SHA as usual.
