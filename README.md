@@ -9,6 +9,8 @@ the trading account.
 
 It runs in demo mode (Kalshi's demo environment, no real money) unless I deliberately arm live mode.
 
+**Project status:** running on Kalshi's demo exchange in named evaluation periods; live trading is not enabled.
+
 ## Why this project exists
 
 I want to implement strategies from the published literature and find out, with statistics, whether they work before
@@ -109,7 +111,7 @@ Data flows (status, Stop, Start, config change, keep-awake, restart recovery) ar
 ## API endpoints
 
 All routes live under `/api` and need a signed-in session (Bearer JWT) unless noted. **Fresh 2FA** means a TOTP code
-verified within the last few minutes. Full request and response shapes are in `docs/API.md`.
+verified within the last few minutes. Request and response details for the periods and cash-flow routes are in `docs/API.md`; the others are described by the code in `control_api/routes/`.
 
 **Auth** (`/api/auth`)
 
@@ -242,7 +244,7 @@ docs/          Architecture, API, deploy, release and phone guides
 |---|---|
 | `docs/DEPLOY.md` | Step-by-step runbook: Atlas, secrets, Render, Vercel, cron-job.org, ntfy, first demo run, updating, rollback, troubleshooting |
 | `docs/ARCHITECTURE.md` | System diagram and data flows |
-| `docs/API.md` | Every endpoint with auth level, request, response and errors |
+| `docs/API.md` | Request and response details for the periods and cash-flow endpoints; the endpoint list above covers the rest |
 | `docs/PHONE.md` | Installing the PWA and what each screen does |
 | `docs/RELEASE_PROCESS.md` | CI/CD, release workflow, lease handover, compatibility rules |
 | `docs/SHADOW_CONTRACT.md`, `docs/ANALYTICS_CONTRACT.md`, `docs/UX_CONTRACT.md`, `docs/RELEASE_CONTRACT.md` | Design contracts for those features |
