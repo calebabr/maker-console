@@ -107,15 +107,16 @@ def test_variants_use_corrected_episodes_only(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_period_filter_applies_to_the_headline_and_the_legacy_block(env):
-    now = datetime.now(UTC)
-
-    def at(e, days_ago):
-        j = now - timedelta(days=days_ago)
+    # fixed dates, not "now minus N days": whether an episode without a stored methodology is legacy depends on
+    # METHODOLOGY2_SINCE (2026-10-22), so a relative date would flip to corrected once N days have passed
+    def at(e, j):
         return dict(e, join_ts=j, last_seen_ts=j, end_ts=j + timedelta(hours=1), close_time=j + timedelta(hours=10),
                     settled_ts=j + timedelta(hours=10), ts=j)
-    eps = [at(_ep(1, day=0), 6), at(_ep(2, day=0), 5), at(_ep(3, day=0, methodology=2), 1)]
+    eps = [at(_ep(1, day=0), datetime(2026, 10, 20, 12, 0, tzinfo=UTC)),
+           at(_ep(2, day=0), datetime(2026, 10, 21, 12, 0, tzinfo=UTC)),
+           at(_ep(3, day=0, methodology=2), datetime(2026, 10, 25, 12, 0, tzinfo=UTC))]
     await env.store.shadow_upsert_episodes(eps)
-    await env.store.add_period({"id": "per2", "name": "Period 2", "started_at": now - timedelta(days=3)})
+    await env.store.add_period({"id": "per2", "name": "Period 2", "started_at": datetime(2026, 10, 23, 0, 0, tzinfo=UTC)})
     p1 = (await env.client.get("/api/shadow/summary?period=p1", headers=env.auth)).json()
     p2 = (await env.client.get("/api/shadow/summary?period=per2", headers=env.auth)).json()
     assert p1["headline"]["headline_status"] == "no_corrected_data" and p1["legacy"]["episodes"] == 2
