@@ -156,5 +156,5 @@ def test_same_directory_and_non_tree_targets_refused(tmp_path):
     priv = _private(tmp_path)
     with pytest.raises(ov.OverlayError):
         ov.overlay(priv, priv)
-    with pytest.raises(ov.OverlayError, match="maker-console"):
+    with pytest.raises(ov.OverlayError, match="not a project tree"):
         ov.overlay(priv, tmp_path / "nowhere")

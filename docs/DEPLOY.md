@@ -14,7 +14,7 @@ Demo only: Kalshi **demo** keys, no real money. Keep every secret in a password 
 4. Database > Connect > Drivers > copy the connection string; fill in the password (URL-encode special characters). This is `MONGODB_URI`. Save it in the password manager.
 *Check:* the cluster shows green/Active and the string starts with `mongodb+srv://`.
 
-**3. Generate secrets** (PC, repo root, `maker-console/`).
+**3. Generate secrets** (PC, repo root).
 1. `python -m control_api.auth.bootstrap --gen-keys` prints `JWT_SECRET`, `TOTP_ENC_KEY`, `TICK_TOKEN`.
 2. Make three more random values, using these commands: `python -c "import secrets; print(secrets.token_urlsafe(48))"` for `HANDOVER_HMAC_KEY` (must be at least 32 bytes; shorter or empty turns handover off, so every restart drops to demo), and `python -c "import secrets; print(secrets.token_urlsafe(32))"` for `DEPLOY_STATUS_KEY` and `RELEASE_TOKEN`. Use a different value for each.
 3. `APP_VERSION` is optional: leave it empty and the API reports the first 7 characters of the Render commit as its version. Setting it restarts the service, so only set it if you want a fixed label.

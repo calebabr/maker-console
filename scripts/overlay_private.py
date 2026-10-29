@@ -189,7 +189,7 @@ def overlay(private: Path, target: Path, *, with_tests: bool = False, allow_git_
     if private == target:
         raise OverlayError("target and private checkout are the same directory", 2)
     if not (target / "kalshi_bot").is_dir() or not (target / "control_api").is_dir():
-        raise OverlayError(f"{target} is not a maker-console tree (no kalshi_bot/ or control_api/)", 2)
+        raise OverlayError(f"{target} is not a project tree (no kalshi_bot/ or control_api/)", 2)
     if (target / ".git").exists() and not allow_git_worktree:
         raise OverlayError(f"{target} is a git work tree: overlay a build/temp copy, or pass --allow-git-worktree "
                            "for a throwaway deploy clone", 2)
@@ -221,7 +221,7 @@ def overlay(private: Path, target: Path, *, with_tests: bool = False, allow_git_
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--private", required=True, type=Path, help="path to a checkout of the private repo")
-    ap.add_argument("--target", type=Path, default=DEFAULT_TARGET, help="maker-console tree to overlay (default: this repo)")
+    ap.add_argument("--target", type=Path, default=DEFAULT_TARGET, help="project tree to overlay (default: this repo)")
     ap.add_argument("--with-tests", action="store_true", help="also copy the private kalshi_bot tests")
     ap.add_argument("--allow-git-worktree", action="store_true", help="allow a target that is a git work tree")
     ap.add_argument("--dry-run", action="store_true", help="list what would be copied; change nothing")
