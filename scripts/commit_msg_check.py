@@ -5,7 +5,7 @@ r"""Conventional-commit subject check, shared by .githooks/commit-msg and CI (co
     commit_msg_check.py range <base>..<head>            # CI: every non-merge commit in the range
     commit_msg_check.py commit <sha>                    # CI: a single commit (new branch, no usable base)
 
-Subject regex (docs/RELEASE_CONTRACT.md section 4):
+Subject regex (see CONTRIBUTING.md):
     ^(feat|fix|perf|refactor|security|test|docs|ci|chore)(\((app|api|bot|db|auth|deploy|tasks|research)\))?!?: .{1,72}$
 Also refused: agent attribution trailers (project rule: commits carry the owner's name only).
 Git-generated "Merge ..." subjects are accepted. Commits authored by dependabot[bot] are skipped in range mode

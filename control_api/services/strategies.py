@@ -1,4 +1,4 @@
-"""Strategy registry and fill/order source attribution (UX sprint item Y1; docs/UX_CONTRACT.md section 5).
+"""Strategy registry and fill/order source attribution.
 
 Every fill and order is labelled ``source = "bot" | "you"`` plus ``strategy = <registry id> | None``:
 

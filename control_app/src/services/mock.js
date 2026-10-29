@@ -263,7 +263,7 @@ function initialState() {
     cashFlows: [],
     pinger: { configured: true, job_id: 5813377, synced: true, last_sync_utc: iso(now() - 2 * 60 * MIN), error: null },
     keepalive: { last_ping_utc: iso(now() - 3 * MIN), ok: true, error: null },
-    // Release process (docs/RELEASE_CONTRACT.md section 3). Scenario names: standby, release-expired,
+    // Release process (docs/RELEASE_PROCESS.md section 3). Scenario names: standby, release-expired,
     // release-none, release-off (404), old-app. Set via sessionStorage 'keel.mock' (comma list) or setMockScenario().
     scenario: readScenario(),
     lease: { holder: 'a3f9c2d41b7e4c0a9d6e5f8b12c34d56', generation: 14, expires_at: now() + 45 * 1000, instance: 'a3f9c2d41b7e4c0a9d6e5f8b12c34d56' },
