@@ -1,7 +1,7 @@
 # cron-job.org: the external pinger (free)
 
 The Render free service sleeps after **15 min without inbound requests**. Two pingers keep it awake
-(see `DASHBOARD_PLAN.md` v3, "Keep-awake"):
+(see `docs/ARCHITECTURE.md`):
 
 1. **Self-ping** (built in): the runner calls `RENDER_EXTERNAL_URL/healthz` every `keepalive_minutes`.
 2. **External pinger** (this file): a cron-job.org job calls `POST /api/tick` every `pinger_minutes`.

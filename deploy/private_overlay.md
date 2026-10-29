@@ -18,7 +18,7 @@ in a URL, a command line, `.git/config` or the build log.
 4. **Personal access tokens** > **Fine-grained tokens** > **Generate new token**.
 5. Token name: `render-build-overlay`. Expiration: **90 days** (put a reminder in your calendar to rotate it).
 6. Resource owner: your account. Repository access: **Only select repositories** > choose the private repo only
-   (`tradingBot`). Do not choose "All repositories".
+   (your strategy repository). Do not choose "All repositories".
 7. Permissions > Repository permissions > **Contents: Read-only**. Leave everything else at "No access"
    (Metadata: Read-only is added automatically and is fine).
 8. Click **Generate token** and copy it once (it starts with `github_pat_`). GitHub never shows it again.
