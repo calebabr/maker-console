@@ -8,17 +8,17 @@ test('page title: shown at top, pinned under the header when scrolled, hides whe
   await login(page);
   await nav(page, 'Logs');
   await expect(bar(page)).toHaveText('Logs');
-  await expect(page).toHaveTitle('Logs · Keel');
+  await expect(page).toHaveTitle('Logs · Prior');
   await nav(page, 'Markets');
   await expect(bar(page)).toHaveText('Markets');
-  await expect(page).toHaveTitle('Markets · Keel');
+  await expect(page).toHaveTitle('Markets · Prior');
   await expect(bar(page)).toHaveAttribute('data-state', 'shown');
 
   // Markets cards are folded now, so that page is too short to scroll. Terminology is static and long
   // (dozens of glossary entries), so the scroll behaviour is checked there.
   await nav(page, 'Terminology');
   await expect(bar(page)).toHaveText('Terminology');
-  await expect(page).toHaveTitle('Terminology · Keel');
+  await expect(page).toHaveTitle('Terminology · Prior');
   await expect(page.locator('.term').first()).toBeVisible();
   // Mobile emulation (Pixel 5) ignores mouse wheel; scroll the window directly (fires a real scroll event).
   await page.evaluate(() => window.scrollBy(0, 600));

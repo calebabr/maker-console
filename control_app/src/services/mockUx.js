@@ -12,7 +12,7 @@ const ALERTS_SEED = (now, iso) =>
     { type: 'error', title: 'Trading Pass Error', body: 'Kalshi returned HTTP 503 for one series; the pass retried.', ago: 7 * 60 },
     { type: 'stop', title: 'Bot Stopped', body: 'Stopped from the app: 3 resting orders cancelled.', ago: 26 * 60 },
     { type: 'breaker', title: 'Arbitrage Stopped: Kill Switch', body: 'Legging risk detected on a bracket set; arbitrage paused.', ago: 2 * 24 * 60 },
-    { type: 'test', title: 'Test Notification', body: 'Keel notifications are working.', ago: 3 * 24 * 60 },
+    { type: 'test', title: 'Test Notification', body: 'Prior notifications are working.', ago: 3 * 24 * 60 },
   ].map((a, i) => ({ id: `al${i + 1}`, ts: iso(now - a.ago * MIN), type: a.type, title: a.title, body: a.body }));
 
 // Extra Activity rows so day grouping and the source filters have something to show.
@@ -153,7 +153,7 @@ export function uxRoute(method, p, q, headers, body, ctx) {
   }
   if (method === 'POST' && p === '/api/push/test') {
     if (!U.push.subscribed) return reply(200, { sent: 0, failed: 0, removed: 0 });
-    U.alerts.unshift({ id: `al${U.alerts.length + 1}`, ts: iso(now()), type: 'test', title: 'Test Notification', body: 'Keel notifications are working.' });
+    U.alerts.unshift({ id: `al${U.alerts.length + 1}`, ts: iso(now()), type: 'test', title: 'Test Notification', body: 'Prior notifications are working.' });
     return reply(200, { sent: 1, failed: 0, removed: 0 });
   }
 

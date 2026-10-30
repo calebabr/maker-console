@@ -16,7 +16,7 @@ async function currentSubscription() {
 }
 
 /**
- * Web push notifications (item 45). The Enable button only exists when Keel runs as an installed Home Screen
+ * Web push notifications (item 45). The Enable button only exists when Prior runs as an installed Home Screen
  * app: iPhone only delivers web push to those. In a normal browser tab it shows how to install instead.
  * Subscription endpoint and keys go straight from the browser to the API; they are never shown or logged here.
  */
@@ -44,7 +44,7 @@ export default function PushCard() {
     try {
       const perm = await Notification.requestPermission();
       if (perm !== 'granted') {
-        setProblem('Notifications are blocked for Keel. Turn them on in your phone settings, then try again.');
+        setProblem('Notifications are blocked for Prior. Turn them on in your phone settings, then try again.');
         return;
       }
       const key = await api.pushPublicKey();
@@ -100,7 +100,7 @@ export default function PushCard() {
   }, [notify]);
 
   return (
-    <Card title="Notifications" subtitle="Everyday alerts arrive under the Keel icon. Critical alerts always use ntfy as well.">
+    <Card title="Notifications" subtitle="Everyday alerts arrive under the Prior icon. Critical alerts always use ntfy as well.">
       {!installed && (
         <div data-testid="push-install-steps">
           <p className="hint" style={{ marginTop: 0 }}>
@@ -109,7 +109,7 @@ export default function PushCard() {
           <ol className="steps">
             <li>Tap the Share button in Chrome.</li>
             <li>Choose Add to Home Screen, then Add.</li>
-            <li>Open Keel from its new Home Screen icon.</li>
+            <li>Open Prior from its new Home Screen icon.</li>
             <li>Come back to Settings and tap Enable Notifications.</li>
           </ol>
         </div>

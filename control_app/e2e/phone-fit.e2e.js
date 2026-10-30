@@ -63,7 +63,7 @@ for (const theme of ['midnight', 'teal', 'graphite']) {
   test(`large text + ${theme} theme fits 320 px on every page`, async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 700 });
     await page.addInitScript((t) => {
-      try { localStorage.setItem('keel.theme', t); localStorage.setItem('keel.textSize', 'large'); } catch { /* ignore */ }
+      try { localStorage.setItem('prior.theme', t); localStorage.setItem('prior.textSize', 'large'); } catch { /* ignore */ }
     }, theme);
     await login(page);
     for (const label of PAGES) {

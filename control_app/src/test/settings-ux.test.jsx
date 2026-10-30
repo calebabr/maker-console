@@ -115,8 +115,8 @@ describe('Display settings', () => {
     const before = calls.length;
     await user.click(screen.getByRole('button', { name: /deep teal/i }));
     await user.click(screen.getByRole('button', { name: 'Large' }));
-    expect(localStorage.getItem('keel.theme')).toBe('teal');
-    expect(localStorage.getItem('keel.textSize')).toBe('large');
+    expect(localStorage.getItem('prior.theme')).toBe('teal');
+    expect(localStorage.getItem('prior.textSize')).toBe('large');
     expect(screen.getByRole('button', { name: /deep teal/i })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.queryByLabelText('6-digit code')).toBeNull();
     expect(calls.length).toBe(before);

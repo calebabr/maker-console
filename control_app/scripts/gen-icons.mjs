@@ -1,7 +1,6 @@
-// Generates the Keel PWA icons (PNG + SVG) into public/ with no dependencies.
-// The artwork is the "Keel G" level gauge from src/components/KeelLogo.jsx, drawn in the default Midnight Slate colours:
-//   ring circle(24,24,r15) stroke 3 (faint) · horizon M9 24 H39 stroke 3.5 round (accent)
-//   keel M18 24 L24 38 L30 24 Z (success) · dot circle(24,15,r3) (text)
+// Generates the Prior PWA icons (PNG + SVG) into public/ with no dependencies.
+// The artwork is the "full ring" logo from src/components/PriorLogo.jsx, drawn in the default Midnight Slate colours:
+//   ring circle(24,24,r19) w2.5 · baseline (11,33)-(37,33) w2 · prior curve (muted) w2.2 · posterior curve (success) w2.8
 // Run: npm run icons
 import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -13,11 +12,12 @@ mkdirSync(out, { recursive: true });
 
 const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const BG = '#0f141b';
-const TEXT = '#e6edf3';
-const ACCENT = '#4ea1ff';
+const MUTED = '#8b98a8';
 const OK = '#3fb97a';
-// The ring is the text colour at 28% over the background (SVG uses stroke-opacity; PNGs have no alpha).
-const RING = '#' + hex(TEXT).map((c, i) => Math.round(c * 0.28 + hex(BG)[i] * 0.72).toString(16).padStart(2, '0')).join('');
+// SVG uses stroke-opacity; PNGs have no alpha, so blend the faint strokes over the background.
+const mix = (c, a) => '#' + hex(c).map((v, i) => Math.round(v * a + hex(BG)[i] * (1 - a)).toString(16).padStart(2, '0')).join('');
+const RING = mix(MUTED, 0.45);
+const BASE = mix(MUTED, 0.7);
 
 // ---- geometry in the 48-unit logo box -------------------------------------------------------------
 
@@ -27,26 +27,25 @@ const dist = (px, py, ax, ay, bx, by) => {
   const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
   return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 };
-const inTriangle = (px, py) => {
-  const A = [18, 24];
-  const B = [24, 38];
-  const C = [30, 24];
-  const s = (p, q, r) => (p[0] - r[0]) * (q[1] - r[1]) - (q[0] - r[0]) * (p[1] - r[1]);
-  const P = [px, py];
-  const d1 = s(P, A, B);
-  const d2 = s(P, B, C);
-  const d3 = s(P, C, A);
-  const neg = d1 < 0 || d2 < 0 || d3 < 0;
-  const pos = d1 > 0 || d2 > 0 || d3 > 0;
-  return !(neg && pos);
+const bez = (p0, p1, p2, p3, n = 48) =>
+  Array.from({ length: n + 1 }, (_, i) => {
+    const t = i / n;
+    const u = 1 - t;
+    return [0, 1].map((k) => u * u * u * p0[k] + 3 * u * u * t * p1[k] + 3 * u * t * t * p2[k] + t * t * t * p3[k]);
+  });
+const PRIOR = [...bez([10, 33], [16, 33], [18, 21], [24, 21]), ...bez([24, 21], [30, 21], [32, 33], [38, 33])];
+const POSTERIOR = [...bez([15, 33], [20, 33], [21, 12], [24, 12]), ...bez([24, 12], [27, 12], [28, 33], [33, 33])];
+const near = (pts, x, y, r) => {
+  for (let i = 0; i < pts.length - 1; i++) if (dist(x, y, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]) <= r) return true;
+  return false;
 };
 
-// Colour of the logo at unit coordinates (x, y), or null for background.
+// Colour of the logo at unit coordinates (x, y), or null for background. Posterior is drawn on top.
 function logoAt(x, y) {
-  if (Math.hypot(x - 24, y - 15) <= 3) return TEXT;
-  if (inTriangle(x, y)) return OK;
-  if (dist(x, y, 9, 24, 39, 24) <= 1.75) return ACCENT;
-  if (Math.abs(Math.hypot(x - 24, y - 24) - 15) <= 1.5) return RING;
+  if (near(POSTERIOR, x, y, 1.4)) return OK;
+  if (near(PRIOR, x, y, 1.1)) return MUTED;
+  if (dist(x, y, 11, 33, 37, 33) <= 1) return BASE;
+  if (Math.abs(Math.hypot(x - 24, y - 24) - 19) <= 1.25) return RING;
   return null;
 }
 
@@ -117,17 +116,18 @@ function png(size, fill) {
 
 // ---- SVG -------------------------------------------------------------------------------------------
 
-function svg(fill, radius) {
+function svg(fill, radius, priorW = 2.2) {
   const k = (512 * fill) / 48;
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">` +
     `<rect width="512" height="512" rx="${radius}" fill="${BG}"/>` +
-    `<g transform="translate(256 256) scale(${k.toFixed(4)}) translate(-24 -24)" fill="none">` +
-    `<circle cx="24" cy="24" r="15" stroke="${TEXT}" stroke-opacity="0.28" stroke-width="3"/>` +
-    `<path d="M9 24 H39" stroke="${ACCENT}" stroke-width="3.5" stroke-linecap="round"/>` +
-    `<path d="M18 24 L24 38 L30 24 Z" fill="${OK}"/>` +
-    `<circle cx="24" cy="15" r="3" fill="${TEXT}"/>` +
-    `</g></svg>\n`
+    `<g transform="translate(256 256) scale(${k.toFixed(4)}) translate(-24 -24)" fill="none" stroke-linecap="round">` +
+    `<circle cx="24" cy="24" r="19" stroke="${MUTED}" stroke-opacity="0.45" stroke-width="2.5"/>` +
+    `<path d="M11 33 H37" stroke="${MUTED}" stroke-opacity="0.7" stroke-width="2"/>` +
+    `<path d="M10 33 C16 33 18 21 24 21 C30 21 32 33 38 33" stroke="${MUTED}" stroke-width="${priorW}"/>` +
+    `<path d="M15 33 C20 33 21 12 24 12 C27 12 28 33 33 33" stroke="${OK}" stroke-width="2.8"/>` +
+    `</g></svg>
+`
   );
 }
 
@@ -136,5 +136,5 @@ writeFileSync(join(out, 'icon-512.png'), png(512, 0.9));
 writeFileSync(join(out, 'maskable-512.png'), png(512, 0.74)); // ring stays inside the 80% maskable safe circle
 writeFileSync(join(out, 'apple-touch-icon.png'), png(180, 0.9));
 writeFileSync(join(out, 'icon.svg'), svg(0.9, 96));
-writeFileSync(join(out, 'favicon.svg'), svg(1.1, 96));
+writeFileSync(join(out, 'favicon.svg'), svg(1.1, 96, 1.8)); // thinner prior curve so the two curves stay apart at 16 px
 console.log('icons written to', out);

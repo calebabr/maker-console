@@ -68,11 +68,11 @@ describe('login: Show Password (item 20)', () => {
   });
 });
 
-describe('login: Keel branding (item 29)', () => {
+describe('login: Prior branding (item 29)', () => {
   it('shows the logo, name, tagline and the trust line', () => {
     renderApp('/', { signedIn: false });
-    expect(screen.getByRole('heading', { level: 1, name: 'Keel' })).toBeInTheDocument();
-    expect(screen.getByTestId('keel-logo')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Prior' })).toBeInTheDocument();
+    expect(screen.getByTestId('prior-logo')).toBeInTheDocument();
     expect(screen.getByTestId('login-tagline')).toHaveTextContent('Your strategies. One tap away.');
     expect(screen.getByText(/Protected by 2FA · Demo Mode/)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(new RegExp(OLD_NAME));

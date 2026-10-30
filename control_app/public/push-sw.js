@@ -8,7 +8,7 @@ self.addEventListener('push', (event) => {
   } catch (e) {
     data = {};
   }
-  const title = typeof data.title === 'string' && data.title ? data.title : 'Keel';
+  const title = typeof data.title === 'string' && data.title ? data.title : 'Prior';
   const options = {
     body: typeof data.body === 'string' ? data.body : '',
     icon: '/icon-192.png',

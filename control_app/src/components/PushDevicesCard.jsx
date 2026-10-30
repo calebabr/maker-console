@@ -34,7 +34,7 @@ export default function PushDevicesCard() {
     if (clearing) return;
     const ok = await confirm({
       title: 'Clear All Devices?',
-      message: 'Every phone and browser stops receiving Keel notifications until you turn them on again. Critical alerts still use ntfy.',
+      message: 'Every phone and browser stops receiving Prior notifications until you turn them on again. Critical alerts still use ntfy.',
       confirmLabel: 'Clear All',
       danger: true,
     });
@@ -54,7 +54,7 @@ export default function PushDevicesCard() {
 
   const list = devices || [];
   return (
-    <Card title="Push Devices" subtitle="Phones and browsers that can receive Keel notifications.">
+    <Card title="Push Devices" subtitle="Phones and browsers that can receive Prior notifications.">
       {error && !devices && (
         <div className="notice notice-error" role="alert">
           Could not load devices. {error.message}
