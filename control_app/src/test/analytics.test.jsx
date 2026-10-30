@@ -81,7 +81,7 @@ describe('Analytics page', () => {
     expect(qs(first).get('days')).toBe('30');
     expect(qs(first).has('env')).toBe(false);
 
-    await user.click(screen.getByRole('button', { name: '90 Days' }));
+    await user.click(screen.getByRole('radio', { name: '90 days' }));
     await waitFor(() => expect(calls(all, 'GET /api/analytics/summary').some((c) => qs(c).get('days') === '90')).toBe(true));
     await user.click(screen.getByRole('tab', { name: 'Trades' }));
     await waitFor(() => expect(calls(all, 'GET /api/analytics/trades').some((c) => qs(c).get('days') === '90')).toBe(true));
@@ -98,7 +98,7 @@ describe('Analytics page', () => {
     const all = base();
     renderApp('/analytics?tab=trades');
     await screen.findAllByTestId('trade-row');
-    await user.click(screen.getByRole('button', { name: '180 Days' }));
+    await user.click(screen.getByRole('radio', { name: '180 days' }));
     await user.click(screen.getByText(/^Filters/));
     await user.selectOptions(screen.getByRole('combobox', { name: 'Series' }), 'KXDEMOB');
     await user.selectOptions(screen.getByRole('combobox', { name: 'Result' }), 'loss');
@@ -198,12 +198,13 @@ describe('Analytics page', () => {
     expect(within(rows[1]).getByText(/50-62¢/)).toBeInTheDocument();
   });
 
-  it('is reachable from the bottom tabs', async () => {
-    const user = userEvent.setup();
+  it('lives under the Performance tab (stage 2: Analytics is no longer a tab of its own)', async () => {
     base();
-    renderApp('/');
-    await user.click(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'Analytics' }));
+    renderApp('/analytics');
     expect(await screen.findByRole('heading', { name: 'Analytics' })).toBeInTheDocument();
+    const main = screen.getByRole('navigation', { name: 'Main' });
+    expect(within(main).getByRole('link', { name: 'Performance' })).toHaveClass('active');
+    expect(within(main).queryByRole('link', { name: 'Analytics' })).toBeNull();
   });
 });
 
@@ -355,7 +356,7 @@ describe('Analytics request hygiene (S-28)', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(tradesOf(reqs)).toHaveLength(0); // not fired alongside the summary
 
-    await user.click(screen.getByRole('button', { name: '180 Days' }));
+    await user.click(screen.getByRole('radio', { name: '180 days' }));
     await waitFor(() => expect(summariesOf(reqs)).toHaveLength(2));
     expect(summariesOf(reqs)[0].signal.aborted).toBe(true);
     expect(tradesOf(reqs)).toHaveLength(0);

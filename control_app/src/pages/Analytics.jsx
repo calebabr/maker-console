@@ -20,6 +20,10 @@ import { useMyTrades } from '../components/analytics/useMyTrades.js';
 import { useStatus } from '../context/StatusContext.jsx';
 import { useCancellableResource } from '../hooks/useCancellableResource.js';
 import { useResource } from '../hooks/useResource.js';
+import Empty from '../components/Empty.jsx';
+import Skeleton from '../components/Skeleton.jsx';
+import RangeSelect from '../components/RangeSelect.jsx';
+import TabScroller from '../components/analytics/TabScroller.jsx';
 import PnlScope from '../components/PnlScope.jsx';
 import { api, query } from '../services/api.js';
 import { ago, formatMoney, formatPct, num } from '../utils/format.js';
@@ -41,6 +45,10 @@ export const TABS = [
   { key: 'ledger', label: 'Ledger' },
   { key: 'scorecard', label: 'Scorecard' },
 ];
+
+// The summary honours a rolling `days` window only (no `period=current`), so the shared RangeSelect gets the
+// four day windows. It has no `strategy` filter either, so there is no strategy chip on this page.
+const RANGE_CHOICES = DAY_OPTIONS.map((d) => ({ id: String(d), label: `${d} days` }));
 
 const KINDS = [
   { key: 'all', label: 'All' },
@@ -105,10 +113,11 @@ function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days }) {
           <HelpIcon term="position" />
         </p>
         {empty && (
-          <p className="hint" data-testid="empty">
-            No settled trades yet.
-            {totals.open_fills ? ` ${num(totals.open_fills)} fills are still waiting to settle.` : ''}
-          </p>
+          <Empty
+            compact
+            what="No settled trades yet."
+            why={totals.open_fills ? `${num(totals.open_fills)} fills are still waiting to settle.` : 'Fills settle after their market closes.'}
+          />
         )}
         {my.data && <BotVsYou bot={my.data.bot || totals} you={my.data.totals} days={days} />}
         {combined && (
@@ -296,19 +305,7 @@ export default function Analytics() {
       </div>
 
       <div className="an-controls">
-        <div className="chips" role="group" aria-label="Window">
-          {DAY_OPTIONS.map((d) => (
-            <button
-              key={d}
-              type="button"
-              className={`chip ${days === d ? 'active' : ''}`}
-              aria-pressed={days === d}
-              onClick={() => setDays(d)}
-            >
-              {d} Days
-            </button>
-          ))}
-        </div>
+        <RangeSelect label="Window" value={String(days)} options={RANGE_CHOICES} onChange={(id) => setDays(Number(id))} />
         <div className="segmented compact" role="group" aria-label="Account">
           <button type="button" className={!allEnv ? 'active' : ''} aria-pressed={!allEnv} onClick={() => setAllEnv(false)}>
             {mode ? `${cap(mode)} (Current)` : 'Current Mode'}
@@ -326,30 +323,20 @@ export default function Analytics() {
           </button>
         </div>
         {s && (
-          <p className="an-meta">
-            {s.env === 'all' ? 'Demo and live accounts' : `${cap(s.env)} account`}, settled in the last {s.days} days. Updated {ago(s.generated_utc)}.
+          <p className="scope-chip" data-testid="scope-chip">
+            <span>
+              {s.env === 'all' ? 'Demo and live accounts' : `${cap(s.env)} account`}, settled in the last {s.days} days
+            </span>
+            <span className="muted">Updated {ago(s.generated_utc)}</span>
           </p>
         )}
       </div>
 
-      <div className="segmented compact an-tabs an-tabs-6" role="tablist" aria-label="Analytics sections">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            role="tab"
-            aria-selected={tab === t.key}
-            className={tab === t.key ? 'active' : ''}
-            onClick={() => pick(t.key)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <TabScroller tabs={TABS} value={tab} onChange={pick} label="Analytics sections" />
 
       <StaleNotice staleAt={error ? staleAt : null} />
       <ErrorNotice error={error} onRetry={reload} />
-      {loading && !s && <Loading text="Loading analytics…" />}
+      {loading && !s && <Skeleton rows={3} figure label="Loading analytics" />}
       {s && s.truncated && (
         <div className="notice notice-info">Large Window: Only the most recent fills were counted. Pick a shorter window for exact totals.</div>
       )}
@@ -357,7 +344,7 @@ export default function Analytics() {
       {s && tab === 'summary' && totals && (
         <SummaryTab s={s} totals={totals} empty={empty} curve={curve} hasSplit={hasSplit} my={my} view={view} days={days} />
       )}
-      {s && tab === 'edge' && (empty ? <p className="muted">No settled trades yet.</p> : <EdgeTab s={s} />)}
+      {s && tab === 'edge' && (empty ? <Empty what="No settled trades yet." why="Edge needs settled fills." /> : <EdgeTab s={s} />)}
       {s && tab === 'execution' && <ExecutionTab s={s} />}
       {tab === 'ledger' && <LedgerView days={days} env={env} />}
       {tab === 'scorecard' && <ScorecardView days={days} env={env} />}

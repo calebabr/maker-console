@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
-import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
+import { ErrorNotice, StaleNotice } from '../components/Notices.jsx';
+import Empty from '../components/Empty.jsx';
+import Skeleton from '../components/Skeleton.jsx';
 import PnlStats from '../components/PnlStats.jsx';
 import HelpIcon from '../components/HelpIcon.jsx';
 import SourceBadge from '../components/SourceBadge.jsx';
@@ -22,7 +24,7 @@ function rowTime(r) {
 
 function Chips({ label, options, value, onChange }) {
   return (
-    <div className="chips" role="group" aria-label={label}>
+    <div className="chips chips-lg" role="group" aria-label={label}>
       {options.map((o) => (
         <button key={o.id} type="button" className={`chip ${value === o.id ? 'active' : ''}`} aria-pressed={value === o.id} onClick={() => onChange(o.id)}>
           {o.label}
@@ -72,7 +74,7 @@ export default function Activity() {
       )}
       <StaleNotice staleAt={error ? staleAt : null} />
       <ErrorNotice error={error} onRetry={reload} />
-      {loading && !data && <Loading />}
+      {loading && !data && <Skeleton rows={4} label="Loading activity" />}
 
       {items.length > 0 && (
         <>
@@ -87,7 +89,17 @@ export default function Activity() {
         </>
       )}
 
-      {data && !shown.length && <p className="muted">{items.length ? 'Nothing matches these filters.' : 'No journal rows yet.'}</p>}
+      {data && !shown.length && (
+        items.length ? (
+          <Empty
+            what="Nothing matches these filters."
+            why="Try a different source or type."
+            next={{ label: 'Show all', onClick: () => { setSource('all'); setKind('all'); } }}
+          />
+        ) : (
+          <Empty what="No activity yet." why="Quotes, fills and settlements appear here once the bot runs." />
+        )
+      )}
       {days.map((d) => (
         <section key={d.key} aria-label={d.label}>
           <div className="day-head">

@@ -141,7 +141,7 @@ describe('Arbitrage page labels', () => {
   it('lists one row per set with expandable legs, status and guaranteed vs realized', async () => {
     const user = userEvent.setup();
     stubApi(routes());
-    renderApp('/arb');
+    renderApp('/strategies/arb/results');
     const rows = await screen.findAllByTestId('arb-set-row');
     expect(rows).toHaveLength(2);
     expect(rows[0]).toHaveTextContent('Settled');
@@ -225,7 +225,7 @@ describe('Cash-flow form', () => {
   it('requires the date field', async () => {
     const user = userEvent.setup();
     base(PERIODS);
-    renderApp('/account');
+    renderApp('/performance/periods');
     await user.type(await screen.findByLabelText('Amount ($)'), '50');
     expect(screen.getByLabelText('When it happened')).toBeRequired();
   });
@@ -233,7 +233,7 @@ describe('Cash-flow form', () => {
   it('shows the server 422 messages', async () => {
     const user = userEvent.setup();
     base([422, { detail: ['ts must not be in the future'] }]);
-    renderApp('/account');
+    renderApp('/performance/periods');
     await submit(user);
     expect(await screen.findByTestId('flow-422')).toHaveTextContent('ts must not be in the future');
   });
@@ -241,7 +241,7 @@ describe('Cash-flow form', () => {
   it('409 duplicate asks "Add anyway" and then resends with confirm_duplicate and a fresh code', async () => {
     const user = userEvent.setup();
     const calls = base((c) => (c.body.confirm_duplicate ? PERIODS : [409, { detail: ['duplicate: same type, amount and date already recorded'] }]));
-    renderApp('/account');
+    renderApp('/performance/periods');
     await submit(user);
     expect(await screen.findByText(/duplicate: same type/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Add anyway' }));
@@ -258,7 +258,7 @@ describe('Cash-flow form', () => {
   it('declining "Add anyway" sends nothing more', async () => {
     const user = userEvent.setup();
     const calls = base([409, { detail: ['duplicate: same'] }]);
-    renderApp('/account');
+    renderApp('/performance/periods');
     await submit(user);
     await screen.findByText(/duplicate: same/);
     await user.click(screen.getByRole('button', { name: /cancel/i }));
@@ -341,7 +341,7 @@ describe("Today's P&L state", () => {
   it('none_yet shows "No settlements yet today", not $0.00', async () => {
     stubApi({ 'GET /api/status': status({ pnl_today_state: 'none_yet' }) });
     renderApp('/');
-    const tiles = await screen.findByTestId('status-tiles');
+    const tiles = await screen.findByTestId('home-total');
     expect(within(tiles).getByTestId('today-empty')).toHaveTextContent('No settlements yet today');
     expect(within(tiles).queryByTestId('today-unavailable')).toBeNull();
   });
@@ -349,7 +349,7 @@ describe("Today's P&L state", () => {
   it('unavailable shows "Unavailable"', async () => {
     stubApi({ 'GET /api/status': status({ pnl_today_state: 'unavailable', pnl_today: null }) });
     renderApp('/');
-    const tiles = await screen.findByTestId('status-tiles');
+    const tiles = await screen.findByTestId('home-total');
     expect(within(tiles).getByTestId('today-unavailable')).toHaveTextContent('Unavailable');
     expect(within(tiles).queryByTestId('today-empty')).toBeNull();
   });
@@ -357,7 +357,7 @@ describe("Today's P&L state", () => {
   it('settled shows the value, including a real $0.00', async () => {
     stubApi({ 'GET /api/status': status({ pnl_today_state: 'settled' }) });
     renderApp('/');
-    const tiles = await screen.findByTestId('status-tiles');
+    const tiles = await screen.findByTestId('home-total');
     expect(within(tiles).getByText('$0.00')).toBeInTheDocument();
     expect(within(tiles).queryByTestId('today-empty')).toBeNull();
   });
