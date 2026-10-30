@@ -34,7 +34,7 @@ makes sense, filters for side, kind, status, result, price band, series and sour
 - `tz` (IANA name) on the summary and ledger; response `tz_used` (UTC when invalid). Dates are local, windows are UTC. Details in `docs/API.md`.
 - `win_rate_by_strategy`: maker per fill, arbitrage per set; the pooled `totals.win_rate` is deprecated.
 - `arb_summary`, `arb_sets`, `arb_sets_total`: distinct sets and sightings, and one row per executed set.
-- Analytics tabs: Ledger (strategy table, totals, reconciliation) and Scorecard (null shows "not tracked yet"; return is labelled demo, indicative only).
+- Analytics (under Performance) tabs: Ledger (strategy table, totals, reconciliation) and Scorecard (null shows "not tracked yet"; return is labelled demo, indicative only).
 - New glossary terms: `win-rate-by-strategy`, `arb-set`, `scans-since-restart`, `risk-rule-outcome`, `ledger`, `scorecard`, `shadow-capital`.
 - Shadow: when `ceiling_full` is set, the banner says Shadow is not estimating until positions settle.
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased - UI-1a stage 2: new navigation and readability
+- Five tabs on the phone: Home, Strategies, Performance, Activity, More. Desktop sidebar groups the same pages (Strategies: Maker, Arbitrage; Performance: All strategies, Analytics, Shadow Estimate, Periods) and More is grouped into System, You and Help.
+- Old links still work: `/markets` opens Maker Controls and `/arb` opens the Arbitrage page (query and hash kept, so notification links keep working).
+- Home: one total P&L (Maker + Arbitrage) with a 7 days / 30 days / This period control; your own manual trades are on a separate line and not in the total.
+- Strategies hub: one card per strategy. Each strategy page has Overview | Results | Controls; Pause/Resume, settings, Go live and Turn off keep their 2FA and confirmation steps.
+- Performance hub: All strategies table, Analytics (with Ledger and Scorecard), Shadow, and Periods (moved from Account, which keeps a link).
+- Readability: six type sizes, 40 px minimum tap targets, one set of number and date formats, sentence-case labels, stronger control borders.
+- Stop is unchanged: one tap, no 2FA, visible on every page and width.
+
 ## Unreleased - UI-1a stage 1: honest analytics
 - Analytics takes the viewer's time zone (`tz`, UTC fallback, `tz_used` returned); win rate is shown per strategy (maker per fill, arbitrage per set) and the pooled rate is deprecated.
 - Arbitrage: distinct sets and sightings, scans since restart, and an executed-sets list. New Ledger and Scorecard tabs in Analytics with a reconciliation residual (tolerance 0.10).
