@@ -5,7 +5,7 @@ import { login, nav } from './helpers.js';
 // past the 16 px gutters. `.shell` uses overflow-x: clip, so document scrollWidth alone cannot see a clipped
 // overflow; this also measures every element's box (skipping ones inside their own horizontal scroller).
 
-const PAGES = ['Overview', 'Analytics', 'Activity', 'Markets', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Arbitrage', 'Shadow Estimate', 'Terminology'];
+const PAGES = ['Home', 'Strategies', 'Performance', 'Analytics', 'Activity', 'Maker', 'Maker Results', 'Maker Controls', 'Arbitrage', 'Arbitrage Results', 'Arbitrage Controls', 'Periods', 'More', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Shadow Estimate', 'Terminology'];
 
 async function audit(page) {
   return page.evaluate(() => {
@@ -51,7 +51,7 @@ test('login screen fits and is centred at 375 px', async ({ page }) => {
 test('every page fits 375 px, header Stop fully visible, equal gutters', async ({ page }) => {
   await login(page);
   for (const label of PAGES) {
-    if (label !== 'Overview') await nav(page, label);
+    if (label !== 'Home') await nav(page, label);
     await page.waitForTimeout(150);
     await expectFits(page, label);
     const stop = await page.locator('header.appbar').getByRole('button', { name: /stop the bot/i }).boundingBox();
@@ -67,7 +67,7 @@ for (const theme of ['midnight', 'teal', 'graphite']) {
     }, theme);
     await login(page);
     for (const label of PAGES) {
-      if (label !== 'Overview') await nav(page, label);
+      if (label !== 'Home') await nav(page, label);
       await page.waitForTimeout(150);
       await expectFits(page, `${theme}/${label}`);
     }

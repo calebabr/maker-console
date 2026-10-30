@@ -9,9 +9,9 @@ test('page title: shown at top, pinned under the header when scrolled, hides whe
   await nav(page, 'Logs');
   await expect(bar(page)).toHaveText('Logs');
   await expect(page).toHaveTitle('Logs · Prior');
-  await nav(page, 'Markets');
-  await expect(bar(page)).toHaveText('Markets');
-  await expect(page).toHaveTitle('Markets · Prior');
+  await nav(page, 'Maker'); // Strategies -> Maker (the old Markets tab)
+  await expect(bar(page)).toHaveText('Maker');
+  await expect(page).toHaveTitle('Maker · Prior');
   await expect(bar(page)).toHaveAttribute('data-state', 'shown');
 
   // Markets cards are folded now, so that page is too short to scroll. Terminology is static and long

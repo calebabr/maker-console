@@ -14,7 +14,7 @@ test('Analytics: totals, chart, edge, window switch, filters and load more', asy
   await page.getByRole('tab', { name: 'Trades' }).click();
   await expect(page.getByTestId('trade-row')).toHaveCount(50);
 
-  await page.getByRole('button', { name: '180 days' }).click();
+  await page.getByRole('radio', { name: '180 days' }).click();
   await expect(page.getByText(/settled in the last 180 days/)).toBeVisible();
 
   await page.getByRole('tab', { name: 'Edge', exact: true }).click();
@@ -41,7 +41,7 @@ test('Analytics: totals, chart, edge, window switch, filters and load more', asy
 test('Analytics extension: edge verdict card, calibration, fill rate and CSV download', async ({ page }) => {
   await login(page);
   await nav(page, 'Analytics');
-  await page.getByRole('button', { name: '180 days' }).click();
+  await page.getByRole('radio', { name: '180 days' }).click();
   const card = page.getByTestId('edge-holding');
   await expect(card).toContainText(/Is the edge holding/i);
   await expect(card).toContainText(/judged market type/);
