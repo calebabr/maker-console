@@ -7,9 +7,12 @@ Load guards (Atlas M0 + the 512 MB instance; SECURITY_REVIEW S-28 / S-30):
   trade rows for one (env, days); concurrent requests for the same key share it (single flight); a request for
   another key waits up to BUSY_WAIT_S for the gate, then gets 429 `analytics_busy` + Retry-After.
 * Builds run on a dedicated one-thread executor, never the default pool that Stop's cancel uses (S-25 family).
-* Results are cached CACHE_TTL_S per (env, days): the summary (small; `generated_utc` shows its age) and the trade
-  rows (at most ROWS_CACHE_KEYS keys; the largest objects), so /trades paging and filtering never re-reads Atlas.
-  Only successful builds are cached.
+* Results are cached CACHE_TTL_S: the summary per (env, days, period, tz) (small; `generated_utc` shows its age) and
+  the trade rows per (env, days, period) (at most ROWS_CACHE_KEYS keys; the largest objects, independent of the
+  viewer's time zone), so /trades paging and filtering never re-reads Atlas. Both caches are bounded
+  (CACHE_MAX_KEYS summaries; the oldest entry is dropped first). `tz` is validated (pnl.resolve_tz: IANA names
+  only, anything else means UTC), so the key space is the tz database, never raw client text. Only successful
+  builds are cached.
 * Store reads are projected to the fields used. Journal `quote` rows are folded into an order_id -> cell map kept
   across requests and refreshed incrementally (only rows newer than the last read), so the journal cap is not hit
   on every request (S-30).
@@ -30,22 +33,31 @@ from fastapi.responses import Response
 from ..auth.deps import current_user
 from ..auth.ratelimit import get_limiter
 from ..services import analytics as an
+from ..services import arbsets
 from ..services import botfiles
+from ..services import ledger as ledgersvc
 from ..services import periods as per
+from ..services import pnl as pnlsvc
 from ..services import strategies as strat
 from .periods import window_for
 
 router = APIRouter(prefix="/api")
 STORE_TIMEOUT_S = 10.0
 CACHE_TTL_S = 60.0
-CACHE_MAX_KEYS = 32                      # (env, days) has 3 x 4 = 12 possible keys; hard guard anyway
+CACHE_MAX_KEYS = 64                      # summaries per (env, days, period, tz); the oldest is dropped beyond this
 ROWS_CACHE_KEYS = 2                      # cached trade-row sets (each up to MAX_FILLS rows)
 BUSY_WAIT_S = 8.0                        # how long a request waits for another key's build before 429
 BUSY_RETRY_S = 5
 JOURNAL_OVERLAP = timedelta(hours=6)     # incremental journal reads re-read this much (late-synced rows)
 JOURNAL_FULL_REFRESH_S = 6 * 3600.0      # rebuild the order_id -> cell map from scratch this often
+SNAP_BEFORE = timedelta(days=14)           # ledger / scorecard read snapshots from this long before the window
+SNAP_LIMIT = 20_000
+HB_LIMIT = 20_000
+ALERT_LIMIT = 2000
+AUDIT_LIMIT = 1000
 JOURNAL_MAP_MAX = 60_000                 # order ids kept in the map (oldest dropped beyond this)
-RATE_LIMITS = {"analytics_summary": (30, 60.0), "analytics_trades": (60, 60.0)}   # per user, per minute
+RATE_LIMITS = {"analytics_summary": (30, 60.0), "analytics_trades": (60, 60.0),
+               "analytics_ledger": (20, 60.0)}   # per user, per minute
 _clock = time.monotonic                  # tests monkeypatch this
 _SERIES_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.]{0,39}$")
 _CHOICES = {"env": an.ENVS, "side": ("yes", "no"), "kind": ("maker", "taker"), "status": ("settled", "open"),
@@ -206,7 +218,7 @@ def _pkey(period: dict | None) -> tuple | None:
     return None if period is None else (period["id"], per.iso(period["started_at"]), per.iso(period["ended_at"]))
 
 
-async def _build(request: Request, env: str, days: int, period: dict | None = None
+async def _build(request: Request, env: str, days: int, period: dict | None = None, tz: str = "UTC"
                  ) -> tuple[dict, list[dict]]:
     """Bounded, projected reads -> (summary, trade rows), computed on the dedicated executor. Runs under the gate."""
     store = request.app.state.store
@@ -233,35 +245,39 @@ async def _build(request: Request, env: str, days: int, period: dict | None = No
         rows = an.trade_rows(fills, settl, eps, cells=cells, series_list=series, env=env, jcells=jcells)
         return an.summary(rows, eps, arbs, days=days, env=env, now=now, cells=cells, truncated=truncated,
                           expectations=an.load_expectations(), jcells=jcells, series_list=series,
-                          period=period), rows
+                          period=period, tz=tz), rows
     return await asyncio.get_running_loop().run_in_executor(_pool(), build)
 
 
 def _store_result(request: Request, key: tuple, t0: float, summary: dict, rows: list[dict]) -> None:
+    """key = (env, days, period key, validated tz). The summary is cached per full key; the rows per key without
+    the zone (they do not depend on it). Both caches drop expired entries, then the OLDEST ones beyond their bound."""
     cache, rc = _cache(request), _state(request)["rows"]
     for c in (cache, rc):
         for k in [k for k, v in c.items() if not _fresh(v, t0)]:
             c.pop(k, None)                                    # drop expired entries
-    if len(cache) >= CACHE_MAX_KEYS:
-        cache.clear()
+    while len(cache) >= CACHE_MAX_KEYS:
+        cache.pop(min(cache, key=lambda k: cache[k][0]))      # bounded: oldest first
     cache[key] = (t0, summary)
-    rc.pop(key, None)
+    rkey = key[:3]
+    rc.pop(rkey, None)
     while len(rc) >= ROWS_CACHE_KEYS:                         # drop the oldest row set
         rc.pop(min(rc, key=lambda k: rc[k][0]))
-    rc[key] = (t0, rows)
+    rc[rkey] = (t0, rows)
 
 
 def _pick(res: tuple[dict, list[dict]], want: str):
     return res[0] if want == "summary" else res[1]
 
 
-async def _dataset(request: Request, env: str, days: int, want: str, period: dict | None = None):
-    """Cached summary (want="summary") or trade rows (want="rows") for (env, days[, period]); at most one build at
-    a time."""
-    st, key = _state(request), (env, days, _pkey(period))
+async def _dataset(request: Request, env: str, days: int, want: str, period: dict | None = None,
+                   tz: str = "UTC"):
+    """Cached summary (want="summary") or trade rows (want="rows") for (env, days[, period][, tz]); at most one
+    build at a time. `tz` must already be a validated name (pnl.resolve_tz); rows ignore it."""
+    st, key = _state(request), (env, days, _pkey(period), tz)
 
     def cached():
-        hit = _cache(request).get(key) if want == "summary" else st["rows"].get(key)
+        hit = _cache(request).get(key) if want == "summary" else st["rows"].get(key[:3])
         return hit[1] if _fresh(hit, _clock()) else None
 
     res = cached()
@@ -286,7 +302,7 @@ async def _dataset(request: Request, env: str, days: int, want: str, period: dic
         st["inflight"][key] = fut
         t0 = _clock()
         try:
-            res = await _build(request, env, days, period)
+            res = await _build(request, env, days, period, tz)
         except BaseException as e:
             fut.set_exception(e if isinstance(e, HTTPException) else HTTPException(503, "store_unavailable"))
             fut.exception()                                   # mark retrieved (no "never retrieved" warning)
@@ -306,8 +322,27 @@ async def analytics_summary(request: Request, user: dict = Depends(current_user)
     q = request.query_params
     days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
+    _zone, tzname = pnlsvc.resolve_tz(q.get("tz"))       # unknown / malformed -> UTC, never an error
     days, period = await _period(request, days)
-    return await _dataset(request, env, days, "summary", period)
+    out = await _dataset(request, env, days, "summary", period, tzname)
+    return _with_restart(request, out)
+
+
+def _with_restart(request: Request, out: dict) -> dict:
+    """Merge the runner's in-memory counters into a COPY of the (cached) summary, labelled as since-restart."""
+    arb_sum = dict(out.get("arb_summary") or {})
+    arb_sum["since_restart"] = since_restart(request)
+    return {**out, "arb_summary": arb_sum}
+
+
+def since_restart(request: Request) -> dict:
+    """The runner's raw arbitrage counters (reset by every restart) with the time they count from."""
+    r = request.app.state.runner
+    st = r.arb_status()
+    started = getattr(r, "started_utc", None)
+    return {"label": "since restart (in-memory, reset by every restart or deploy)",
+            "since_utc": started.isoformat() if isinstance(started, datetime) else None,
+            "scans": st.get("scans"), "sightings": st.get("found")}
 
 
 def _filters(request: Request) -> tuple[int, str, dict]:
@@ -371,7 +406,103 @@ async def analytics_my_trades(request: Request, user: dict = Depends(current_use
     limit = _int("limit", q.get("limit"), 100, 1, 200)
     days, period = await _period(request, days)
     rows = await _dataset(request, env, days, "rows", period)
-    return an.my_trades(rows, days=days, env=env, now=datetime.now(timezone.utc), limit=limit, period=period)
+    return an.my_trades(rows, days=days, env=env, now=datetime.now(timezone.utc), limit=limit, period=period,
+                        tz=q.get("tz"))
+
+
+async def _soft(coro, notes: list[str], what: str, default=None):
+    """An optional read: a store failure is reported in `notes` and the metric is null, never a 5xx."""
+    try:
+        return await asyncio.wait_for(coro, timeout=STORE_TIMEOUT_S)
+    except Exception:  # noqa: BLE001
+        notes.append(f"{what}: store read failed; the figures that need it are null")
+        return default
+
+
+async def _window(request: Request, days: int) -> tuple[int, dict | None, datetime, datetime | None, datetime]:
+    """(days, period, since, until, now) for the rolling window or the period (fill-date attribution)."""
+    now = datetime.now(timezone.utc)
+    days, period = await _period(request, days)
+    if period is not None:
+        return days, period, period["started_at"] or datetime(1970, 1, 1, tzinfo=timezone.utc),             period["ended_at"], now
+    return days, None, now - timedelta(days=days), None, now
+
+
+def _in_window(rows: list[dict], since: datetime, until: datetime | None) -> list[dict]:
+    return [r for r in rows if r["_ts"] >= since and (until is None or r["_ts"] < until)]
+
+
+@router.get("/analytics/ledger")
+async def analytics_ledger(request: Request, user: dict = Depends(current_user)) -> dict:
+    """The Honest Ledger (services/ledger.py): fills netted to settlements per strategy and per local day, plus the
+    reconciliation of the account equity change against realized P&L and cash flows. Read only; signed-in session
+    (no fresh 2FA); same filters as /analytics/trades (days, env, period) plus `tz` (validated; UTC fallback)."""
+    _rate_limit(request, user, "analytics_ledger")
+    q = request.query_params
+    days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
+    env = _env(request, q.get("env"))
+    zone, tzname = pnlsvc.resolve_tz(q.get("tz"))
+    days, period, since, until, now = await _window(request, days)
+    all_rows = await _dataset(request, env, days, "rows", period)
+    rows = _in_window(all_rows, since, until)
+    store, notes = request.app.state.store, []
+    arbs, _t = _capped(await _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)), an.MAX_ARB)
+    snaps = await _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
+                        "account snapshots", [])
+    flows = await _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", [])
+    sets = arbsets.build_sets(arbs, [r for r in rows if r.get("strategy") == "arb"], env=env, since=since,
+                              until=until, limit=arbsets.MAX_SETS * 5)
+    out = ledgersvc.build(rows, sets, zone=zone, tzname=tzname, since=since, until=until, snapshots=snaps or [],
+                          flows=flows or [], now=now, all_rows=all_rows, truncated=len(all_rows) >= an.MAX_FILLS)
+    out["env"], out["days"] = env, days
+    if period is not None:
+        out["period"] = {"id": period.get("id"), "name": period.get("name")}
+    out["notes"] = out["notes"] + notes
+    return out
+
+
+@router.get("/analytics/scorecard")
+async def analytics_scorecard(request: Request, user: dict = Depends(current_user)) -> dict:
+    """Functional scorecard for a period report (services/ledger.scorecard): passes ok %, churn, fill-to-settlement
+    integrity, open positions past expected settlement, alerts by type, arbitrage per set, reconciliation and the
+    return labelled with its sample size. `period=<id|current|all>` or `days`. A metric the stored data cannot give
+    is null and explained in `notes`. Read only; signed-in session."""
+    _rate_limit(request, user, "analytics_ledger")
+    q = request.query_params
+    days = _int("days", q.get("days"), 7, 1, allowed=an.DAYS_ALLOWED)
+    env = _env(request, q.get("env"))
+    days, period, since, until, now = await _window(request, days)
+    all_rows = await _dataset(request, env, days, "rows", period)
+    rows = _in_window(all_rows, since, until)
+    store, notes = request.app.state.store, []
+    hbs = await _soft(store.list_heartbeats(since=since, limit=HB_LIMIT), notes, "heartbeats", [])
+    jr = await _soft(store.list_journal(since=since, limit=an.MAX_JOURNAL + 1, events=["quote", "cancel"],
+                                        fields=("event", "ts")), notes, "journal", [])
+    alerts = await _soft(store.list_alerts(limit=ALERT_LIMIT), notes, "alerts", [])
+    audit_rows = await _soft(store.list_audit(limit=AUDIT_LIMIT), notes, "audit log", [])
+    arbs, _t = _capped(await _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)), an.MAX_ARB)
+    snaps = await _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
+                        "account snapshots", [])
+    flows = await _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", [])
+
+    def win(docs, key="ts"):
+        out = []
+        for d in docs or []:
+            t = arbsets._ts(d.get(key)) if isinstance(d, dict) else None
+            if t is not None and t >= since and (until is None or t < until):
+                out.append(d)
+        return out
+    sets = arbsets.build_sets(arbs, [r for r in rows if r.get("strategy") == "arb"], env=env, since=since,
+                              until=until, limit=arbsets.MAX_SETS * 5)
+    recon = ledgersvc.reconciliation(all_rows, snaps or [], flows or [], since=since, now=now)
+    label = (period or {}).get("name") or f"last {days} days"
+    out = ledgersvc.scorecard(
+        env=env, rows=rows, sets=sets, arb_counts=arbsets.counters(arbs, env=env, since=since, until=until),
+        heartbeats=win(hbs), journal=jr or [], alerts=win(alerts), audit_rows=win(audit_rows),
+        reconciliation_obj=recon, since=since, until=until, now=now, label=label,
+        truncated=len(all_rows) >= an.MAX_FILLS or len(jr or []) > an.MAX_JOURNAL)
+    out["notes"] = out["notes"] + notes
+    return out
 
 
 NOTE_MAX = 200

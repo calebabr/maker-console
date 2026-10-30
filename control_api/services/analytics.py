@@ -28,10 +28,11 @@ import json
 import math
 import os
 import statistics
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import arbsets
 from . import benchmarks as bench
 from . import fillquality as fq
 from . import pnl as pnlsvc
@@ -472,13 +473,14 @@ def _groups(rows: list[dict], keyf, order: Iterable[str] | None = None) -> list[
     return out
 
 
-def pnl_curve(settled: list[dict], start: date, end: date) -> list[dict]:
-    """Daily points (settlement date, UTC) from start to end inclusive; [] when nothing settled."""
+def pnl_curve(settled: list[dict], start: date, end: date, zone: tzinfo = timezone.utc) -> list[dict]:
+    """Daily points (settlement date in `zone`, default UTC) from start to end inclusive (dates in the same zone);
+    [] when nothing settled. Storage stays UTC; only the bucketing date moves."""
     if not settled:
         return []
     day: dict[date, list[float]] = {}
     for r in settled:
-        d = r["_settled"].astimezone(timezone.utc).date()
+        d = r["_settled"].astimezone(zone).date()
         m = day.setdefault(d, [0.0, 0.0])
         m[0 if r["kind"] == "maker" else 1] += r["_pnl"]
     dates, d = [], start
@@ -551,9 +553,9 @@ def _arb_filled(d: dict) -> bool:
     return str(d.get("executed", "")).startswith("FILLED")
 
 
-def arb_summary(docs: Iterable[dict], *, lo: datetime, env: str) -> dict:
+def arb_summary(docs: Iterable[dict], *, lo: datetime, env: str, zone: tzinfo = timezone.utc) -> dict:
     """{opportunities, executed, pnl, daily}. executed = FILLED or PARTIAL sets; pnl = guaranteed profit of FILLED
-    sets at execution (same as /api/arb), null when none filled."""
+    sets at execution (same as /api/arb), null when none filled. `daily` is bucketed by the local date in `zone`."""
     mine = []
     for d in docs:
         t = _ts(d.get("ts")) if isinstance(d, dict) else None
@@ -567,7 +569,7 @@ def arb_summary(docs: Iterable[dict], *, lo: datetime, env: str) -> dict:
         if _arb_filled(d):
             filled += 1
             pnl += pnlsvc._f(d.get("profit")) or 0.0
-        day = daily.setdefault(t.date().isoformat(), [0, 0])
+        day = daily.setdefault(t.astimezone(zone).date().isoformat(), [0, 0])
         day[0] += 1
         day[1] += ex
     return {"opportunities": len(mine), "executed": executed, "pnl": round(pnl, 2) if filled else None,
@@ -760,12 +762,18 @@ def _in(ts: datetime | None, start: datetime | None, end: datetime | None) -> bo
 def summary(rows: list[dict], episodes: list[dict], arb_docs: list[dict], *, days: int, env: str,
             now: datetime, cells: Any, truncated: bool = False, expectations: dict | None = None,
             jcells: dict[str, str] | None = None, series_list: Iterable[str] = (),
-            period: dict | None = None) -> dict:
+            period: dict | None = None, tz: str | None = None) -> dict:
     """`period` ({id, name, started_at, ended_at}; datetimes or None) switches to period mode: only fills filled
     inside [started_at, ended_at) count (attribution by FILL date) and each one is settled whenever its market
-    settled, instead of the rolling `days` window by settlement date."""
+    settled, instead of the rolling `days` window by settlement date.
+
+    `tz` (an IANA name; unknown or malformed means UTC, see pnl.resolve_tz) moves only the DATE BUCKETS (P&L curve,
+    arbitrage daily rows, "today") to that zone; the rolling window edges and all storage stay UTC. The zone used
+    is returned as `tz_used`."""
+    zone, tzname = pnlsvc.resolve_tz(tz)
     lo = now - timedelta(days=days)
     p0 = p1 = None
+    arb_all = list(arb_docs)
     if period is not None:
         p0, p1 = period.get("started_at"), period.get("ended_at")
         lo = max(p0, now - timedelta(days=max(DAYS_ALLOWED))) if p0 else now - timedelta(days=max(DAYS_ALLOWED))
@@ -780,7 +788,7 @@ def summary(rows: list[dict], episodes: list[dict], arb_docs: list[dict], *, day
     wins = sum(1 for r in settled if r["result"] == "win")
     cost = sum(r["_cost"] for r in settled)
     pnl = sum(r["_pnl"] for r in settled)
-    curve = pnl_curve(settled, lo.date(), now.date())
+    curve = pnl_curve(settled, lo.astimezone(zone).date(), now.astimezone(zone).date(), zone)
     config_order = [cell_id(c) for c in parse_cells(cells)]
     exp = expectations if expectations is not None else load_expectations()
     cell_rows: dict[str, list[dict]] = {}
@@ -806,15 +814,38 @@ def summary(rows: list[dict], episodes: list[dict], arb_docs: list[dict], *, day
         "by_band": _groups(maker, lambda r: r["band"], order=band_labels(cells) + (BAND_OTHER,)),
         "by_ttc": _groups(maker, lambda r: r["ttc_band"] or TTC_UNKNOWN, order=ttc_labels(cells) + (TTC_UNKNOWN,)),
         "fill_quality": fill_quality_weekly(rows, episodes, lo=lo, now=now, env=env),
-        "arb": arb_summary(arb_docs, lo=lo, env=env),
+        "arb": arb_summary(arb_docs, lo=lo, env=env, zone=zone),
         "expectations": {"source": exp.get("source") or "", "loaded": bool(exp.get("loaded"))},
         "calibration": calibration(maker, cells),
         "fill_rate": fill_rate(episodes, lo=lo, env=env, cells=cells, jcells=jcells or {}, series_list=series_list),
     }
+    out["tz_used"] = tzname
+    # per-strategy win rate (never pooled): maker per FILL, arbitrage per SET (hedged legs are not independent
+    # trials: a NO set always has losing legs)
+    arb_rows = [r for r in rows if r.get("strategy") == "arb"]
+    sets_all = arbsets.build_sets(arb_all, arb_rows, env=env, since=p0 if period is not None else lo,
+                                  until=p1 if period is not None else None, limit=arbsets.MAX_SETS * 5)
+    sstats = arbsets.set_stats(sets_all)
+    out["win_rate_by_strategy"] = {
+        "maker": _rate("fill", sum(1 for r in maker if r["result"] == "win"), len(maker)),
+        "arb": _rate("set", sstats["wins"], sstats["settled"])}
+    out["deprecated"] = {"totals.win_rate": "pools maker fills and arbitrage legs; use win_rate_by_strategy"}
+    out["arb_summary"] = arbsets.summary(arb_all, arb_rows, env=env, now=now, zone=zone, tzname=tzname,
+                                         since=p0 if period is not None else lo,
+                                         until=p1 if period is not None else None,
+                                         label=(period or {}).get("name") or f"last {days} days")
+    out["arb_sets"] = sets_all[:100]
+    out["arb_sets_total"] = len(sets_all)
     if period is not None:
         out["period"] = {"id": period.get("id"), "name": period.get("name"), "started_at": iso(p0),
                          "ended_at": iso(p1)}
     return out
+
+
+def _rate(unit: str, wins: int, n: int) -> dict:
+    lo, hi = wilson(wins, n)
+    return {"unit": unit, "n": n, "wins": wins, "losses": n - wins, "win_rate": _r(wins / n, 4) if n else None,
+            "ci_low": _r(lo, 4), "ci_high": _r(hi, 4), "method": "wilson95"}
 
 
 def _totals(settled: list[dict], open_n: int) -> dict:
@@ -828,10 +859,11 @@ def _totals(settled: list[dict], open_n: int) -> dict:
 
 
 def my_trades(rows: list[dict], *, days: int, env: str, now: datetime, limit: int = 200,
-              period: dict | None = None) -> dict:
+              period: dict | None = None, tz: str | None = None) -> dict:
     """The owner's own trades (source "you", Y5) beside the bot: totals, daily P&L curve, newest trades with notes.
     Manual rows never feed the bot summary (summary() drops them); bot totals here are for the side-by-side line.
-    `period` (see summary) attributes by fill date instead of the rolling settlement window."""
+    `period` (see summary) attributes by fill date instead of the rolling settlement window. `tz` as in summary."""
+    zone, tzname = pnlsvc.resolve_tz(tz)
     lo = now - timedelta(days=days)
     if period is not None:
         p0, p1 = period.get("started_at"), period.get("ended_at")
@@ -845,19 +877,19 @@ def my_trades(rows: list[dict], *, days: int, env: str, now: datetime, limit: in
                 and r["_settled"] <= now]
     ms, bs = settled(mine), settled(bot)
     curve = [{"date": p["date"], "pnl": p["pnl"], "cum_pnl": p["cum_pnl"], "drawdown": p["drawdown"]}
-             for p in pnl_curve(ms, lo.date(), now.date())]
+             for p in pnl_curve(ms, lo.astimezone(zone).date(), now.astimezone(zone).date(), zone)]
     recent = [r for r in mine if r["_ts"] >= lo]
     trades = [dict(public_trade(r), note=r.get("_note")) for r in recent[:max(0, limit)]]
     return {"env": env, "days": days, "generated_utc": iso(now),
             "totals": _totals(ms, sum(1 for r in recent if r["_settled"] is None)),
             "bot": _totals(bs, sum(1 for r in bot if r["_settled"] is None and r["_ts"] >= lo)),
-            "pnl_curve": curve, "trades": trades, "total_trades": len(recent)}
+            "pnl_curve": curve, "trades": trades, "total_trades": len(recent), "tz_used": tzname}
 
 
 def summarize(*, fills: Iterable[dict], settlements: Iterable[dict], episodes: Iterable[dict] = (),
               arbs: Iterable[dict] = (), config: dict | None = None, now: datetime, days: int, env: str,
               journal: Iterable[dict] = (), series_list: Iterable[str] | None = None,
-              truncated: bool = False) -> dict:
+              truncated: bool = False, tz: str | None = None) -> dict:
     """One-call summary from raw store docs (used by tools/pull_data.py). `config` supplies the read-only `cells`
     and `series`; `series_list` defaults to config series. Same output as GET /api/analytics/summary."""
     cfg = config or {}
@@ -866,4 +898,4 @@ def summarize(*, fills: Iterable[dict], settlements: Iterable[dict], episodes: I
     jc = journal_cells(journal)
     rows = trade_rows(fills, settlements, eps, cells=cfg.get("cells"), series_list=sl, env=env, jcells=jc)
     return summary(rows, eps, list(arbs), days=days, env=env, now=now, cells=cfg.get("cells"), truncated=truncated,
-                   jcells=jc, series_list=sl)
+                   jcells=jc, series_list=sl, tz=tz)

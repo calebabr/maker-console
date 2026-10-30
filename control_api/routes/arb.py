@@ -6,6 +6,7 @@ Turning things OFF through PUT also needs 2FA (one endpoint); the 2FA-free way t
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -15,6 +16,8 @@ from ..auth.audit import audit
 from ..auth.deps import current_user, require_fresh_2fa
 from ..runner import RunnerDisabled, StopInProgress
 from ..services import arb as arbsvc
+from ..services import arbsets
+from ..services import pnl as pnlsvc
 
 router = APIRouter(prefix="/api")
 CONTROL_KEYS = ("enabled", "live", "confirm", "ack_legging")
@@ -56,19 +59,56 @@ async def arb_pnl(request: Request) -> dict | None:
     return (await arb_pnls(request))[0]
 
 
-async def arb_view(request: Request) -> dict:
+SUMMARY_DAYS = 30
+SUMMARY_ROWS_WAIT_S = 3.0        # per-set results need the shared analytics dataset; never stall the page for it
+
+
+async def arb_summary_view(request: Request, tz: str | None = None) -> dict:
+    """UI-1a: distinct sets, gate outcomes and per-set results recomputed from the STORED arbitrage log (not the
+    in-memory scan counters), plus those counters labelled `since_restart`. Counts never fail on the fills read:
+    `per_set` is null when the shared analytics dataset is not available within a few seconds."""
+    from . import analytics as ar          # late import: analytics imports nothing from here
+    r = request.app.state.runner
+    zone, tzname = pnlsvc.resolve_tz(tz)
+    env = r.mode if getattr(r, "mode", None) in ("demo", "live") else "demo"
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=SUMMARY_DAYS)
+    notes: list[str] = []
+    try:
+        docs = await asyncio.wait_for(request.app.state.store.list_arb_opportunities(since=since, limit=20001), 10)
+    except Exception:  # noqa: BLE001
+        docs = [d for d in r.arb_recent if isinstance(d.get("ts"), datetime) and d["ts"] >= since]
+        notes.append("stored log unreadable: counts cover this process's recent sightings only")
+    rows = None
+    try:
+        rows = await asyncio.wait_for(ar._dataset(request, env, SUMMARY_DAYS, "rows", None), SUMMARY_ROWS_WAIT_S)
+    except BaseException as e:  # noqa: BLE001
+        if not isinstance(e, Exception):
+            raise
+        notes.append("per-set results unavailable right now; counts are from the stored log")
+    out = arbsets.summary(docs, rows or [], env=env, now=now, zone=zone, tzname=tzname, since=since,
+                          label=f"last {SUMMARY_DAYS} days")
+    if rows is None:
+        out["per_set"] = None
+    out["since_restart"] = ar.since_restart(request)
+    out["notes"] = notes
+    return out
+
+
+async def arb_view(request: Request, tz: str | None = None) -> dict:
     r = request.app.state.runner
     s = request.app.state.settings
     cfg = r.arb_settings()
     pnl_live, pnl_demo = await arb_pnls(request)
     return {"settings": {"enabled": r.arb_desired == "running", "live": r.arb_mode == "live", **cfg},
             "schema": arbsvc.schema(s), "ceilings": arbsvc.ceilings(s), "status": r.arb_status(),
-            "pnl": pnl_live, "pnl_demo_execute": pnl_demo, "expectation": arbsvc.EXPECTATION}
+            "pnl": pnl_live, "pnl_demo_execute": pnl_demo, "expectation": arbsvc.EXPECTATION,
+            "arb_summary": await arb_summary_view(request, tz)}
 
 
 @router.get("/arb")
-async def get_arb(request: Request, user: dict = Depends(current_user)) -> dict:
-    return await arb_view(request)
+async def get_arb(request: Request, tz: str | None = Query(None), user: dict = Depends(current_user)) -> dict:
+    return await arb_view(request, tz)
 
 
 @router.put("/arb")
