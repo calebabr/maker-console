@@ -1,4 +1,4 @@
-# Release process (CI/CD): updating Keel while the bot runs
+# Release process (CI/CD): updating Prior while the bot runs
 
 _Status: **design approved and built (2026-10-16); my decisions (A2, B2, C = 120 s) were made 2026-10-13.** The real first-run verification happens in the dress rehearsal (three dummy releases in demo, see the Demo-Day Checklist in DEPLOY.md). Written 2026-10-13._
 
@@ -148,7 +148,7 @@ Today (S-21), any restart drops LIVE to demo, and you re-arm from the phone. Wit
 GitHub's native "required reviewers" on deployment environments is **not available for private repos on GitHub Free/Pro/Team** ([GitHub docs](https://docs.github.com/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment)). So B2 for the private repo works like this:
 1. **Start:** I run the `release` workflow (`workflow_dispatch`) from **GitHub Mobile** (Repository → Actions → release → Run workflow), choosing the commit or tag. Only accounts with write access can run it.
 2. **Gate:** the workflow checks that CI is green on that exact commit and runs the safety gate.
-3. **Approve with 2FA in Keel:** the workflow posts a *pending release* (version, commit, change summary, CI result) to the API. The Server page shows it with **Approve** / **Reject**; Approve needs fresh 2FA. The workflow polls the API using a release-scoped token and proceeds only after approval; it times out (no deploy) after 30 min. AI coding agents can never approve (no 2FA), even though their commits appear under the owner's git name.
+3. **Approve with 2FA in Prior:** the workflow posts a *pending release* (version, commit, change summary, CI result) to the API. The Server page shows it with **Approve** / **Reject**; Approve needs fresh 2FA. The workflow polls the API using a release-scoped token and proceeds only after approval; it times out (no deploy) after 30 min. AI coding agents can never approve (no 2FA), even though their commits appear under the owner's git name.
 4. **Deploy:** backend deploy hook → verify → frontend → verify → ntfy "Release vX healthy" → tag.
 
 After the public/private split, the public `tradingControlApp` repo could use GitHub's native required reviewers (free on public repos) as an extra layer.

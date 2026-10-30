@@ -36,7 +36,7 @@ The red **Stop** button is in the header on every page. One tap plus one confirm
   - **Trade history** with filters (series, side, maker/taker, settled/open, price band, cell, win/loss), **Load more**, and **Download CSV** (current filters, up to 5,000 rows; opens in Excel or Sheets).
   - Messages: "Too many requests - try again in N s" means wait a moment; the database-down banner means Atlas is unreachable (Stop still works). If a page crashes you see "This page could not be shown" with Reload and Try again; the header Stop button and bottom bar still work.
 - **Terminology** (More menu): plain-English meanings of every term in the app (fill, quote, spread, edge, ROI, drawdown, confidence interval, queue position, and more), grouped, with a search box. While you type, the results become one list ranked by relevance: a term whose name (or nickname, such as "profit" or "pnl" for P&L) matches comes before one that only mentions your word in its explanation. Clear the box to get the groups back. The filter box stays pinned under the page title. Small **(?)** icons next to terms on every page open the matching entry; the back button returns you.
-- **Page title and charts (all pages):** the page name shows in a bar under the top header. Scroll down and it stays while you scroll, fades after a couple of seconds without scrolling, and returns as soon as you scroll again; the red Stop in the header is never covered. The browser tab says "<Page> · Keel". Every chart labels its axes with units: dollars on the balance and profit charts, dates along the bottom, cents paid and win rate % on calibration, weeks on fill quality, counts per day on arbitrage, and a percent scale on the range bars.
+- **Page title and charts (all pages):** the page name shows in a bar under the top header. Scroll down and it stays while you scroll, fades after a couple of seconds without scrolling, and returns as soon as you scroll again; the red Stop in the header is never covered. The browser tab says "<Page> · Prior". Every chart labels its axes with units: dollars on the balance and profit charts, dates along the bottom, cents paid and win rate % on calibration, weeks on fill quality, counts per day on arbitrage, and a percent scale on the range bars.
 - **Logs / Audit:** recent server log lines and who did what.
 
 **Fill quality** compares your fills with the market tape: the share of fills where the price later traded through your level within 60 minutes and the 60-minute price move, next to the market baseline when the private benchmark file supplies one. "Worse than the tape" appears only after 50 scored fills. It is the quickest way to learn whether the strategy works for your orders. Full feature list: `docs/FEATURES.md`.
@@ -55,16 +55,16 @@ If you get "session expired" at login, all sessions were logged out; just log in
 Push only works from the Home Screen app, not from a normal browser tab. iOS 16.4 or newer is needed.
 1. Open the app URL in Safari (or Chrome) on the iPhone.
 2. Tap the **Share** button (square with an arrow), scroll down, tap **Add to Home Screen**, then **Add**.
-3. Close the browser. Open the app from the new Keel icon on your Home Screen and log in.
+3. Close the browser. Open the app from the new Prior icon on your Home Screen and log in.
 4. Tap **More** > **Alerts** (or **Settings** > Notifications) and tap **Enable notifications**.
-5. iOS asks "Allow notifications?". Tap **Allow**. If you tapped Don't Allow by mistake: iPhone Settings > Notifications > Keel > Allow Notifications, then try again.
+5. iOS asks "Allow notifications?". Tap **Allow**. If you tapped Don't Allow by mistake: iPhone Settings > Notifications > Prior > Allow Notifications, then try again.
 6. Tap **Send test**. A notification should arrive within seconds.
 
 **Push Devices card:** More > **Settings**, directly under the Notifications card. It lists every phone or browser registered for alerts (push service name and when it was added). **Clear All** asks you to confirm, then removes them all (login only, no 2FA). Re-enable on each phone afterwards. Use it after a lost phone or when re-testing.
 
 Stop is the red button on every page; last resort, suspend the service in Render, or `stop_maker.ps1` on the desktop.
 
-## Update 2026-10-15 (Keel)
+## Update 2026-10-15 (Prior)
 - **Install for notifications:** push only works from the Home Screen app. iPhone: Share > **Add to Home Screen** (Chrome or Safari), open from the icon, then More > Alerts > **Enable notifications** > **Send test**. Android: Chrome menu > Install app, then the same.
 - **Tabs:** Overview, Analytics, Activity, Markets, More. Overview shows the headline, Stop, today's P&L, recent runs and what changed since your last visit. Activity is grouped by day with Bot or You chips.
 - **Settings > Display:** theme (three dark) and text size. **Settings:** saving shows what changed; **Undo Last Change** reverts it (needs a 2FA code).
