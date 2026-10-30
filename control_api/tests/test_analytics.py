@@ -24,7 +24,8 @@ async def env(env):
     return env
 
 SUMMARY_KEYS = {"env", "days", "generated_utc", "truncated", "totals", "pnl_curve", "by_cell", "by_series",
-                "by_band", "by_ttc", "fill_quality", "arb", "expectations", "calibration", "fill_rate"}
+                "by_band", "by_ttc", "fill_quality", "arb", "expectations", "calibration", "fill_rate",
+                "tz_used", "win_rate_by_strategy", "deprecated", "arb_summary", "arb_sets", "arb_sets_total"}
 TOTAL_KEYS = {"settled_fills", "contracts", "cost", "pnl", "roi", "win_rate", "open_fills", "max_drawdown"}
 GROUP_KEYS = {"key", "n", "wins", "contracts", "cost", "pnl", "roi", "avg_price", "win_rate", "win_ci_low",
               "win_ci_high", "edge", "edge_ci_low", "edge_ci_high", "cluster_ci_low", "cluster_ci_high",

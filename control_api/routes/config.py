@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from ..auth.audit import audit
 from ..auth.deps import current_user, require_fresh_2fa
 from ..services import botfiles
+from ..services import keepalive as ka
 
 router = APIRouter(prefix="/api")
 STORE_TIMEOUT_S = 5.0          # S-23: /markets never hangs on a slow store
@@ -108,12 +109,24 @@ async def config_undo(request: Request, body: UndoIn | None = None,
     return {**res, "undone_version": last.get("version")}
 
 
+def shadow_capital_field(runner) -> dict:
+    """The Shadow capital setting for the Settings page: value, bounds and help. It is stored with the cloud
+    settings; write it with PUT /api/cloud {"shadow_capital": n} (fresh 2FA, audited)."""
+    spec = ka.CLOUD_FIELDS["shadow_capital"]
+    v = (runner.cloud or {}).get("shadow_capital")
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+    return {"value": v if ok else spec["default"], "default": spec["default"], "min": spec["min"],
+            "max": spec["max"], "unit": spec["unit"], "help": spec["help"], "editable": True,
+            "write_via": "PUT /api/cloud", "needs_fresh_2fa": True}
+
+
 @router.get("/config")
 async def get_config(request: Request, user: dict = Depends(current_user)) -> dict:
     r = request.app.state.runner
     s = request.app.state.settings
     cfg = r.config or botfiles.read_config_file(r.config_path) or botfiles.public_config(botfiles.strategy().DEFAULTS)
-    return {"config": botfiles.public_config(cfg), "schema": botfiles.schema(s), "ceilings": botfiles.ceilings(s)}
+    return {"config": botfiles.public_config(cfg), "schema": botfiles.schema(s), "ceilings": botfiles.ceilings(s),
+            "shadow_capital": shadow_capital_field(r)}
 
 
 @router.put("/config")

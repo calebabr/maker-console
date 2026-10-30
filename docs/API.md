@@ -7,7 +7,7 @@ All routes need a normal login; every POST/DELETE below needs fresh 2FA and is a
 |---|---|
 | `GET /api/periods` | `{periods:[{id,name,started_at,ended_at,note,current,implicit}], cash_flows:[{id,ts,kind,amount,note,created_by}]}`, oldest first. `p1` is implicit (`started_at` null). |
 | `POST /api/periods` `{name (1-60), note? (<=200)}` | Marker starting now. 409 `period_too_soon` if the last marker is under 5 min old. Audit `period.create`. |
-| `POST /api/cash-flows` `{kind: deposit or withdrawal, amount (0<x<=100000), ts?, note?}` | `ts` may not be in the future. Audit `cash_flow.create`. |
+| `POST /api/cash-flows` `{kind: deposit or withdrawal, amount (0<x<=100000), ts, note?, confirm_duplicate?}` | `ts` is required and may not be in the future; validation errors are 422 (`detail` is a list of messages). Same kind, amount and UTC date as an existing flow gives 409 unless `confirm_duplicate:true`. Success adds `created` and non-blocking `warnings:[{code,message}]` (`date_in_current_period`, `no_balance_jump`). Fresh 2FA. Audit `cash_flow.create`. |
 | `DELETE /api/cash-flows/{id}` | 404 `cash_flow_not_found`. Audit `cash_flow.delete`. |
 | `GET /api/periods/{id or current}/summary?env=&source=` | Fills, settled, wins, P&L, money spent, `return_on_settled_cost`, `return_on_all_cost`, open at-risk, and a `cash_flows` block (deposits, withdrawals, equity start/end, `return_on_capital`; never netted into P&L). |
 | `GET /api/pnl/by-source?period=&env=` | P&L per source for a period. |
@@ -25,6 +25,16 @@ The write routes return the same body as `GET /api/periods` plus `created` or `d
 - `pnl_today_tz`: the zone actually used (`"UTC"` after a fallback). `pnl_today_since`: the UTC instant of that local midnight. `pnl_today` fields stay `null` when nothing settled in the window; a real net of zero is `0.0`. Cached 60 s per (mode, zone), at most 16 entries.
 - `pnl_arb`: the arbitrage block in the same shape as `pnl` (`{d7,d30,settled_fills}` by settlement time; period-aware like `pnl`). `pnl_total`: `{d7,d30}` = maker + arbitrage, same date rule. Both `null` when nothing settled. `pnl` is unchanged (maker only).
 - What each figure measures (the app prints these under the numbers): Overview Maker P&L = realized maker fills by settlement date (UTC); Today = realized, bot and manual, settled since local midnight; Analytics totals = maker + arbitrage by settlement date (UTC); period summary = by fill date (UTC); Arbitrage `pnl` = guaranteed profit of filled sets by execution time, not realized.
+
+## Analytics additions (UI-1a)
+- `GET /api/analytics/summary?tz=<IANA>` (also `/ledger`, `/my-trades`, `/api/arb`): `tz_used` is the validated zone or `UTC` (invalid names fall back, never an error). The P&L curve, arbitrage daily rows and "today" use local dates; windows stay UTC. Cache keys use the validated name only and are bounded (64, oldest evicted).
+- `win_rate_by_strategy`: `maker` (unit `fill`) and `arb` (unit `set`: executed sets, all filled legs settled, win = set P&L > 0), each `{n, wins, losses, win_rate, ci_low, ci_high, method:"wilson95"}`. `totals.win_rate` pools both and is deprecated (listed under `deprecated`).
+- `arb_summary` (summary and `GET /api/arb`): `today` and `period` blocks (`sets`, `events`, `sightings`, `by_outcome`, `skipped_by_rule`), `per_set` (null on `/api/arb` if the dataset is unavailable), `since_restart` (in-memory runner counters), `notes`. `/api/arb` may wait up to 3 s for the dataset.
+- `arb_sets` (newest first, max 100) and `arb_sets_total`: one row per executed set with `status` PARTIAL, FILLED, OPEN or SETTLED, guaranteed and realized profit, `legs[]` and `notes`.
+- `GET /api/analytics/ledger?days=&env=&period=&tz=`: signed in, no 2FA, read-only, 20/min/user. Per-strategy rows (`maker`, `arb`, `you`), `total`, `daily` (by fill day), `daily_by_settlement`, informational `netting`, and `reconciliation` (`residual`, `tolerance` 0.10, `flag` when the absolute residual exceeds it, equity start and end, net flows, notes). Fewer than 2 snapshots gives nulls plus notes.
+- `GET /api/analytics/scorecard?days=(7|30|90|180)&period=&env=`: pass rate and durations, churn, fill-to-settlement rate, open past expected settlement, reconciliation, alerts by type, arbitrage per set, stop/start log, indicative return. Values not stored are `null` with a note.
+- `GET /api/status` `pnl_today_state`: `settled`, `none_yet` (nothing settled yet, not $0.00) or `unavailable` (store read failed).
+- `GET /api/config` `shadow_capital`: `{value, default:150, min:50, max:1000, help, editable, write_via:"PUT /api/cloud", needs_fresh_2fa:true}`. Written with `PUT /api/cloud {shadow_capital}` (fresh 2FA, audited with from/to, whole body validated before any write). Dollar P&L and the ceiling scale with it; rates and ROI do not.
 
 ## Other
 - `POST /api/bot/start`: 409 `invalid_config: <reasons>` if the reloaded config fails validation (the bot stays stopped). To stop: `POST /api/bot/stop` or the app's Stop button (no 2FA).

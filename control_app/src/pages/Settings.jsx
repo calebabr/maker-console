@@ -8,6 +8,7 @@ import { useResource } from '../hooks/useResource.js';
 import { api } from '../services/api.js';
 import ChangeDiff, { formatSettingValue, plainText, settingLabel } from '../components/ChangeDiff.jsx';
 import DisplayCard from '../components/DisplayCard.jsx';
+import ShadowCapitalCard from '../components/ShadowCapitalCard.jsx';
 import PushCard from '../components/PushCard.jsx';
 import PushDevicesCard from '../components/PushDevicesCard.jsx';
 import { humanize, titleCase } from '../utils/format.js';
@@ -405,6 +406,8 @@ export default function Settings() {
           )}
         </form>
       )}
+
+      {data && data.shadow_capital && <ShadowCapitalCard info={data.shadow_capital} onSaved={reload} />}
 
       <DisplayCard />
       <PushCard />

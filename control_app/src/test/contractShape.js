@@ -13,7 +13,9 @@ export const isBand = (b) => b === 'other' || (typeof b === 'string' && /^0\.\d{
 export const isTtc = (b) => typeof b === 'string' && /^(\d+(\.\d+)?-\d+(\.\d+)?h|>\d+(\.\d+)?h)$/.test(b);
 const SUMMARY_KEYS = ['env', 'days', 'generated_utc', 'truncated', 'totals', 'pnl_curve', 'by_cell', 'by_series', 'by_band', 'by_ttc', 'fill_quality', 'arb',
   // Sprint extension (items 1-4)
-  'expectations', 'calibration', 'fill_rate'];
+  'expectations', 'calibration', 'fill_rate',
+  // UI-1a: local-date zone, per-strategy win rate, arbitrage counters and grouped sets
+  'tz_used', 'win_rate_by_strategy', 'deprecated', 'arb_summary', 'arb_sets', 'arb_sets_total'];
 const CLUSTER_KEYS = ['cluster_ci_low', 'cluster_ci_high', 'edge_cluster_ci_low', 'edge_cluster_ci_high', 'roi_ci_low', 'roi_ci_high'];
 const VERDICTS = ['too_early', 'on_track', 'below', 'above'];
 const FR_KEYS = ['quotes', 'filled', 'partial', 'unfilled', 'fill_rate', 'median_rest_minutes', 'median_minutes_to_fill'];
@@ -182,7 +184,52 @@ export function checkSummary(s, { days, env } = {}) {
       });
     }
   }
+  checkUi1a(s, out);
   return out;
+}
+
+function checkWinRate(w, where, unit, out) {
+  if (!keys(w, ['unit', 'n', 'wins', 'losses', 'win_rate', 'ci_low', 'ci_high', 'method'], where, out)) return;
+  if (w.unit !== unit) out.push(`${where}.unit ${w.unit}`);
+  for (const k of ['n', 'wins', 'losses']) if (!Number.isInteger(w[k]) || w[k] < 0) out.push(`${where}.${k} not int`);
+  for (const k of ['win_rate', 'ci_low', 'ci_high']) if (!numOrNull(w[k])) out.push(`${where}.${k} not number|null`);
+  if (w.n === 0 && w.win_rate !== null) out.push(`${where}: n=0 but win_rate set`);
+}
+
+const ARB_OUTCOMES = ['filled', 'partial', 'error', 'skipped', 'log_only'];
+function checkArbWindow(a, where, out) {
+  if (!keys(a, ['since', 'sets', 'events', 'sightings', 'by_outcome', 'skipped_by_rule'], where, out)) return;
+  for (const k of ['sets', 'events', 'sightings']) if (!Number.isInteger(a[k]) || a[k] < 0) out.push(`${where}.${k} not int`);
+  if (keys(a.by_outcome, ARB_OUTCOMES, `${where}.by_outcome`, out)) {
+    for (const k of ARB_OUTCOMES) if (!Number.isInteger(a.by_outcome[k])) out.push(`${where}.by_outcome.${k} not int`);
+  }
+  if (!a.skipped_by_rule || typeof a.skipped_by_rule !== 'object') out.push(`${where}.skipped_by_rule not object`);
+}
+
+// UI-1a additions: tz_used, win_rate_by_strategy, deprecated, arb_summary, arb_sets, arb_sets_total.
+function checkUi1a(s, out) {
+  if (typeof s.tz_used !== 'string' || !s.tz_used) out.push('tz_used not a string');
+  if (keys(s.win_rate_by_strategy, ['maker', 'arb'], 'win_rate_by_strategy', out)) {
+    checkWinRate(s.win_rate_by_strategy.maker, 'win_rate_by_strategy.maker', 'fill', out);
+    checkWinRate(s.win_rate_by_strategy.arb, 'win_rate_by_strategy.arb', 'set', out);
+  }
+  if (!s.deprecated || typeof s.deprecated !== 'object' || Array.isArray(s.deprecated)) out.push('deprecated not object');
+  if (keys(s.arb_summary, ['today', 'period', 'since_restart'], 'arb_summary', out)) {
+    checkArbWindow(s.arb_summary.today, 'arb_summary.today', out);
+    checkArbWindow(s.arb_summary.period, 'arb_summary.period', out);
+  }
+  if (!Array.isArray(s.arb_sets)) out.push('arb_sets not array');
+  else {
+    s.arb_sets.forEach((x, i) => {
+      const w = `arb_sets[${i}]`;
+      if (!keys(x, ['set_id', 'event', 'kind', 'status', 'legs', 'guaranteed_profit', 'realized_pnl', 'notes'], w, out)) return;
+      if (!['PARTIAL', 'FILLED', 'OPEN', 'SETTLED'].includes(x.status)) out.push(`${w}.status ${x.status}`);
+      if (!Array.isArray(x.legs)) out.push(`${w}.legs not array`);
+      if (!numOrNull(x.realized_pnl)) out.push(`${w}.realized_pnl not number|null`);
+    });
+  }
+  if (!Number.isInteger(s.arb_sets_total) || s.arb_sets_total < 0) out.push('arb_sets_total not int');
+  else if (Array.isArray(s.arb_sets) && s.arb_sets.length > s.arb_sets_total) out.push('arb_sets longer than arb_sets_total');
 }
 
 export function checkTrades(b, { limit, offset } = {}) {

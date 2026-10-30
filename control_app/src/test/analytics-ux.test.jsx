@@ -133,7 +133,7 @@ describe('Analytics tabs and Edge tab', () => {
     const user = userEvent.setup();
     stubApi(routes());
     renderApp('/analytics');
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Summary', 'Edge', 'Execution', 'Trades']);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Summary', 'Edge', 'Execution', 'Trades', 'Ledger', 'Scorecard']);
     expect(await screen.findByTestId('totals')).toBeInTheDocument();
     expect(screen.getByText('Is the Edge Holding?')).toBeInTheDocument();
     expect(screen.queryByTestId('calibration')).toBeNull();

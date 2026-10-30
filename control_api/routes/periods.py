@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -123,24 +123,48 @@ async def create_period(request: Request, user: dict = Depends(require_fresh_2fa
 # ---------------------------------------------------------------- cash flows
 @router.post("/cash-flows")
 async def add_cash_flow(request: Request, user: dict = Depends(require_fresh_2fa)) -> dict:
-    """Record a deposit or withdrawal: {kind: deposit|withdrawal, amount, ts?, note?}. Money movements are shown
-    beside the period figures and never netted into P&L. Returns the GET body plus `created` (the new id)."""
+    """Record a deposit or withdrawal: {kind: deposit|withdrawal, amount, ts, note?, confirm_duplicate?}. Guard rails
+    (UI-1a): `ts` (the date the money moved) is REQUIRED and cannot be in the future (422 with the messages); a flow
+    with the same kind, amount and date as an existing one is refused with 409 unless `confirm_duplicate` is true.
+    Non-blocking `warnings` ([{code, message}]: date inside the current period, no matching balance jump) come back
+    with the saved flow. Money movements are shown beside the period figures and never netted into P&L. Returns the
+    GET body plus `created` (the new id) and `warnings`."""
     body = await _json(request)
+    store = request.app.state.store
+    now = datetime.now(timezone.utc)
     try:
-        doc = P.validate_cash_flow(body, datetime.now(timezone.utc))
+        doc = P.validate_cash_flow(body, now)
     except ValueError as e:
         await audit(request, "cash_flow.create", ok=False, user=user, details={"error": "invalid"})
-        raise HTTPException(400, e.args[0]) from e
+        raise HTTPException(422, e.args[0]) from e
+    confirmed = doc.pop("confirm_duplicate", False)
+    flows = await _store(store.list_cash_flows())
+    dup = P.find_duplicate(doc, flows)
+    if dup is not None and not confirmed:
+        await audit(request, "cash_flow.create", ok=False, user=user,
+                    details={"error": "duplicate", "kind": doc["kind"], "amount": doc["amount"]})
+        raise HTTPException(409, [f"duplicate: a {doc['kind']} of ${doc['amount']:.2f} on "
+                                  f"{doc['ts'].date().isoformat()} is already recorded; send confirm_duplicate=true "
+                                  "to add it anyway"])
+    markers = await _store(store.list_periods())
+    cur = next((p for p in P.timeline(markers) if p.get("current")), None)
+    try:
+        snaps = await _store(store.list_account_snapshots(since=doc["ts"] - timedelta(days=1), limit=2000))
+    except HTTPException:
+        snaps = []                                    # a warning is optional; never block the write on it
+    warnings = P.flow_warnings(doc, (cur or {}).get("started_at"), snaps)
     doc["created_by"] = _name(user)
     try:
-        saved = await _store(request.app.state.store.add_cash_flow(doc))
+        saved = await _store(store.add_cash_flow(doc))
     except HTTPException:
         await audit(request, "cash_flow.create", ok=False, user=user, details={"error": "store"})
         raise
     fid = (saved or {}).get("id")
     await audit(request, "cash_flow.create", user=user,
-                details={"id": fid, "kind": doc["kind"], "amount": doc["amount"]})
-    return {**await payload(request), "created": fid}
+                details={"id": fid, "kind": doc["kind"], "amount": doc["amount"], "ts": P.iso(doc["ts"]),
+                         "duplicate_confirmed": bool(dup is not None and confirmed),
+                         "warnings": [w["code"] for w in warnings]})
+    return {**await payload(request), "created": fid, "warnings": warnings}
 
 
 @router.delete("/cash-flows/{flow_id}")

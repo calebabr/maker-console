@@ -464,6 +464,7 @@ class Runner:
         self.arb_last_error: str | None = None
         self.arb_scans = 0
         self.arb_found = 0
+        self.started_utc = utcnow()          # when the in-memory counters (arb_scans / arb_found) began counting
         self.arb_recent: deque = deque(maxlen=200)   # in-memory copy, used if the store is unreachable
         # risk gate: today's arb spend per kind ("live" / "demo-execute"): {date, amount, mark}; see _arb_day_state
         self._arb_day: dict[str, dict] = {}
@@ -2755,7 +2756,7 @@ class Runner:
         return {"state": self.arb_state(), "running": self.arb_running_scan, "kill_switch": self.arb_kill_switch(),
                 "kill_reason": arbsvc.kill_reason(self.arb_kill_path), "last_scan_utc": iso(self.arb_last_scan_utc),
                 "last_error": self.arb_last_error, "live_allowed": self.live_allowed(), "scans": self.arb_scans,
-                "found": self.arb_found,
+                "found": self.arb_found, "since_restart_utc": iso(self.started_utc),
                 # demo-execute (additive): true while sets would be placed on the DEMO exchange
                 "demo_execute": self.arb_state() != "stopped" and self.arb_exec_kind() == "demo-execute"}
 

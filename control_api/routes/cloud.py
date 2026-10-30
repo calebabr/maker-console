@@ -46,6 +46,8 @@ async def put_cloud(request: Request, user: dict = Depends(require_fresh_2fa)) -
         await audit(request, "cloud.update", ok=False, user=user, details={"update": update})
         raise HTTPException(400, e.args[0]) from e
     by = user.get("username", "user")
+    changed = {k: {"from": r.cloud.get(k), "to": v} for k, v in clean.items()
+               if k == "shadow_capital" and r.cloud.get(k) != v}        # before/after of the shadow capital write
     try:
         saved = await request.app.state.store.save_cloud_settings(clean, by=by)
     except Exception as e:  # noqa: BLE001
@@ -53,7 +55,7 @@ async def put_cloud(request: Request, user: dict = Depends(require_fresh_2fa)) -
     r.cloud.update(saved or clean)
     if {"pinger_minutes", "pinger_enabled"} & set(clean) or r.cloud.get("cronjob_job_id") is None:
         await ka.sync_pinger(r, request.app.state.cronjob_factory, by)
-    await audit(request, "cloud.update", user=user, details={"update": clean})
+    await audit(request, "cloud.update", user=user, details={"update": clean, **({"changed": changed} if changed else {})})
     return cloud_view(request)
 
 

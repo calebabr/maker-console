@@ -13,6 +13,7 @@ import { usePageVisible } from '../hooks/usePageVisible.js';
 import { api } from '../services/api.js';
 import { ago, dateTime, humanize, money, num } from '../utils/format.js';
 import CollapsibleList from '../components/CollapsibleList.jsx';
+import { ArbCounters, ArbSetsTable } from '../components/analytics/ArbSets.jsx';
 
 // Bracket arbitrage (DASHBOARD_PLAN.md "Strategies run by the app").
 //   GET  /api/arb               -> {settings, schema?, ceilings?, status, pnl, expectation?}
@@ -135,6 +136,8 @@ export default function Arbitrage() {
   const visible = usePageVisible();
   const arb = useResource(() => api.getArb(), '/api/arb');
   const opps = useResource(() => api.getArbOpportunities(OPP_LIMIT), `/api/arb/opportunities?limit=${OPP_LIMIT}`);
+  // Grouped sets come from the analytics summary (one row per set). A failure here only hides that card.
+  const sets = useResource(() => api.analyticsSummary({ days: 30, env: 'all' }), '/api/analytics/summary?arb-sets');
   const { confirm, twoFactor, notify } = useDialogs();
   const { status: appStatus } = useStatus();
   const [busy, setBusy] = useState(null);
@@ -164,6 +167,9 @@ export default function Arbitrage() {
   const st = (data && data.status) || {};
   const schema = { ...DEFAULT_SCHEMA, ...((data && data.schema) || {}) };
   const ceilings = (data && data.ceilings) || {};
+  const arbSummary = (data && data.arb_summary) || null;
+  const sinceRestart = (arbSummary && arbSummary.since_restart) || {};
+  const restartUtc = sinceRestart.since_utc || st.since_restart_utc || null;
   const state = arbState(settings, data && data.status);
   const enabled = (settings && 'enabled' in settings ? !!settings.enabled : state !== 'stopped') && !st.kill_switch;
   const live = state === 'live';
@@ -504,12 +510,13 @@ export default function Arbitrage() {
                 <dd>{settings && settings.arb_poll_seconds != null ? `${settings.arb_poll_seconds}s` : '—'}</dd>
               </div>
               <div>
-                <dt>Scans</dt>
-                <dd>{num(st.scans)}</dd>
+                <dt>Scans since restart<HelpIcon term="scans-since-restart" /></dt>
+                <dd data-testid="scans-since-restart">{num(sinceRestart.scans != null ? sinceRestart.scans : st.scans)}</dd>
+                {restartUtc && <dd className="hint" data-testid="restart-time">since {dateTime(restartUtc)}</dd>}
               </div>
               <div>
-                <dt>Opportunities<HelpIcon term="arbitrage" /></dt>
-                <dd>{num(st.found)}</dd>
+                <dt>Sightings since restart<HelpIcon term="arb-set" /></dt>
+                <dd>{num(sinceRestart.sightings != null ? sinceRestart.sightings : st.found)}</dd>
               </div>
               <div>
                 <dt>Live allowed<HelpIcon term="demo-vs-live" /></dt>
@@ -554,6 +561,17 @@ export default function Arbitrage() {
             <p className="hint">{expectation}</p>
           </Card>
         </>
+      )}
+
+      {arbSummary && (
+        <Card title={<>Sets found<HelpIcon term="arb-set" /></>} subtitle="Counted once each from the stored log, not per scan.">
+          <ArbCounters summary={arbSummary} />
+        </Card>
+      )}
+      {sets.data && Array.isArray(sets.data.arb_sets) && (
+        <Card title="Executed sets" subtitle="One row per set. Tap a row for its legs.">
+          <ArbSetsTable sets={sets.data.arb_sets} total={sets.data.arb_sets_total} />
+        </Card>
       )}
 
       <Card

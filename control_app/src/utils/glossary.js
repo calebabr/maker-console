@@ -313,6 +313,76 @@ const RAW_GLOSSARY = [
 
   // ---------------------------------------------------------------- Performance & statistics
   {
+    id: 'win-rate-by-strategy',
+    group: 'performance',
+    term: 'Win rate by strategy',
+    aliases: ['per-set win rate', 'arbitrage win rate'],
+    short: 'Maker is counted per fill, arbitrage per set. The two are never pooled into one number.',
+    body:
+      'A maker win is one settled fill that paid out. An arbitrage win is one whole set (all its legs) whose total P&L is above zero, because a set is bought as one package. Mixing fills and sets in one percentage would mean nothing, so each strategy gets its own rate with its own 95% range.',
+    related: ['win-rate', 'confidence-interval', 'arb-set'],
+  },
+  {
+    id: 'arb-set',
+    group: 'strategy',
+    term: 'Arbitrage set',
+    aliases: ['set', 'distinct sets'],
+    short: 'One bracket purchase made up of several legs, counted once however often it was seen.',
+    body:
+      'The scanner can see the same opportunity on many scans. A set is the one stored record for it. "Sightings" count how often it was seen; "sets" count it once. Status: Partial = a leg did not fill fully; Filled = all legs filled, none settled; Open = some legs settled; Settled = every filled leg settled.',
+    related: ['arbitrage', 'legging', 'win-rate-by-strategy'],
+  },
+  {
+    id: 'scans-since-restart',
+    group: 'safety',
+    term: 'Scans since restart',
+    aliases: ['scan counter'],
+    short: 'How many scans the server has run since it last started. It resets on every restart.',
+    body:
+      'This counter lives in memory, so a deploy or a free-tier sleep resets it to zero. It is not a history. For history use the distinct sets and sightings counted from the stored log.',
+    related: ['arb-set', 'arbitrage'],
+  },
+  {
+    id: 'risk-rule-outcome',
+    group: 'strategy',
+    term: 'Risk rule outcome',
+    aliases: ['skipped by rule', 'risk check'],
+    short: 'What happened to each logged set: filled, partial, error, skipped by a risk rule, or log-only.',
+    body:
+      'Before placing a set the bot checks its risk caps. A set that fails a cap is skipped and the rule is recorded. Log-only means the scanner was not allowed to trade at that time.',
+    related: ['arb-set', 'arbitrage'],
+  },
+  {
+    id: 'ledger',
+    group: 'money',
+    term: 'Honest ledger',
+    aliases: ['reconciliation', 'residual'],
+    short: 'P&L by strategy, checked against how much the account balance really changed.',
+    body:
+      'The ledger lists fills, cost, fees and realized P&L per strategy. The reconciliation compares the balance change with net deposits plus realized P&L and fees. The residual is the part that is not explained. If it is larger than the tolerance it is flagged, and the numbers above should not be trusted until it is understood. Anything the server cannot know shows as "not available".',
+    related: ['realised-pnl', 'scorecard'],
+  },
+  {
+    id: 'scorecard',
+    group: 'safety',
+    term: 'Scorecard',
+    aliases: ['health scorecard'],
+    short: 'Run reliability, order errors, churn, settlement follow-through and a tiny-sample return.',
+    body:
+      'A one-page health check of the bot over the chosen window. Metrics the bot does not record yet say "not tracked yet" instead of showing zero. The return shown is from demo play money with a small sample and is indicative only.',
+    related: ['ledger', 'sample-size'],
+  },
+  {
+    id: 'shadow-capital',
+    group: 'strategy',
+    term: 'Shadow capital',
+    aliases: ['simulated capital'],
+    short: 'The size of the simulated account the shadow estimate pretends to trade.',
+    body:
+      'Dollar P&L and the open-position ceiling scale with this number; rates and ROI do not. Changing it needs a fresh 2FA code. It affects only the simulation and never places orders.',
+    related: ['pnl'],
+  },
+  {
     id: 'roi',
     group: 'performance',
     term: 'ROI (return on cost)',

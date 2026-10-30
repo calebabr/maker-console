@@ -77,6 +77,10 @@ async def status(request: Request, period: str | None = Query(None), tz: str | N
     today = await r.pnl_today_view(tz)                                  # 60 s cache per (mode, validated zone)
     out["pnl_today"] = today["value"] or dict.fromkeys(strat.bucket_ids() + ["bot", "total"])
     out["pnl_today_tz"], out["pnl_today_since"] = today["tz"], today["since"]   # zone actually used ("UTC" = fallback)
+    # UI-1a: say WHY there is no figure. "settled" = at least one fill settled since local midnight; "none_yet" = the
+    # read worked and nothing has settled yet today (not $0.00); "unavailable" = the store read failed.
+    tv = today["value"]
+    out["pnl_today_state"] = "unavailable" if tv is None else ("settled" if tv.get("total") is not None else "none_yet")
     out["recent_passes"] = await r.recent_passes()
     out["last_run_at"] = out.get("last_run_utc")
     trading = r.desired == "running" and not out.get("kill_switch") and r.settings.runner_enabled

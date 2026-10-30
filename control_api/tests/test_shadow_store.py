@@ -320,8 +320,8 @@ async def test_bad_new_fields_rejected(store, bad):
 async def test_shadow_cloud_settings_validation():
     assert ka.validate_cloud({"shadow_capital": 150, "shadow_intervals": [10, 5]}) == {
         "shadow_capital": 150, "shadow_intervals": [5, 10]}
-    assert ka.validate_cloud({"shadow_capital": 20.5})["shadow_capital"] == 20.5
-    for bad in ({"shadow_capital": 19}, {"shadow_capital": 100001}, {"shadow_capital": True},
+    assert ka.validate_cloud({"shadow_capital": 50.5})["shadow_capital"] == 50.5
+    for bad in ({"shadow_capital": 19}, {"shadow_capital": 49}, {"shadow_capital": 1001}, {"shadow_capital": 100001}, {"shadow_capital": True},
                 {"shadow_capital": float("nan")}, {"shadow_intervals": []}, {"shadow_intervals": [6]},
                 {"shadow_intervals": [5, 5]}, {"shadow_intervals": [5, 7, 10, 5]}, {"shadow_intervals": "10"},
                 {"shadow_intervals": [True]}):

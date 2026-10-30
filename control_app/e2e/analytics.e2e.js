@@ -6,9 +6,10 @@ test('Analytics: totals, chart, edge, window switch, filters and load more', asy
   await login(page);
   await nav(page, 'Analytics');
   await expect(page.getByRole('heading', { name: 'Analytics' })).toBeVisible();
-  await expect(page.getByTestId('totals')).toContainText('Win Rate');
+  await expect(page.getByTestId('totals')).toContainText('P&L');
+  await expect(page.getByTestId('win-rate-by-strategy')).toContainText('Maker Win Rate (Per Fill)');
   await expect(page.getByTestId('pnl-curve')).toBeVisible();
-  await page.getByRole('tab', { name: 'Edge' }).click();
+  await page.getByRole('tab', { name: 'Edge', exact: true }).click();
   await expect(page.getByTestId('edge-row').first()).toBeVisible();
   await page.getByRole('tab', { name: 'Trades' }).click();
   await expect(page.getByTestId('trade-row')).toHaveCount(50);
@@ -16,7 +17,7 @@ test('Analytics: totals, chart, edge, window switch, filters and load more', asy
   await page.getByRole('button', { name: '180 days' }).click();
   await expect(page.getByText(/settled in the last 180 days/)).toBeVisible();
 
-  await page.getByRole('tab', { name: 'Edge' }).click();
+  await page.getByRole('tab', { name: 'Edge', exact: true }).click();
   await page.locator('select:has(option[value="series"])').selectOption('series');
   await expect(page.getByTestId('edge-row').filter({ hasText: 'Demo series B' })).toBeVisible();
 
@@ -44,7 +45,7 @@ test('Analytics extension: edge verdict card, calibration, fill rate and CSV dow
   const card = page.getByTestId('edge-holding');
   await expect(card).toContainText(/Is the edge holding/i);
   await expect(card).toContainText(/judged market type/);
-  await page.getByRole('tab', { name: 'Edge' }).click();
+  await page.getByRole('tab', { name: 'Edge', exact: true }).click();
   await expect(page.getByTestId('calibration').getByRole('img')).toBeVisible();
   await page.getByRole('tab', { name: 'Execution' }).click();
   await expect(page.getByTestId('fill-rate')).toContainText(/Fill rate/i);

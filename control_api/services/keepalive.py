@@ -11,6 +11,7 @@ import httpx
 log = logging.getLogger("control_api.keepalive")
 
 SLEEP_TIMEOUT_MINUTES = 15
+SHADOW_CAPITAL_MIN, SHADOW_CAPITAL_MAX, SHADOW_CAPITAL_DEFAULT = 50, 1000, 150   # dollars; the API ceilings for writes
 CLOUD_FIELDS = {
     "keepalive_minutes": {"type": "integer", "unit": "minutes", "min": 1, "max": 14,
                           "help": "Self-ping interval (GET PUBLIC_URL/healthz) to keep the service awake."},
@@ -22,8 +23,11 @@ CLOUD_FIELDS = {
                              "help": "Alert if no heartbeat for this long."},
     "shadow_enabled": {"type": "boolean", "unit": None, "min": None, "max": None,
                        "help": "Shadow mode: record what the strategy would bid (read only, places no orders)."},
-    "shadow_capital": {"type": "number", "unit": "dollars", "min": 20, "max": 100000,
-                       "help": "Capital the shadow estimate assumes, so it does not depend on the account."},
+    "shadow_capital": {"type": "number", "unit": "dollars", "min": SHADOW_CAPITAL_MIN, "max": SHADOW_CAPITAL_MAX,
+                       "default": SHADOW_CAPITAL_DEFAULT,
+                       "help": "Capital the shadow estimate assumes. Shadow dollar P&L and its open-position "
+                               "ceiling scale with it; rates and ROI do not. It is a research sampling tool, not a "
+                               "mirror of the real balance."},
     "shadow_intervals": {"type": "int_list", "unit": "minutes", "allowed": [5, 7, 10], "max_items": 3,
                          "min": None, "max": None,
                          "help": "Shadow cadences to compare (5, 7 and/or 10 minutes); needs SHADOW_VARIANTS."},

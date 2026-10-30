@@ -110,7 +110,7 @@ test.describe('Settings', () => {
     const budget = page.getByLabel(/run budget/i);
     await budget.fill('45');
     const code = nextCode();
-    await page.getByRole('button', { name: /save/i }).click();
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByLabel('6-digit code').fill(code);
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByText(/Saved as version/)).toBeVisible();
@@ -118,7 +118,7 @@ test.describe('Settings', () => {
     // the same code again: single-use, so it is rejected
     await budget.fill('46');
     await expect(budget).toHaveValue('46');
-    await page.getByRole('button', { name: /save/i }).click();
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByLabel('6-digit code').fill(code);
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByText(/Code Rejected/)).toBeVisible();
@@ -128,14 +128,14 @@ test.describe('Settings', () => {
     await login(page);
     await nav(page, 'Settings');
     await expect(page.getByText('read-only').first()).toBeVisible();
-    await expect(page.getByRole('button', { name: /save/i })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
   });
 
   test('an out-of-range budget blocks Save before any request', async ({ page }) => {
     await login(page);
     await nav(page, 'Settings');
     await page.getByLabel(/run budget/i).fill('501');
-    await expect(page.getByRole('button', { name: /save/i })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
   });
 });
 
@@ -161,8 +161,8 @@ test.describe('375px viewport', () => {
     await nav(page, 'Server');
     const input = page.getByLabel(/self-ping|keepalive/i).first();
     await input.fill('15');
-    await expect(page.getByRole('button', { name: /save/i })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
     await input.fill('14');
-    await expect(page.getByRole('button', { name: /save/i })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
   });
 });

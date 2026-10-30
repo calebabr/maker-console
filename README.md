@@ -202,7 +202,7 @@ verified within the last few minutes. Request and response details for the perio
 - `GET /api/arb/opportunities` – Recent opportunities and what the risk gate did with each
 
 ### Analytics, periods and money
-- `GET /api/analytics/summary`, `/api/analytics/trades`, `/api/analytics/my-trades`, `/api/analytics/trades.csv` –
+- `GET /api/analytics/summary`, `/api/analytics/ledger`, `/api/analytics/scorecard`, `/api/analytics/trades`, `/api/analytics/my-trades`, `/api/analytics/trades.csv` –
   Results, fills and fill quality, with CSV export
 - `GET`/`PUT /api/trades/{fill_id}/note` – Per-trade notes
 - `GET /api/periods`, `POST /api/periods` (fresh 2FA), `GET /api/periods/{id}/summary` – Named evaluation periods

@@ -70,7 +70,7 @@ function Range({ label, r, fmt, empty = false }) {
 const winText = (v) => (typeof v === 'number' ? pct(v, { sign: false, digits: 1 }) : '—');
 export const NO_ESTIMATE_TEXT = 'No estimate yet';
 export const NO_ESTIMATE_REASON = 'Nothing has settled yet, so there is no estimate. A zero here would mean no data, not a result.';
-export const CEILING_FULL_TEXT = 'Shadow is not estimating: its simulated ceiling is full.';
+export const CEILING_FULL_TEXT = 'Shadow is not estimating: the simulated open-position ceiling is full; it clears as positions settle';
 export const TOO_EARLY_REASON = 'Too early to trust: needs at least 7 close days with a fill and 30 filled episodes.';
 
 function Honesty({ h, st, data }) {
