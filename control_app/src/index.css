@@ -18,6 +18,9 @@
   --chart2: #a78bfa;
   --off: #6b7684;
   --overlay: rgba(6, 9, 13, 0.72);
+  /* Control boundaries (inputs, selects, checkboxes, segmented and secondary buttons): 3:1 against --surface.
+     --border stays for hairline dividers. Set per theme by utils/theme.js. */
+  --border-strong: #6a7a8d;
 
   --font: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
@@ -29,6 +32,32 @@
   --content-max: 640px;
   --sidebar-w: 232px;
   --ease: 160ms cubic-bezier(0.2, 0, 0, 1);
+
+  /* Type scale: six sizes, in rem so the Small / Normal / Large text-size setting still scales them
+     (UI-1a stage 2, section 5.1). One --fs-2xl figure per screen. Weights: 400, 500 (figures, labels), 600 (titles). */
+  --fs-xs: max(0.75rem, 12px); /* floor: field labels, axis ticks, table headers, tab labels */
+  --fs-sm: 0.8125rem;          /* secondary text, hints, scope lines */
+  --fs-md: 0.9375rem;          /* body, buttons, row text */
+  --fs-lg: 1.0625rem;          /* card titles, row primary line */
+  --fs-xl: 1.375rem;           /* page title, section figure */
+  --fs-2xl: 2rem;              /* the one headline figure per screen */
+  --lh-body: 1.45;
+  --lh-tight: 1.2;             /* for --fs-xl and --fs-2xl */
+
+  /* Spacing rhythm (section 5.2): related items 8px apart, unrelated groups 24px or more. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* Tap targets (section 5.8): 40px for any control, 44px for Stop, Start, Save, Go live and Retry. */
+  --tap: 40px;
+  --tap-lg: 44px;
+  /* Warning vs accent: state is never colour-only. Graphite's warn and accent are close in hue, so warn
+     chips and notices use a dashed edge there (see styles/nav.css) next to their icon and word. */
+  --warn-edge: solid;
 }
 
 * { box-sizing: border-box; }
@@ -131,7 +160,7 @@ a:hover { text-decoration: underline; }
 .page-title-accent { flex-shrink: 0; width: 3px; height: 1.25rem; border-radius: 2px; background: var(--accent); }
 .page-title-icon { display: flex; flex-shrink: 0; color: var(--accent); }
 .page-title-text {
-  font-size: 1.1875rem; font-weight: 700; letter-spacing: -0.015em; color: var(--text);
+  font-size: var(--fs-lg); font-weight: 600; letter-spacing: -0.015em; color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .page-title.is-hidden {
@@ -144,12 +173,12 @@ a:hover { text-decoration: underline; }
 
 .card { padding: 16px 0; border-top: 1px solid var(--border); }
 .page > .card:first-child, .page-head + .card { border-top: 0; }
-.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.card-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .card-title { font-size: 0.9375rem; font-weight: 600; }
 /* Section headings echo the page-title accent so titles feel related. */
 .card-title::before { content: ''; display: inline-block; width: 3px; height: 0.9em; margin-right: 8px; border-radius: 2px; background: var(--accent); vertical-align: -0.1em; }
 .card-subtitle { color: var(--muted); font-size: 0.8125rem; margin-top: 2px; }
-.card-actions { flex-shrink: 0; }
+.card-actions { flex-shrink: 0; max-width: 100%; min-width: 0; }
 .subhead { font-size: 0.875rem; font-weight: 600; margin: 16px 0 8px; }
 
 /* Overview status block: the one prominent element. */
@@ -196,7 +225,7 @@ a:hover { text-decoration: underline; }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: var(--danger-text); }
 .btn.danger:hover:not(:disabled) { border-color: var(--danger); filter: brightness(1.06); }
 .btn.danger-outline { background: transparent; border-color: var(--danger); color: var(--danger); }
-.btn.small { min-height: 32px; padding: 0 12px; font-size: 0.8125rem; }
+.btn.small { min-height: var(--tap); padding: 0 12px; font-size: 0.8125rem; }
 .btn.block { width: 100%; }
 .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
 
@@ -291,7 +320,7 @@ a:hover { text-decoration: underline; }
 
 .chips { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 8px; scrollbar-width: none; }
 .chip {
-  flex-shrink: 0; min-height: 32px; padding: 0 12px; font: inherit; font-size: 0.8125rem;
+  flex-shrink: 0; min-height: var(--tap); padding: 0 12px; font: inherit; font-size: 0.8125rem;
   color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 16px; cursor: pointer;
   transition: color var(--ease), border-color var(--ease);
 }
@@ -385,7 +414,7 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 }
 .tab {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-  font: inherit; font-size: 0.6875rem; color: var(--muted);
+  font: inherit; font-size: var(--fs-xs); letter-spacing: -0.01em; color: var(--muted); min-width: 0;
   background: transparent; border: 0; cursor: pointer; text-decoration: none;
   transition: color var(--ease);
 }

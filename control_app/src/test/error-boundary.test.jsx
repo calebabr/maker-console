@@ -71,7 +71,7 @@ describe('S-29 error boundary', () => {
     stubApi({ 'GET /api/status': STATUS, 'GET /api/history': { snapshots: [] } });
     renderApp('/logs');
     await screen.findByText('This page could not be shown.');
-    await user.click(screen.getByRole('link', { name: /overview/i }));
+    await user.click(screen.getByRole('link', { name: /^home$/i }));
     await waitFor(() => expect(screen.queryByText('This page could not be shown.')).toBeNull());
     expect(screen.getAllByRole('button', { name: /stop the bot/i }).length).toBeGreaterThan(0);
   });

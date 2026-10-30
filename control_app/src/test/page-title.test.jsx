@@ -18,7 +18,7 @@ function scrollTo(y) {
   });
 }
 const bar = () => screen.getByTestId('page-title');
-const renderBar = (path = '/markets') =>
+const renderBar = (path = '/health') =>
   render(
     <MemoryRouter initialEntries={[path]}>
       <PageTitle />
@@ -41,13 +41,15 @@ afterEach(() => {
 describe('route -> title map', () => {
   it('maps every signed-in route and builds document.title', () => {
     expect(ROUTE_TITLES.map((r) => r.title)).toEqual([
-      'Overview', 'Analytics', 'Activity', 'Markets', 'More', 'Health', 'Settings', 'Account', 'Alerts', 'Mode', 'Server', 'Logs',
-      'Arbitrage', 'Shadow Estimate', 'Terminology',
+      'Home', 'Strategies', 'Maker', 'Maker', 'Maker', 'Arbitrage', 'Arbitrage', 'Arbitrage', 'Performance', 'Periods',
+      'Analytics', 'Shadow Estimate', 'Activity', 'More', 'Health', 'Server', 'Mode', 'Logs', 'Account', 'Settings',
+      'Alerts', 'Terminology',
     ]);
-    expect(titleForPath('/')).toBe('Overview');
-    expect(titleForPath('/markets/')).toBe('Markets');
+    expect(titleForPath('/')).toBe('Home');
+    expect(titleForPath('/health/')).toBe('Health');
+    expect(titleForPath('/markets')).toBeNull(); // redirects; never titled
     expect(titleForPath('/nope')).toBeNull();
-    expect(documentTitle('Markets')).toBe('Markets · Prior');
+    expect(documentTitle('Health')).toBe('Health · Prior');
     expect(documentTitle(null)).toBe('Prior');
   });
 });
@@ -57,7 +59,7 @@ describe('PageTitle scroll behaviour (fake timers)', () => {
 
   it('is visible at the top and never hides there', () => {
     renderBar();
-    expect(bar()).toHaveTextContent('Markets');
+    expect(bar()).toHaveTextContent('Health');
     expect(bar()).toHaveAttribute('data-state', 'shown');
     act(() => vi.advanceTimersByTime(SCROLL_IDLE_MS * 4));
     expect(bar()).toHaveAttribute('data-state', 'shown');
@@ -145,8 +147,8 @@ describe('PageTitle in the app', () => {
 
   it('header Stop stays visible and clickable while the bar is shown', async () => {
     const user = userEvent.setup();
-    stubApi({ 'GET /api/status': STATUS, 'GET /api/markets': { markets: [] } });
-    renderApp('/markets');
+    stubApi({ 'GET /api/status': STATUS });
+    renderApp('/strategies');
     expect(bar()).toHaveAttribute('data-state', 'shown');
     const header = document.querySelector('header.appbar');
     const stop = within(header).getByRole('button', { name: /stop the bot/i });

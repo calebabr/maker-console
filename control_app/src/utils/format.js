@@ -202,3 +202,69 @@ export function titleCase(s) {
     })
     .join('');
 }
+
+// ---------------------------------------------------------------- UI-1a stage 2 rules (sections 5.3 and 5.5)
+
+/** Tooltip for a missing value: render DASH with title={NA_TITLE}; never 0 or blank. */
+export const NA_TITLE = 'Not available yet';
+
+/** Returns as one-decimal percent, always signed: 0.046 -> "+4.6%", -0.004 -> "−0.4%", ~0 -> "0.0%". */
+export function formatReturn(v, { sign = true } = {}) {
+  return fmtPct(v, { sign, digits: 1 }, MINUS);
+}
+
+/** Shares and rates, zero decimals, no sign: 0.914 -> "91%". */
+export function formatShare(v) {
+  return fmtPct(v, { sign: false, digits: 0 }, MINUS);
+}
+
+/** Confidence interval for a return: (−0.4% to +5.1%). Missing bound -> "". */
+export function formatInterval(lo, hi) {
+  if (!isNum(lo) || !isNum(hi)) return '';
+  return `(${formatReturn(lo)} to ${formatReturn(hi)})`;
+}
+
+const MONTH_DAY = { month: 'short', day: 'numeric' };
+const MONTH_DAY_YEAR = { month: 'short', day: 'numeric', year: 'numeric' };
+const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+
+/**
+ * Absolute date for tables and headings, in the device time zone (UTC only in tooltips and CSV):
+ * today "5:19 PM", yesterday "Yesterday 5:19 PM", this year "Oct 30", another year "Oct 30, 2025".
+ * Feeds and anything under 24 h use formatAgo ("4 min ago") instead.
+ */
+export function formatWhen(v, now = Date.now()) {
+  const d = parseDate(v);
+  if (!d) return DASH;
+  const n = new Date(now);
+  const days = Math.round((startOfDay(n) - startOfDay(d)) / 86400000);
+  const t = d.toLocaleTimeString('en-US', TIME_FMT);
+  if (days === 0) return t;
+  if (days === 1) return `Yesterday ${t}`;
+  return d.toLocaleDateString('en-US', d.getFullYear() === n.getFullYear() ? MONTH_DAY : MONTH_DAY_YEAR);
+}
+
+/** Date range with no dash: "Oct 1 to Oct 30". An open end reads "Oct 1 to now". */
+export function formatRange(from, to, now = Date.now()) {
+  const a = parseDate(from);
+  if (!a) return DASH;
+  const day = (d) => {
+    const sameYear = d.getFullYear() === new Date(now).getFullYear();
+    return d.toLocaleDateString('en-US', sameYear ? MONTH_DAY : MONTH_DAY_YEAR);
+  };
+  const b = parseDate(to);
+  return `${day(a)} to ${b ? day(b) : 'now'}`;
+}
+
+/** Sentence case for buttons, chips, headlines, help text and notices: only the first letter is raised. */
+export function sentenceCase(s) {
+  if (s == null) return '';
+  const t = String(s);
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+/** Strategy name for chrome: the registry's "Bot · Maker" -> "Maker". Analytics keeps the full name. */
+export function strategyShortName(name) {
+  if (name == null) return '';
+  return String(name).replace(/^\s*bot\s*[·•:-]\s*/i, '').trim();
+}

@@ -1,7 +1,8 @@
-import { dateTime } from '../utils/format.js';
+import { dateTime, formatTime } from '../utils/format.js';
 
-// Error box for a failed load / action. Shows the server's `detail` list if any.
-export function ErrorNotice({ error, onRetry }) {
+// Error box for a failed load / action: plain words, the server's `detail` list if any, and (with `staleAt`) what is
+// still shown ("Showing data from 5:19 PM"). Retry is a full 44 px button.
+export function ErrorNotice({ error, onRetry, staleAt }) {
   if (!error) return null;
   const details = error.details && error.details.length > 1 ? error.details : null;
   return (
@@ -14,8 +15,9 @@ export function ErrorNotice({ error, onRetry }) {
           ))}
         </ul>
       )}
+      {staleAt && <div className="hint">Showing data from {formatTime(staleAt)}.</div>}
       {onRetry && (
-        <button type="button" className="btn small" onClick={onRetry}>
+        <button type="button" className="btn" onClick={onRetry}>
           Retry
         </button>
       )}
