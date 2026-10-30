@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased - UI-1a stage 1: honest analytics
+- Analytics takes the viewer's time zone (`tz`, UTC fallback, `tz_used` returned); win rate is shown per strategy (maker per fill, arbitrage per set) and the pooled rate is deprecated.
+- Arbitrage: distinct sets and sightings, scans since restart, and an executed-sets list. New Ledger and Scorecard tabs in Analytics with a reconciliation residual (tolerance 0.10).
+- Cash flows now require a date (422 on bad input) and refuse duplicates (409) unless confirmed. `pnl_today_state` separates "none yet" from "unavailable".
+- Shadow capital is a setting (default 150, 50 to 1000, fresh 2FA); the Shadow banner says it is not estimating when the ceiling is full.
+- API (additive): `tz_used`, `win_rate_by_strategy`, `arb_summary`, `arb_sets`, `arb_sets_total`, `/api/analytics/ledger`, `/api/analytics/scorecard`.
+
 ## Unreleased - rename to Prior
 - The phone app is now called Prior, with a new logo (a ring holding a wide prior curve and a narrow posterior curve) in all three themes. Page titles, notifications and the install name say Prior.
 - Saved theme, text size and last-visit preferences carry over from the old name.

@@ -11,6 +11,8 @@ makes sense, filters for side, kind, status, result, price band, series and sour
 | Route | Returns |
 |---|---|
 | `GET /api/analytics/summary` | Totals, the P&L curve with drawdown, results by cell, series, price band and time to close (with confidence intervals), weekly fill quality and the arbitrage summary |
+| `GET /api/analytics/ledger` | Per-strategy fills, cost, fees, realized P&L and open cost, daily tables, and a reconciliation of equity change against flows and realized P&L (residual, 0.10 tolerance, flag) |
+| `GET /api/analytics/scorecard` | Run health, churn, fill-to-settlement, reconciliation, arbitrage per set and an indicative return; unstored values are null with a note |
 | `GET /api/analytics/trades` | A page of trade rows |
 | `GET /api/analytics/my-trades` | The same rows for my own manual trades |
 | `GET /api/analytics/trades.csv` | A CSV export, capped in size |
@@ -26,6 +28,15 @@ makes sense, filters for side, kind, status, result, price band, series and sour
 - **Win rate interval:** Wilson score, 95%. **Edge** is win rate minus average price.
 - **Drawdown:** the cumulative P&L minus its running maximum, with the maximum starting at zero.
 - **Arbitrage** is judged per set, not per fill, because a set of hedged legs always has losing legs.
+
+## UI-1a additions
+
+- `tz` (IANA name) on the summary and ledger; response `tz_used` (UTC when invalid). Dates are local, windows are UTC. Details in `docs/API.md`.
+- `win_rate_by_strategy`: maker per fill, arbitrage per set; the pooled `totals.win_rate` is deprecated.
+- `arb_summary`, `arb_sets`, `arb_sets_total`: distinct sets and sightings, and one row per executed set.
+- Analytics tabs: Ledger (strategy table, totals, reconciliation) and Scorecard (null shows "not tracked yet"; return is labelled demo, indicative only).
+- New glossary terms: `win-rate-by-strategy`, `arb-set`, `scans-since-restart`, `risk-rule-outcome`, `ledger`, `scorecard`, `shadow-capital`.
+- Shadow: when `ceiling_full` is set, the banner says Shadow is not estimating until positions settle.
 
 ## Terminology and help icons
 
