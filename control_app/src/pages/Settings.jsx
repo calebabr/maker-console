@@ -66,8 +66,14 @@ function same(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-export default function Settings() {
-  const { data, error, loading, staleAt, reload, setData } = useResource(() => api.getConfig(), '/api/config');
+/**
+ * The settings form (extracted so Maker Controls reuses it). `resource` is the useResource result for
+ * api.getConfig(); `filter(key)` limits which keys are editable here (default: all), so the Maker Controls view
+ * shows only the Maker keys while Settings shows every key. One PUT /api/config, always with a fresh 2FA code.
+ * `readOnlyCard` shows the read-only Strategy card (cells); `compact` drops the title copy for embedded use.
+ */
+export function ConfigEditor({ resource, filter = null, title = 'Bot Settings', readOnlyCard = true, undoCard = true }) {
+  const { data, reload, setData } = resource;
   const { twoFactor, notify } = useDialogs();
   const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
@@ -112,7 +118,8 @@ export default function Settings() {
     return keys;
   }, [schema, config]);
 
-  const editable = (k) => !READ_ONLY.includes(k) && !(schema[k] && schema[k].editable === false) && !(config && isComplex(config[k]));
+  const inScope = (k) => READ_ONLY.includes(k) || !filter || filter(k);
+  const editable = (k) => inScope(k) && !READ_ONLY.includes(k) && !(schema[k] && schema[k].editable === false) && !(config && isComplex(config[k]));
 
   // Parse + validate the draft -> { patch, errors }
   const { patch, errors } = useMemo(() => {
@@ -338,11 +345,74 @@ export default function Settings() {
     );
   }
 
+  if (!config) return null;
+  const roKeys = fields.filter((k) => inScope(k) && !editable(k) && k in config);
+  return (
+    <form onSubmit={save}>
+      <Card title={title} subtitle="Changes apply from the next pass.">
+        <fieldset className="sync-lock" disabled={syncing} aria-busy={syncing} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+          <div className="stack">{fields.filter((k) => editable(k) && k in config).map(renderField)}</div>
+        </fieldset>
+        {syncing && <p className="hint" role="status">Refreshing settings…</p>}
+      </Card>
+
+      {dirty && (
+        <Card title="Changes To Review" subtitle="Nothing is saved until you confirm with your 2FA code.">
+          <ChangeDiff changes={changes} />
+        </Card>
+      )}
+
+      {saveError && (
+        <div className="notice notice-error" role="alert">
+          <strong>Not saved.</strong>
+          {saveError.details && saveError.details.length ? (
+            <ul className="detail-list">
+              {saveError.details.map((d, i) => (
+                <li key={i}>{d}</li>
+              ))}
+            </ul>
+          ) : (
+            <div>{saveError.message}</div>
+          )}
+        </div>
+      )}
+      {savedVersion != null && <div className="notice notice-ok">Saved as version {savedVersion}.</div>}
+
+      <div className="sticky-actions">
+        <button type="button" className="btn" disabled={!dirty || saving} onClick={() => setDraft(toDraft(config))}>
+          Discard Edits
+        </button>
+        <button type="submit" className="btn primary" disabled={!dirty || hasErrors || saving || syncing}>
+          {saving ? 'Saving…' : <><IconLock /> Save</>}
+        </button>
+      </div>
+
+      {undoCard && undo && !dirty && (
+        <Card title="Last Change" subtitle={`Version ${undo.version}`}>
+          <ChangeDiff changes={undo.changes} />
+          <button type="button" className="btn block" onClick={undoLast} disabled={undoing} style={{ marginTop: 10 }}>
+            {undoing ? 'Undoing…' : <><IconLock /> Undo Last Change</>}
+          </button>
+        </Card>
+      )}
+
+      {readOnlyCard && roKeys.length > 0 && (
+        <Card title={<>Strategy (Read-Only)<HelpIcon term="cell" /></>} subtitle="The validated strategy cannot be changed from the app.">
+          <div className="stack">{roKeys.map(renderField)}</div>
+        </Card>
+      )}
+    </form>
+  );
+}
+
+export default function Settings() {
+  const resource = useResource(() => api.getConfig(), '/api/config');
+  const { data, error, loading, staleAt, reload } = resource;
   return (
     <div className="page">
       <div className="page-head">
         <h1>Settings</h1>
-        <button type="button" className="btn small" onClick={reload} disabled={loading || saving}>
+        <button type="button" className="btn small" onClick={reload} disabled={loading}>
           Reload
         </button>
       </div>
@@ -350,62 +420,7 @@ export default function Settings() {
       <ErrorNotice error={error} onRetry={reload} />
       {loading && !data && <Loading />}
 
-      {config && (
-        <form onSubmit={save}>
-          <Card title="Bot Settings" subtitle="Changes apply from the next pass.">
-            <fieldset className="sync-lock" disabled={syncing} aria-busy={syncing} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
-              <div className="stack">{fields.filter((k) => editable(k) && k in config).map(renderField)}</div>
-            </fieldset>
-            {syncing && <p className="hint" role="status">Refreshing settings…</p>}
-          </Card>
-
-          {dirty && (
-            <Card title="Changes To Review" subtitle="Nothing is saved until you confirm with your 2FA code.">
-              <ChangeDiff changes={changes} />
-            </Card>
-          )}
-
-          {saveError && (
-            <div className="notice notice-error" role="alert">
-              <strong>Not saved.</strong>
-              {saveError.details && saveError.details.length ? (
-                <ul className="detail-list">
-                  {saveError.details.map((d, i) => (
-                    <li key={i}>{d}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div>{saveError.message}</div>
-              )}
-            </div>
-          )}
-          {savedVersion != null && <div className="notice notice-ok">Saved as version {savedVersion}.</div>}
-
-          <div className="sticky-actions">
-            <button type="button" className="btn" disabled={!dirty || saving} onClick={() => setDraft(toDraft(config))}>
-              Discard Edits
-            </button>
-            <button type="submit" className="btn primary" disabled={!dirty || hasErrors || saving || syncing}>
-              {saving ? 'Saving…' : <><IconLock /> Save</>}
-            </button>
-          </div>
-
-          {undo && !dirty && (
-            <Card title="Last Change" subtitle={`Version ${undo.version}`}>
-              <ChangeDiff changes={undo.changes} />
-              <button type="button" className="btn block" onClick={undoLast} disabled={undoing} style={{ marginTop: 10 }}>
-                {undoing ? 'Undoing…' : <><IconLock /> Undo Last Change</>}
-              </button>
-            </Card>
-          )}
-
-          {fields.some((k) => !editable(k) && k in config) && (
-            <Card title={<>Strategy (Read-Only)<HelpIcon term="cell" /></>} subtitle="The validated strategy cannot be changed from the app.">
-              <div className="stack">{fields.filter((k) => !editable(k) && k in config).map(renderField)}</div>
-            </Card>
-          )}
-        </form>
-      )}
+      {data && data.config && <ConfigEditor resource={resource} />}
 
       {data && data.shadow_capital && <ShadowCapitalCard info={data.shadow_capital} onSaved={reload} />}
 

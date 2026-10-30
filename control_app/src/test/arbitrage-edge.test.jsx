@@ -165,7 +165,7 @@ describe('Arbitrage settings form validation', () => {
   it('Save is disabled until something changes; Undo restores', async () => {
     const user = userEvent.setup();
     base();
-    renderApp('/arb');
+    renderApp('/strategies/arb/controls');
     const input = await setField(user, /max contracts/i, 50);
     expect(saveBtn()).toBeDisabled();
     await user.clear(input);
@@ -186,7 +186,7 @@ describe('Arbitrage settings form validation', () => {
   ])('%s = %s is rejected client-side (%s) and cannot be saved', async (label, value, msg) => {
     const user = userEvent.setup();
     const calls = base();
-    renderApp('/arb');
+    renderApp('/strategies/arb/controls');
     await setField(user, new RegExp(label, 'i'), value);
     expect(await screen.findByText(msg)).toBeInTheDocument();
     expect(saveBtn()).toBeDisabled();
@@ -196,7 +196,7 @@ describe('Arbitrage settings form validation', () => {
   it('an empty field is Required and blocks Save', async () => {
     const user = userEvent.setup();
     base();
-    renderApp('/arb');
+    renderApp('/strategies/arb/controls');
     await setField(user, /max contracts/i, '');
     expect(await screen.findByText('Required')).toBeInTheDocument();
     expect(saveBtn()).toBeDisabled();
@@ -205,7 +205,7 @@ describe('Arbitrage settings form validation', () => {
   it('server ceilings tighten the allowed maximum below the schema max', async () => {
     const user = userEvent.setup();
     base({}, ARB({ ceilings: { arb_max_contracts: 20 } }));
-    renderApp('/arb');
+    renderApp('/strategies/arb/controls');
     await setField(user, /max contracts/i, 30);
     expect(await screen.findByText('Maximum 20')).toBeInTheDocument();
     expect(saveBtn()).toBeDisabled();
@@ -214,7 +214,7 @@ describe('Arbitrage settings form validation', () => {
   it('unchecking every series blocks Save with "Pick at least one"', async () => {
     const user = userEvent.setup();
     base();
-    renderApp('/arb');
+    renderApp('/strategies/arb/controls');
     await user.click(await screen.findByRole('checkbox', { name: 'KXDEMOA' }));
     await user.click(screen.getByRole('checkbox', { name: 'KXDEMOB' }));
     expect(await screen.findByText('Pick at least one')).toBeInTheDocument();
@@ -224,7 +224,7 @@ describe('Arbitrage settings form validation', () => {
   it('only changed fields are sent, with the code', async () => {
     const user = userEvent.setup();
     const calls = base({ 'PUT /api/arb': ARB({ settings: { arb_max_contracts: 60 } }) });
-    renderApp('/arb');
+    renderApp('/strategies/arb/controls');
     await setField(user, /max contracts/i, 60);
     await user.click(saveBtn());
     await user.type(await screen.findByLabelText('6-digit code'), '123456');
@@ -240,7 +240,7 @@ describe('Arbitrage settings form validation', () => {
     base({
       'PUT /api/arb': [422, { detail: [{ loc: ['body', 'arb_max_contracts'], msg: 'Input should be less than or equal to 100' }] }],
     });
-    renderApp('/arb');
+    renderApp('/strategies/arb/controls');
     await setField(user, /max contracts/i, 60);
     await user.click(saveBtn());
     await user.type(await screen.findByLabelText('6-digit code'), '123456');

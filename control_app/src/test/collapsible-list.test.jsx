@@ -123,7 +123,7 @@ describe('CollapsibleList on pages', () => {
       'GET /api/arb': { settings: {}, status: { state: 'stopped' }, schema: {}, pnl: null },
       'GET /api/arb/opportunities': { items },
     });
-    renderApp('/arb');
+    renderApp('/strategies/arb/results');
     expect(await screen.findByRole('button', { name: /show all 7/i })).toBeInTheDocument();
     expect(screen.getAllByText(/^EV-/)).toHaveLength(5);
   });
