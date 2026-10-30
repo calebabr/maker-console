@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -176,7 +177,9 @@ async def test_periods_and_cash_flow_writes_work_with_2fa_and_a_reused_code_is_r
     r2 = await c.post("/api/cash-flows", json={"kind": "deposit", "amount": 50}, headers=hh)   # same code again
     assert r2.status_code in (401, 403)
     hh = await env.h2fa()
-    r3 = await c.post("/api/cash-flows", json={"kind": "deposit", "amount": 50}, headers=hh)
+    r3 = await c.post("/api/cash-flows", json={"kind": "deposit", "amount": 50,
+                                               "ts": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()},
+                      headers=hh)
     assert r3.status_code == 200
     fid = r3.json()["created"]
     assert (await c.delete(f"/api/cash-flows/{fid}", headers=env.auth)).status_code == 403

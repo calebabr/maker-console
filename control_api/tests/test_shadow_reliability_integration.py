@@ -82,7 +82,7 @@ async def test_shadow_cloud_settings_round_trip_with_fresh_2fa(env):
     assert s["shadow_capital"] == 300 and s["shadow_intervals"] == [5, 10]          # sorted by the validator
     g = (await env.client.get("/api/cloud", headers=env.auth)).json()
     assert g["settings"]["shadow_capital"] == 300 and g["settings"]["shadow_intervals"] == [5, 10]
-    assert g["schema"]["shadow_capital"]["min"] == 20 and g["schema"]["shadow_capital"]["max"] == 100000
+    assert g["schema"]["shadow_capital"]["min"] == 50 and g["schema"]["shadow_capital"]["max"] == 1000
     assert g["schema"]["shadow_intervals"]["allowed"] == [5, 7, 10]
     assert env.runner.cloud["shadow_capital"] == 300 and sh.capital_of(env.runner.cloud) == 300.0
     assert (await env.store.get_cloud_settings())["shadow_capital"] == 300
@@ -101,7 +101,8 @@ async def test_shadow_cloud_settings_need_fresh_2fa_and_change_nothing_without_i
 
 
 @pytest.mark.parametrize("body", [
-    {"shadow_capital": 19}, {"shadow_capital": 0}, {"shadow_capital": -5}, {"shadow_capital": 100001},
+    {"shadow_capital": 19}, {"shadow_capital": 49.99}, {"shadow_capital": 0}, {"shadow_capital": -5},
+    {"shadow_capital": 1000.01}, {"shadow_capital": 100001},
     {"shadow_capital": True}, {"shadow_capital": "150"},
     {"shadow_intervals": []}, {"shadow_intervals": [6]}, {"shadow_intervals": [5, 5]},
     {"shadow_intervals": [5, 7, 10, 5]}, {"shadow_intervals": "10"}, {"shadow_intervals": [True]},
@@ -113,7 +114,7 @@ async def test_shadow_cloud_settings_out_of_range_rejected(env, body):
     assert env.runner.cloud.get("shadow_capital") in (None, 150) and env.runner.cloud.get("shadow_intervals") in (None, [10])
 
 
-@pytest.mark.parametrize("body", [{"shadow_capital": 20}, {"shadow_capital": 100000}, {"shadow_capital": 20.5},
+@pytest.mark.parametrize("body", [{"shadow_capital": 50}, {"shadow_capital": 1000}, {"shadow_capital": 50.5},
                                   {"shadow_intervals": [5]}, {"shadow_intervals": [5, 7, 10]},
                                   {"shadow_intervals": [7, 5, 10]}])
 async def test_shadow_cloud_settings_boundaries_accepted(env, body):
@@ -129,16 +130,16 @@ async def test_shadow_capital_from_the_api_drives_the_caps(env, monkeypatch):
     await env.store.shadow_upsert_episodes([{
         "methodology": 2,
         "ep_id": "held-api", "env": "prod", "ticker": "KXDEMOA-26OCT17-B9", "series": "KXDEMOA", "side": "yes",
-        "book_side": "bid", "price": 0.5, "order_price": 0.5, "count": 20, "cost": 10.0,
+        "book_side": "bid", "price": 0.5, "order_price": 0.5, "count": 50, "cost": 25.0,
         "join_ts": now - timedelta(hours=2), "end_ts": now - timedelta(hours=1), "end_reason": "cancel",
-        "trades_read": True, "result": None, "fill": {"lo": 20.0, "mid": 20.0, "hi": 20.0},
+        "trades_read": True, "result": None, "fill": {"lo": 50.0, "mid": 50.0, "hi": 50.0},
         "close_time": now + timedelta(hours=6)}])
-    assert (await env.client.put("/api/cloud", headers=await env.h2fa(), json={"shadow_capital": 20})).status_code == 200
+    assert (await env.client.put("/api/cloud", headers=await env.h2fa(), json={"shadow_capital": 50})).status_code == 200
     out = await r.shadow_cycle()
-    assert out["ran"] and out["pass"]["held_cost"] == pytest.approx(10.0) and out["pass"]["headroom"] == 0
+    assert out["ran"] and out["pass"]["held_cost"] == pytest.approx(25.0) and out["pass"]["headroom"] == 0
     assert out["pass"]["capped_new"] == 1
     r._shadow_summary_utc = None
-    assert (await env.client.put("/api/cloud", headers=await env.h2fa(), json={"shadow_capital": 100000})).status_code == 200
+    assert (await env.client.put("/api/cloud", headers=await env.h2fa(), json={"shadow_capital": 1000})).status_code == 200
     out2 = await r.shadow_cycle()
     assert out2["pass"]["headroom"] > 0
     await r.shutdown()
