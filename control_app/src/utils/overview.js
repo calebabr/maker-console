@@ -1,15 +1,16 @@
 // Pure helpers for the Overview page: headline, abnormal-state detection, ring progress, the
 // "Since You Last Checked" bookkeeping and the specific toast texts (items 1, 3, 25, 30, 39).
+import { readWithLegacy } from './theme.js';
 import { badgeKind, HEARTBEAT_STALE_S } from './status.js';
 import { formatMoney, formatTimeParts, parseDate, titleCase } from './format.js';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
-export const LAST_VISIT_KEY = 'keel.lastVisit';
+export const LAST_VISIT_KEY = 'prior.lastVisit';
 
 export function readLastVisit() {
   try {
-    const v = window.localStorage.getItem(LAST_VISIT_KEY);
+    const v = readWithLegacy(window.localStorage, LAST_VISIT_KEY);
     return v && parseDate(v) ? v : null;
   } catch {
     return null;

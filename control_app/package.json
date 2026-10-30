@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Keel: phone app (PWA) for controlling the Kalshi maker bot",
+  "description": "Prior: phone app (PWA) for controlling the Kalshi maker bot",
   "scripts": {
     "dev": "vite",
     "dev:mock": "vite --mode mock",

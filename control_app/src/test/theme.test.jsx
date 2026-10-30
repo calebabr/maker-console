@@ -3,7 +3,7 @@ import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import fs from 'node:fs';
 import path from 'node:path';
-import KeelLogo from '../components/KeelLogo.jsx';
+import PriorLogo from '../components/PriorLogo.jsx';
 import { DisplayProvider, useDisplayPrefs } from '../context/DisplayContext.jsx';
 import {
   DEFAULT_TEXT_SIZE, DEFAULT_THEME, TEXT_SIZE_KEY, TEXT_SIZES, THEME_COLOR, THEME_IDS, THEME_KEY, THEMES, applyTextSize,
@@ -149,13 +149,13 @@ describe('applyTheme / applyTextSize', () => {
     document.querySelector('meta[name="theme-color"]').remove();
   });
 
-  it('persists only when asked, under keel.theme / keel.textSize', () => {
+  it('persists only when asked, under prior.theme / prior.textSize', () => {
     applyTheme('teal');
     expect(localStorage.getItem(THEME_KEY)).toBeNull();
     applyTheme('teal', { persist: true });
     applyTextSize('large', { persist: true });
-    expect(localStorage.getItem('keel.theme')).toBe('teal');
-    expect(localStorage.getItem('keel.textSize')).toBe('large');
+    expect(localStorage.getItem('prior.theme')).toBe('teal');
+    expect(localStorage.getItem('prior.textSize')).toBe('large');
     expect(readTheme()).toBe('teal');
     expect(readTextSize()).toBe('large');
   });
@@ -244,17 +244,20 @@ describe('useDisplayPrefs', () => {
   });
 });
 
-describe('KeelLogo', () => {
-  it('renders the four parts from theme variables, in every theme', () => {
+describe('PriorLogo', () => {
+  it('renders the ring, baseline and both curves from theme variables, in every theme', () => {
     for (const id of THEME_IDS) {
       applyTheme(id);
-      const { container, unmount } = render(<KeelLogo size={32} />);
+      const { container, unmount } = render(<PriorLogo size={32} />);
       const svg = container.querySelector('svg');
       expect(svg).toHaveAttribute('viewBox', '0 0 48 48');
       expect(svg).toHaveAttribute('width', '32');
-      expect(container.querySelectorAll('circle')).toHaveLength(2); // ring + dot
-      expect(container.querySelector('path[d="M9 24 H39"]')).toHaveAttribute('stroke', 'var(--accent)');
-      expect(container.querySelector('path[d="M18 24 L24 38 L30 24 Z"]')).toHaveAttribute('fill', 'var(--ok)');
+      expect(container.querySelectorAll('circle')).toHaveLength(1); // ring
+      expect(container.querySelector('circle')).toHaveAttribute('r', '19');
+      expect(container.querySelector('path[d="M11 33 H37"]')).toHaveAttribute('stroke', 'var(--muted)');
+      expect(container.querySelector('path[d="M10 33 C16 33 18 21 24 21 C30 21 32 33 38 33"]')).toHaveAttribute('stroke', 'var(--muted)');
+      expect(container.querySelector('path[d="M15 33 C20 33 21 12 24 12 C27 12 28 33 33 33"]')).toHaveAttribute('stroke', 'var(--ok)');
+      expect(document.documentElement.style.getPropertyValue('--ok')).toBe(THEMES[id].colors.ok);
       // Every colour is a theme variable: no hard-coded hex in the markup.
       expect(svg.outerHTML).not.toMatch(/#[0-9a-f]{3,6}/i);
       expect(document.documentElement.style.getPropertyValue('--accent')).toBe(THEMES[id].colors.accent);
@@ -262,9 +265,9 @@ describe('KeelLogo', () => {
     }
   });
   it('is decorative unless given a title', () => {
-    const { container, rerender } = render(<KeelLogo />);
+    const { container, rerender } = render(<PriorLogo />);
     expect(container.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
-    rerender(<KeelLogo title="Keel" />);
-    expect(screen.getByRole('img', { name: 'Keel' })).toBeInTheDocument();
+    rerender(<PriorLogo title="Prior" />);
+    expect(screen.getByRole('img', { name: 'Prior' })).toBeInTheDocument();
   });
 });

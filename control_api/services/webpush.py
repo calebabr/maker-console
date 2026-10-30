@@ -1,4 +1,4 @@
-"""Web Push to the Keel PWA (UX item 45): RFC 8030 delivery, VAPID (RFC 8292) and aes128gcm payload encryption
+"""Web Push to the Prior PWA (UX item 45): RFC 8030 delivery, VAPID (RFC 8292) and aes128gcm payload encryption
 (RFC 8291), built on `cryptography` and `httpx` (both already pinned), so no new dependency is added.
 
 Supply-chain note: pywebpush was assessed and not added. It pulls requests + aiohttp (and aiohttp's tree:

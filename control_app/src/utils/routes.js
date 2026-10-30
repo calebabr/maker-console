@@ -2,7 +2,7 @@
 // title bar (components/PageTitle.jsx), document.title, the bottom tabs, the wide-screen sidebar and the
 // More page. Keep it in step with the <Route>s in App.jsx (src/test/page-title.test.jsx checks every entry
 // renders).
-export const APP_NAME = 'Keel';
+export const APP_NAME = 'Prior';
 export const TAGLINE_LEAD = 'Your strategies.';
 export const TAGLINE_ACCENT = 'One tap away.';
 export const TAGLINE = `${TAGLINE_LEAD} ${TAGLINE_ACCENT}`;
@@ -59,7 +59,7 @@ export function titleForPath(pathname) {
   return hit ? hit.title : null;
 }
 
-/** document.title for a page: "Markets · Keel"; just "Keel" when unknown. */
+/** document.title for a page: "Markets · Prior"; just "Prior" when unknown. */
 export function documentTitle(title) {
   return title ? `${title} · ${APP_NAME}` : APP_NAME;
 }

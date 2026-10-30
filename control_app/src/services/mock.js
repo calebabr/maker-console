@@ -485,7 +485,7 @@ const CHANGELOG = [
     version: '0.4.0',
     date: '2026-10-15',
     items: [
-      'The app is now called Keel, with a new logo and three colour themes.',
+      'The app is now called Prior, with a new logo and three colour themes.',
       'The bottom tabs are Overview, Analytics, Activity, Markets and More.',
       'Times show in your own time zone; hover one for the exact UTC time.',
       'Pick Small, Normal or Large text in Settings.',

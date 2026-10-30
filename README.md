@@ -1,4 +1,4 @@
-# Maker Console (Keel) - Research-First Kalshi Trading Bot and Control App
+# Prior - Research-First Kalshi Trading Bot and Control App
 
 ![Python](https://img.shields.io/badge/-Python-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
@@ -13,6 +13,8 @@ This is my personal research project: a way to take trading strategies from the 
 backtest them, test them on Kalshi's demo exchange with mathematical analysis, and only then risk real money. A
 FastAPI control API runs the bot in-process, and a React PWA lets me start, stop and supervise it from my phone. The
 whole infrastructure runs on free tiers.
+
+**Why "Prior"?** In Bayesian statistics a prior is what you believe before you see the evidence, which is how I try to approach every strategy here: write the belief down, then let the data update it.
 
 **Project status:** running on Kalshi's demo exchange in named evaluation periods; live trading is not enabled.
 

@@ -58,7 +58,7 @@ def request(method: str, url: str, *, headers: dict | None = None, body: dict | 
     """-> (status, parsed_json_or_None). Network errors raise OSError. Never logs headers or bodies."""
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
-        "Accept": "application/json", "User-Agent": "keel-release-workflow",
+        "Accept": "application/json", "User-Agent": "prior-release-workflow",
         **({"Content-Type": "application/json"} if data is not None else {}), **(headers or {})})
     try:
         with _opener.open(req, timeout=timeout) as resp:
@@ -210,7 +210,7 @@ def cmd_verify_frontend(a) -> int:
     deadline = time.monotonic() + a.timeout
     while True:
         try:
-            req = urllib.request.Request(a.url, headers={"User-Agent": "keel-release-workflow"})
+            req = urllib.request.Request(a.url, headers={"User-Agent": "prior-release-workflow"})
             with _opener.open(req, timeout=20) as resp:
                 ctype, head = resp.headers.get("Content-Type", ""), resp.read(MAX_BODY)
             if resp.status == 200 and "text/html" in ctype and b'id="root"' in head:

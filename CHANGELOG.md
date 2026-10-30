@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased - rename to Prior
+- The phone app is now called Prior, with a new logo (a ring holding a wide prior curve and a narrow posterior curve) in all three themes. Page titles, notifications and the install name say Prior.
+- Saved theme, text size and last-visit preferences carry over from the old name.
+
 ## Unreleased - honest P&L labels
 - Overview: the 30-day tile is now "Maker P&L (30 days)" with a combined Maker + Arbitrage total and a Maker / Arbitrage split; every P&L figure on Overview, Analytics, Account, Arbitrage and Shadow carries a one-line scope (what it measures, date rule) from one registry, `utils/pnlScopes.js`.
 - Today's P&L starts at the viewer's local midnight (`GET /api/status?tz=`, UTC fallback for any unknown name) and says "No settlements yet today" instead of a dash; `$0.00` means settled and netted to zero.

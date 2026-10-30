@@ -16,9 +16,9 @@ export default defineConfig({
       injectRegister: 'auto',
       includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
       manifest: {
-        name: 'Keel',
-        short_name: 'Keel',
-        description: 'Keel: your strategies. One tap away.',
+        name: 'Prior',
+        short_name: 'Prior',
+        description: 'Prior: your strategies. One tap away.',
         start_url: '/',
         scope: '/',
         display: 'standalone',

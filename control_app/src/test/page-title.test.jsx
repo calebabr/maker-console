@@ -47,8 +47,8 @@ describe('route -> title map', () => {
     expect(titleForPath('/')).toBe('Overview');
     expect(titleForPath('/markets/')).toBe('Markets');
     expect(titleForPath('/nope')).toBeNull();
-    expect(documentTitle('Markets')).toBe('Markets · Keel');
-    expect(documentTitle(null)).toBe('Keel');
+    expect(documentTitle('Markets')).toBe('Markets · Prior');
+    expect(documentTitle(null)).toBe('Prior');
   });
 });
 
@@ -130,7 +130,7 @@ describe('PageTitle in the app', () => {
       renderApp(path);
       expect(bar()).toHaveTextContent(title);
       expect(bar()).toHaveAttribute('aria-hidden', 'true');
-      expect(document.title).toBe(`${title} · Keel`);
+      expect(document.title).toBe(`${title} · Prior`);
       // The page's own h1 is the single accessible heading (the bar is aria-hidden).
       await waitFor(() => expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1));
       expect(screen.getByRole('heading', { level: 1 }).textContent).toContain(title);
@@ -140,7 +140,7 @@ describe('PageTitle in the app', () => {
   it('signed out: no bar, document.title is the app name', () => {
     renderApp('/', { signedIn: false });
     expect(screen.queryByTestId('page-title')).toBeNull();
-    expect(document.title).toBe('Keel');
+    expect(document.title).toBe('Prior');
   });
 
   it('header Stop stays visible and clickable while the bar is shown', async () => {

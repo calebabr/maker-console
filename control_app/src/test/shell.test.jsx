@@ -144,13 +144,13 @@ describe('sidebar (>= 1024 px)', () => {
 });
 
 describe('header', () => {
-  it('shows the Keel lockup with the logo and no old name', async () => {
+  it('shows the Prior lockup with the logo and no old name', async () => {
     setViewport({ wide: false });
     base();
     renderApp('/');
     const header = document.querySelector('header.appbar');
     expect(within(header).getByText(APP_NAME)).toBeInTheDocument();
-    expect(within(header).getByTestId('keel-logo')).toBeInTheDocument();
+    expect(within(header).getByTestId('prior-logo')).toBeInTheDocument();
     expect(header.textContent).not.toMatch(new RegExp(OLD_NAME));
     await waitFor(() => expect(within(header).getByRole('button', { name: /stop the bot/i })).toBeEnabled());
   });
@@ -208,7 +208,7 @@ function sourceFiles(dir) {
   return out;
 }
 
-describe('rename to Keel (item 28)', () => {
+describe('rename to Prior (item 28)', () => {
   const root = process.cwd();
   it('the retired app name is not left in src/', () => {
     const hits = sourceFiles(path.join(root, 'src'))
@@ -217,32 +217,32 @@ describe('rename to Keel (item 28)', () => {
     expect(hits).toEqual([]);
   });
 
-  it('manifest, html title and apple title say Keel', () => {
+  it('manifest, html title and apple title say Prior', () => {
     const cfg = fs.readFileSync(path.join(root, 'vite.config.js'), 'utf8');
-    expect(cfg).toMatch(/name:\s*'Keel'/);
-    expect(cfg).toMatch(/short_name:\s*'Keel'/);
+    expect(cfg).toMatch(/name:\s*'Prior'/);
+    expect(cfg).toMatch(/short_name:\s*'Prior'/);
     expect(cfg).not.toMatch(new RegExp(OLD_NAME));
     expect(cfg).toMatch(/display:\s*'standalone'/);
     expect(cfg).toMatch(/icon-192\.png/);
     expect(cfg).toMatch(/icon-512\.png/);
     expect(cfg).toMatch(/purpose:\s*'maskable'/);
     const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
-    expect(html).toMatch(/<title>Keel<\/title>/);
-    expect(html).toMatch(/apple-mobile-web-app-title"\s+content="Keel"/);
+    expect(html).toMatch(/<title>Prior<\/title>/);
+    expect(html).toMatch(/apple-mobile-web-app-title"\s+content="Prior"/);
     expect(html).not.toMatch(new RegExp(OLD_NAME));
     expect(html).toMatch(/theme-color" content="#0f141b"/);
   });
 
-  it('icon files exist and the SVG icons use the Keel G colours', () => {
+  it('icon files exist and the SVG icons use the Prior logo colours', () => {
     const pub = path.join(root, 'public');
     for (const f of ['icon-192.png', 'icon-512.png', 'maskable-512.png', 'apple-touch-icon.png', 'icon.svg', 'favicon.svg']) {
       expect(fs.existsSync(path.join(pub, f)), f).toBe(true);
     }
     for (const f of ['icon.svg', 'favicon.svg']) {
       const svg = fs.readFileSync(path.join(pub, f), 'utf8');
-      expect(svg).toContain('M9 24 H39'); // horizon
-      expect(svg).toContain('M18 24 L24 38 L30 24 Z'); // keel
-      expect(svg).toContain('#4ea1ff'); // accent
+      expect(svg).toContain('M10 33 C16 33 18 21 24 21 C30 21 32 33 38 33'); // prior curve
+      expect(svg).toContain('M15 33 C20 33 21 12 24 12 C27 12 28 33 33 33'); // posterior curve
+      expect(svg).toContain('#8b98a8'); // muted
       expect(svg).toContain('#3fb97a'); // success
     }
     const png = fs.readFileSync(path.join(pub, 'icon-512.png'));
@@ -250,11 +250,11 @@ describe('rename to Keel (item 28)', () => {
     expect(png.readUInt32BE(20)).toBe(512);
   });
 
-  it('document.title is "<Page> · Keel"', async () => {
+  it('document.title is "<Page> · Prior"', async () => {
     setViewport({ wide: false });
     base();
     renderApp('/more');
     await screen.findByRole('navigation', { name: 'More pages' });
-    expect(document.title).toBe('More · Keel');
+    expect(document.title).toBe('More · Prior');
   });
 });

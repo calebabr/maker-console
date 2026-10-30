@@ -6,8 +6,18 @@
 // Preferences live in localStorage per device (no 2FA, not a bot setting). Every access is guarded:
 // private windows and blocked storage must never break the app.
 
-export const THEME_KEY = 'keel.theme';
-export const TEXT_SIZE_KEY = 'keel.textSize';
+export const THEME_KEY = 'prior.theme';
+export const TEXT_SIZE_KEY = 'prior.textSize';
+// The app had another name before: keep reading the old keys so saved preferences survive the rename.
+export const LEGACY_KEYS = { 'prior.theme': 'keel.theme', 'prior.textSize': 'keel.textSize', 'prior.lastVisit': 'keel.lastVisit' };
+
+/** Read a preference under its new key, falling back to the pre-rename key when the new one is absent. */
+export function readWithLegacy(storage, key) {
+  const v = storage.getItem(key);
+  if (v !== null && v !== undefined) return v;
+  const old = LEGACY_KEYS[key];
+  return old ? storage.getItem(old) : null;
+}
 
 export const DEFAULT_THEME = 'midnight';
 export const DEFAULT_TEXT_SIZE = 'normal';
@@ -108,7 +118,7 @@ function local() {
 function readPref(key) {
   try {
     const s = local();
-    return s ? s.getItem(key) : null;
+    return s ? readWithLegacy(s, key) : null;
   } catch {
     return null;
   }

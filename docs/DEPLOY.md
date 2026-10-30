@@ -124,7 +124,7 @@ Pushing to GitHub does **not** change your running app (Render's auto-deploy is 
 
 1. **Wait for CI.** GitHub > repo > Actions (or the commit's checks): all 7 green. A red X means a failure; "cancelled" on an older commit just means a newer push replaced it. You get an email only on failures.
 2. **Run workflow.** Actions > **release** > Run workflow > branch `main` > paste the commit SHA (the full 40 characters; Commits > copy icon) > Run. The gate checks that CI is green and that the commit is the tip of `main`.
-3. **Approve in the app.** Open Keel > Server page > the pending release > approve with a fresh Duo code. Nothing deploys before this.
+3. **Approve in the app.** Open Prior > Server page > the pending release > approve with a fresh Duo code. Nothing deploys before this.
 4. **Wait about 3 to 5 minutes.** The workflow deploys Render, moves the `release` branch (Vercel builds production from it, step 12), then reports. ntfy sends "release done".
 5. **Check.** Server page: the new `api_version`, you are the single **Leader**, the lease **generation** went up by one. A notification "Trading resumed after restart" is normal: the bot was restored to demo/running as it was.
 

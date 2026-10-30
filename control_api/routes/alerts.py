@@ -187,7 +187,7 @@ async def push_test(request: Request, user: dict = Depends(current_user)) -> dic
     r = request.app.state.runner
     if not r.push.enabled:
         raise HTTPException(409, "push_not_configured")
-    title, body = "Test Notification", "Keel notifications are working."
+    title, body = "Test Notification", "Prior notifications are working."
     try:   # S-35: one overall budget, like the runner's _deliver_alert
         res = await asyncio.wait_for(r.push.send_all(
             {"title": title, "body": body, "type": "test", "url": "/alerts",

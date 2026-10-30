@@ -2,7 +2,7 @@ import { useId, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import WakingBanner from '../components/WakingBanner.jsx';
-import KeelLogo from '../components/KeelLogo.jsx';
+import PriorLogo from '../components/PriorLogo.jsx';
 import CodeInput from '../components/CodeInput.jsx';
 import { IconEye, IconEyeOff } from '../components/Icons.jsx';
 import { isMockMode } from '../services/api.js';
@@ -77,7 +77,7 @@ export default function Login() {
       <WakingBanner />
       <div className="login-card card">
         <div className="login-brand">
-          <KeelLogo size={48} />
+          <PriorLogo size={48} />
           <h1 className="login-title">{APP_NAME}</h1>
           <p className="login-tagline" data-testid="login-tagline">
             {TAGLINE_LEAD} <span className="login-tagline-accent">{TAGLINE_ACCENT}</span>

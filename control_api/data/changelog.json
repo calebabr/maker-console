@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.9.1",
+    "date": "2026-10-29",
+    "items": [
+      "The app is now called Prior, with a new logo.",
+      "Your theme and text size carry over. If you installed it on your iPhone Home Screen, delete the old icon and add it again to get the new name and icon."
+    ]
+  },
+  {
     "version": "0.9.0",
     "date": "2026-10-15",
     "items": [

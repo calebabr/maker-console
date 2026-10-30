@@ -131,7 +131,7 @@ jobs:
           python3 scripts/release_gate.py "${args[@]}"
 
   approve:
-    # The owner approves in Keel (Server page) with fresh 2FA. The run waits at most 30 minutes.
+    # The owner approves in Prior (Server page) with fresh 2FA. The run waits at most 30 minutes.
     needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -155,7 +155,7 @@ jobs:
           python3 scripts/changelog.py --to "$SHA" --version "v${VERSION}" --max-chars 2800 > notes.md
           ID="$(python3 scripts/release_ctl.py register --version "$VERSION" --commit "$SHA" --summary-file notes.md --ci "green: python, frontend, e2e, gitleaks, semgrep, commit-messages")"
           echo "id=$ID" >> "$GITHUB_OUTPUT"
-          echo "Registered pending release v${VERSION}. Open Keel -> Server -> Pending release and approve with 2FA."
+          echo "Registered pending release v${VERSION}. Open Prior -> Server -> Pending release and approve with 2FA."
       - name: Wait for approval (30 minutes, then fail)
         env:
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
@@ -320,7 +320,7 @@ jobs:
           [ -n "$NTFY_TOPIC" ] || { echo "::warning::NTFY_TOPIC is not set; no notification sent"; exit 0; }
           MSG="Release v${VERSION} healthy. Backend verified; new leader holds the lease."
           [ "$FRONTEND" = "true" ] || MSG="${MSG} Frontend NOT deployed (main moved on): re-run the release."
-          curl --fail --silent --show-error --max-time 15 --proto '=https' -H "Title: Keel release" -d "$MSG" "https://ntfy.sh/${NTFY_TOPIC}" -o /dev/null \
+          curl --fail --silent --show-error --max-time 15 --proto '=https' -H "Title: Prior release" -d "$MSG" "https://ntfy.sh/${NTFY_TOPIC}" -o /dev/null \
             || echo "::warning::ntfy notification failed"
       - name: Tag the release and publish the notes
         env:
@@ -347,6 +347,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           [ -n "$NTFY_TOPIC" ] || { echo "::warning::NTFY_TOPIC is not set; no notification sent"; exit 0; }
-          curl --fail --silent --show-error --max-time 15 --proto '=https' -H "Title: Keel release STOPPED" -H "Priority: high" \
+          curl --fail --silent --show-error --max-time 15 --proto '=https' -H "Title: Prior release STOPPED" -H "Priority: high" \
             -d "A release stopped or was refused. Nothing further was deployed. Details: ${RUN_URL}" "https://ntfy.sh/${NTFY_TOPIC}" -o /dev/null \
             || echo "::warning::ntfy notification failed"

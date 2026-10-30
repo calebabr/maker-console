@@ -1,4 +1,4 @@
-/* Keel: calm instrument-panel styling. Colors come from utils/theme.js (CSS variables set on :root from the
+/* Prior: calm instrument-panel styling. Colors come from utils/theme.js (CSS variables set on :root from the
    chosen theme: midnight | teal | graphite). This :root block is the Midnight Slate fallback used before JS runs.
    Type is rem-based so the Small / Normal / Large text-size setting (root font-size 14 / 16 / 18 px) scales it. */
 

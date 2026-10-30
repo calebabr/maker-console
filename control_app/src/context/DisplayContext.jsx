@@ -4,7 +4,7 @@ import { applyTextSize, applyTheme, readTextSize, readTheme } from '../utils/the
 /**
  * Per-device display preferences: colour theme and text size.
  *   const { theme, setTheme, textSize, setTextSize } = useDisplayPrefs();
- * Stored in localStorage (keel.theme / keel.textSize), applied to :root immediately. Not a bot setting,
+ * Stored in localStorage (prior.theme / prior.textSize), applied to :root immediately. Not a bot setting,
  * so there is no 2FA and nothing goes to the server.
  */
 const DisplayContext = createContext(null);

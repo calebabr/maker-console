@@ -5,7 +5,7 @@ import '../styles/overview.css';
 
 /**
  * "Since You Last Checked" (item 30): new fills, markets settled and the P&L change since this device's
- * last visit (localStorage keel.lastVisit). Read-only. The last-visit time is written when the page is left
+ * last visit (localStorage prior.lastVisit). Read-only. The last-visit time is written when the page is left
  * or hidden, and when the card is dismissed. First visit: writes now, shows nothing. Hidden when nothing
  * changed or the request fails.
  */

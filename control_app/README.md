@@ -1,6 +1,6 @@
-# Keel (control app)
+# Prior (control app)
 
-Keel is the phone app (installable PWA) for the Kalshi maker bot. It's a Vite + React 18 static site deployed to Vercel, and it talks only to the control API. It never calls Kalshi.
+Prior is the phone app (installable PWA) for the Kalshi maker bot. It's a Vite + React 18 static site deployed to Vercel, and it talks only to the control API. It never calls Kalshi.
 
 ## Develop
 

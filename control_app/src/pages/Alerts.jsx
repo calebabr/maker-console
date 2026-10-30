@@ -291,7 +291,7 @@ export default function Alerts() {
       <div className="page-head">
         <h1>Alerts</h1>
       </div>
-      <p className="hint">Everything Keel has sent you, newest first. Choose what gets sent below.</p>
+      <p className="hint">Everything Prior has sent you, newest first. Choose what gets sent below.</p>
       <AlertSettings />
       <AlertHistory />
     </div>
