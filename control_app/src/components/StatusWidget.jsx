@@ -5,6 +5,7 @@ import { StatusRing, pnlClass, useNow } from './StatusCard.jsx';
 import { useMediaQuery } from '../hooks/useMediaQuery.js';
 import { formatMoney, formatUntil } from '../utils/format.js';
 import { isRunning, overallState, ringProgress, runTimes } from '../utils/overview.js';
+import { todayKind } from '../utils/pnlScopes.js';
 import '../styles/overview.css';
 
 /** Tablets and desktops only. Phones keep the card plus the header Stop (no floating widget). */
@@ -74,7 +75,7 @@ export default function StatusWidget({ status, cardRef }) {
         </span>
         <span className={`sw-pnl ${pnlClass(today)}`}>
           <span className="sw-pnl-label">Today</span>
-          {typeof today === 'number' ? formatMoney(today, { sign: true }) : 'None yet'}
+          {todayKind(status) === 'unavailable' ? 'Unavailable' : typeof today === 'number' && todayKind(status) === 'value' ? formatMoney(today, { sign: true }) : 'None yet'}
         </span>
       </button>
       {open && (

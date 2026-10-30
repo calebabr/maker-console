@@ -1,6 +1,11 @@
 import '@testing-library/jest-dom/vitest';
-import { afterEach } from 'vitest';
-import { cleanup } from '@testing-library/react';
+import { afterEach, vi } from 'vitest';
+import { cleanup, configure } from '@testing-library/react';
+
+// Default 1 s findBy/waitFor starves when 40 jsdom files run in parallel; a longer cap only affects failing waits.
+configure({ asyncUtilTimeout: 5000 });
+// CPU-heavy tests (terminology property sweep, full-page renders) exceed the 5 s default under parallel load.
+vi.setConfig({ testTimeout: 30000 });
 
 afterEach(() => {
   cleanup();

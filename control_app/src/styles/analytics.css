@@ -161,3 +161,18 @@
 .bar-legend li { display: inline-flex; align-items: center; gap: 6px; }
 .bar-legend i { display: inline-block; flex-shrink: 0; }
 
+
+/* UI-1a: six Analytics sections (two rows of three on a phone), ledger, scorecard, arbitrage sets */
+.segmented.an-tabs-6 { grid-template-columns: repeat(3, 1fr); }
+.tbl-wrap { overflow-x: auto; max-width: 100%; }
+.tbl-wrap table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+.tbl-wrap th, .tbl-wrap td { text-align: right; padding: 6px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tbl-wrap th:first-child, .tbl-wrap td:first-child { text-align: left; }
+.recon { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
+.recon.flag { border-top-color: var(--danger); }
+.na { color: var(--muted); font-style: italic; }
+.set-row summary { cursor: pointer; display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; padding: 8px 0; border-bottom: 1px solid var(--border); list-style: none; }
+.set-row summary::-webkit-details-marker { display: none; }
+.set-row .legs { padding: 4px 0 8px 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.set-row .legs div { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.dup-note { margin-top: 8px; }

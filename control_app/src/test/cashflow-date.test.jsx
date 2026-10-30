@@ -37,7 +37,7 @@ async function submit(user) {
 }
 
 describe('cash flow date', () => {
-  it('omits ts when the time is left alone', async () => {
+  it('always sends ts (the date is required), defaulting to now', async () => {
     const user = userEvent.setup();
     const calls = setup();
     renderApp('/account');
@@ -46,7 +46,8 @@ describe('cash flow date', () => {
     await submit(user);
     await screen.findByText('Cash Flow Recorded');
     const post = calls.find((c) => c.key === 'POST /api/cash-flows');
-    expect(post.body).toEqual({ kind: 'deposit', amount: 50 });
+    expect(post.body).toMatchObject({ kind: 'deposit', amount: 50 });
+    expect(Number.isNaN(Date.parse(post.body.ts))).toBe(false);
   });
 
   it('sends an ISO ts for a past date and shows it in the confirm text', async () => {

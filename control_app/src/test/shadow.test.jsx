@@ -53,7 +53,7 @@ describe('Shadow estimate page', () => {
     base(SUMMARY({ status: { ...SUMMARY().status, ceiling_full: true, held_cost: 248.51, ceiling: 75 } }));
     renderApp('/shadow');
     const note = await screen.findByTestId('ceiling-full');
-    expect(note).toHaveTextContent('Shadow is not estimating: its simulated ceiling is full.');
+    expect(note).toHaveTextContent('Shadow is not estimating: the simulated open-position ceiling is full; it clears as positions settle');
     expect(note).toHaveTextContent('$248.51');
     expect(screen.queryByTestId('headline-block')).toBeNull();
     expect(screen.queryByTestId('shadow-band')).toBeNull();

@@ -4,6 +4,9 @@ import Card from '../components/Card.jsx';
 import HelpIcon from '../components/HelpIcon.jsx';
 import QueuePosition from '../components/QueuePosition.jsx';
 import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
+import WinRateByStrategy from '../components/analytics/WinRateByStrategy.jsx';
+import LedgerView from '../components/analytics/LedgerView.jsx';
+import ScorecardView from '../components/analytics/ScorecardView.jsx';
 import PnlCurve from '../components/analytics/PnlCurve.jsx';
 import EdgeBreakdown from '../components/analytics/EdgeBreakdown.jsx';
 import FillQualityTrend from '../components/analytics/FillQualityTrend.jsx';
@@ -35,6 +38,8 @@ export const TABS = [
   { key: 'edge', label: 'Edge' },
   { key: 'execution', label: 'Execution' },
   { key: 'trades', label: 'Trades' },
+  { key: 'ledger', label: 'Ledger' },
+  { key: 'scorecard', label: 'Scorecard' },
 ];
 
 const KINDS = [
@@ -47,7 +52,7 @@ function cap(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
 }
 
-function Totals({ t }) {
+function Totals({ t, pooled = true }) {
   return (
     <dl className="stats an-totals" data-testid="totals">
       <div>
@@ -64,13 +69,15 @@ function Totals({ t }) {
         </dt>
         <dd className={signCls(t.roi)}>{formatPct(t.roi, { digits: 1 })}</dd>
       </div>
-      <div>
-        <dt>
-          Win Rate
-          <HelpIcon term="win-rate" />
-        </dt>
-        <dd>{rate(t.win_rate)}</dd>
-      </div>
+      {pooled && (
+        <div>
+          <dt>
+            Win Rate
+            <HelpIcon term="win-rate" />
+          </dt>
+          <dd>{rate(t.win_rate)}</dd>
+        </div>
+      )}
       <div>
         <dt>
           Max Drawdown
@@ -89,8 +96,9 @@ function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days }) {
     <>
       {!empty && <EdgeHolding summary={s} />}
       <Card title="Totals" subtitle="Bot trades only.">
-        <Totals t={totals} />
-        <PnlScope id="analytics" />
+        <Totals t={totals} pooled={!s.win_rate_by_strategy} />
+        <WinRateByStrategy wr={s.win_rate_by_strategy} />
+        <PnlScope id="analytics" ctx={{ tz: s.tz_used }} />
         <p className="hint">
           {num(totals.settled_fills)} settled fills
           <HelpIcon term="settlement" /> · {num(totals.open_fills)} still open
@@ -139,7 +147,7 @@ function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days }) {
             ))}
           </div>
           <PnlCurve points={curve} kind={hasSplit ? kind : 'all'} />
-          <PnlScope id="analytics" />
+          <PnlScope id="analytics" ctx={{ tz: s.tz_used }} />
           <p className="hint">
             Maker = resting bids that got filled; taker = arbitrage legs
             <HelpIcon term="maker-taker" />.
@@ -324,7 +332,7 @@ export default function Analytics() {
         )}
       </div>
 
-      <div className="segmented seg-4 compact an-tabs" role="tablist" aria-label="Analytics sections">
+      <div className="segmented compact an-tabs an-tabs-6" role="tablist" aria-label="Analytics sections">
         {TABS.map((t) => (
           <button
             key={t.key}
@@ -351,6 +359,8 @@ export default function Analytics() {
       )}
       {s && tab === 'edge' && (empty ? <p className="muted">No settled trades yet.</p> : <EdgeTab s={s} />)}
       {s && tab === 'execution' && <ExecutionTab s={s} />}
+      {tab === 'ledger' && <LedgerView days={days} env={env} />}
+      {tab === 'scorecard' && <ScorecardView days={days} env={env} />}
       {tab === 'trades' && (
         <>
           <Card

@@ -132,7 +132,7 @@ describe('Analytics, Account, Arbitrage', () => {
     renderApp('/analytics');
     const totals = await screen.findByTestId('totals');
     expect(totals.parentElement.querySelector('[data-testid="scope-analytics"]')).toHaveTextContent(
-      'Realized, maker + arbitrage, by settlement date (UTC)',
+      `Realized, maker + arbitrage, by settlement date (${Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g, ' ')})`,
     );
   });
 

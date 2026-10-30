@@ -411,7 +411,12 @@ export const api = {
   // env omitted -> the server uses the current bot mode; 'all' = demo + live.
   // Both take an optional AbortSignal (S-28: cancel superseded requests).
   analyticsSummary: ({ days = 30, env } = {}, { signal } = {}) =>
-    request('GET', `/api/analytics/summary${query({ days, env })}`, { signal }),
+    request('GET', `/api/analytics/summary${query({ days, env, tz: viewerTimeZone() })}`, { signal }),
+  // UI-1a: the honest ledger (per-strategy rows + reconciliation) and the scorecard. Read-only, no 2FA.
+  analyticsLedger: ({ days = 30, env } = {}, { signal } = {}) =>
+    request('GET', `/api/analytics/ledger${query({ days, env, tz: viewerTimeZone() })}`, { signal }),
+  analyticsScorecard: ({ days = 7, env } = {}, { signal } = {}) =>
+    request('GET', `/api/analytics/scorecard${query({ days, env })}`, { signal }),
   // params: days, env, series, side, kind, status, band, cell, result, limit, offset
   analyticsTrades: (params = {}, { signal } = {}) =>
     request('GET', `/api/analytics/trades${query(params)}`, { signal }),

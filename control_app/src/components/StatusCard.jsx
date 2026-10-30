@@ -6,7 +6,7 @@ import HeartbeatStrip from './HeartbeatStrip.jsx';
 import StopButton from './StopButton.jsx';
 import PnlScope from './PnlScope.jsx';
 import PnlCombined from './PnlCombined.jsx';
-import { TODAY_EMPTY } from '../utils/pnlScopes.js';
+import { TODAY_EMPTY, TODAY_UNAVAILABLE, todayKind } from '../utils/pnlScopes.js';
 import { IconLock } from './Icons.jsx';
 import { formatAgo, formatMoney, formatUntil } from '../utils/format.js';
 import { abnormalities, isRunning, overallState, ringProgress, runTimes } from '../utils/overview.js';
@@ -143,7 +143,9 @@ const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRun
       <dl className="ov-tiles" data-testid="status-tiles">
         <div>
           <dt>Today's P&amp;L</dt>
-          {status && !isNum(today) ? (
+          {status && todayKind(status) === 'unavailable' ? (
+            <dd className="ov-empty" data-testid="today-unavailable">{TODAY_UNAVAILABLE}</dd>
+          ) : status && (todayKind(status) === 'none' || !isNum(today)) ? (
             <dd className="ov-empty" data-testid="today-empty">{TODAY_EMPTY}</dd>
           ) : (
             <dd className={pnlClass(today)}>{formatMoney(today, { sign: true })}</dd>

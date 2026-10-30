@@ -407,6 +407,23 @@ function daysOf(q) {
 
 const inEnv = (env) => (f) => env === 'all' || f.env === env;
 
+const ARB_OUTCOMES0 = () => ({ filled: 0, partial: 0, error: 0, skipped: 0, log_only: 0 });
+export function mockArbSummary(arbIn, nowMs) {
+  const sets = arbIn.reduce((a, d) => a + d.executed, 0);
+  const sightings = arbIn.reduce((a, d) => a + d.opportunities, 0);
+  const win = (n) => ({
+    since: iso(nowMs - n * DAY), sets: n === 1 ? 0 : sets, events: n === 1 ? 0 : sets, sightings: n === 1 ? 0 : sightings,
+    by_outcome: { ...ARB_OUTCOMES0(), filled: n === 1 ? 0 : sets, log_only: n === 1 ? 0 : Math.max(0, sightings - sets) },
+    skipped_by_rule: {},
+  });
+  return {
+    tz: 'UTC', source: 'log',
+    today: win(1), period: { label: 'period', ...win(30), until: iso(nowMs) },
+    per_set: null,
+    since_restart: { label: 'Since restart', since_utc: iso(nowMs - 3 * 3600 * 1000), scans: 0, sightings: 0 },
+  };
+}
+
 export function analyticsSummary(q, { mode = 'demo', nowMs = Date.now() } = {}) {
   const days = daysOf(q);
   const env = envOf(q, mode);
@@ -528,8 +545,25 @@ export function analyticsSummary(q, { mode = 'demo', nowMs = Date.now() } = {}) 
   const takerPnl = settled.filter((f) => f.kind === 'taker').reduce((s, f) => s + f.pnl, 0);
   const executed = arbIn.reduce((s, a) => s + a.executed, 0);
 
+  const tzUsed = typeof q.get === 'function' && q.get('tz') ? q.get('tz') : 'UTC';
+  const makerSettled = maker.length;
+  const makerWins = maker.filter((f) => f.pnl > 0).length;
+  const mw = wilson(makerWins, makerSettled);
   return [200, {
     env, days, generated_utc: iso(nowMs), truncated: false,
+    tz_used: tzUsed,
+    win_rate_by_strategy: {
+      maker: {
+        unit: 'fill', n: makerSettled, wins: makerWins, losses: makerSettled - makerWins,
+        win_rate: makerSettled ? r4(makerWins / makerSettled) : null,
+        ci_low: mw[0], ci_high: mw[1], method: 'wilson95',
+      },
+      arb: { unit: 'set', n: 0, wins: 0, losses: 0, win_rate: null, ci_low: null, ci_high: null, method: 'wilson95' },
+    },
+    deprecated: { 'totals.win_rate': 'pools maker fills and arbitrage legs; use win_rate_by_strategy' },
+    arb_summary: mockArbSummary(arbIn, nowMs),
+    arb_sets: [],
+    arb_sets_total: 0,
     totals: {
       settled_fills: settled.length,
       contracts: settled.reduce((s, f) => s + f.count, 0),
@@ -754,4 +788,46 @@ export function mockTradeNote(method, fillId, body) {
 /** Rows for GET /api/analytics/trades?source=all|you (bot rows get source "bot"). */
 export function mockManualTradeRows(nowMs = Date.now()) {
   return myRows(nowMs).map((r) => ({ ...r, note: MY_NOTES.get(r.fill_id) || null }));
+}
+
+const ZERO = { fills: 0, contracts: 0, cost: 0, fees: 0, settled_fills: 0, wins: 0, losses: 0, settled_cost: 0, realized_pnl: 0, open_fills: 0, open_cost: 0, roi_on_settled: null };
+
+/** GET /api/analytics/ledger (UI-1a shape). Small fixed numbers: the mock is for the UI, not the maths. */
+export function mockLedger(q, mode = 'demo') {
+  const row = (strategy, extra) => ({ strategy, unit: strategy === 'arb' ? 'set' : 'fill', ...ZERO, ...extra });
+  const maker = row('maker', { fills: 12, contracts: 60, cost: 49.2, fees: 0.8, settled_fills: 10, wins: 9, losses: 1, settled_cost: 41, realized_pnl: 1.9, open_fills: 2, open_cost: 8.2, roi_on_settled: 0.046 });
+  const arb = row('arb', { fills: 2, contracts: 10, cost: 9.5, fees: 0.3, settled_fills: 2, wins: 2, settled_cost: 9.5, realized_pnl: 0.35 });
+  const you = row('you');
+  const sum = (k) => Math.round((maker[k] + arb[k] + you[k]) * 100) / 100;
+  return {
+    tz_used: q.get('tz') || 'UTC', attribution: 'fill_day',
+    env: q.get('env') || mode,
+    days: 30, strategies: [maker, arb, you],
+    total: { ...ZERO, fills: sum('fills'), cost: sum('cost'), fees: sum('fees'), realized_pnl: sum('realized_pnl'), open_cost: sum('open_cost') },
+    reconciliation: {
+      tolerance: 0.1, flag: false, residual: 0.02, equity_start: 100, equity_end: 102.37, equity_change: 2.37, net_flows: 0,
+      realized_pnl: 2.25, fee_timing: 0.1, expected_equity_change: 2.35, start_exact: true, notes: [],
+    },
+    netting: { tickers: 0, pairs: 0, pair_cost: 0, pair_value: 0, pair_gain: 0, verified: false },
+    notes: [],
+  };
+}
+
+/** GET /api/analytics/scorecard (UI-1a shape). */
+export function mockScorecard(q, mode = 'demo') {
+  return {
+    env: q.get('env') || mode, label: 'last 7 days',
+    passes: { n: 480, ok: 476, ok_pct: 0.9917, errors: 4, median_duration_s: 3.2, max_duration_s: 21 },
+    order_errors: { value: null, error_alerts: 1 },
+    churn: { quotes: 300, cancels: 120, cancels_per_quote: 0.4 },
+    cap_bindings: { maker: null, arbitrage_gate: {} },
+    fill_to_settlement: { due_fills: 10, settled: 9, unsettled: 1, rate: 0.9, grace_hours: 24 },
+    open_past_expected_settlement: { count: 0, cost: 0, grace_hours: 24, close_unknown: 0 },
+    reconciliation: { residual: 0.02, tolerance: 0.1, flag: false },
+    alerts_by_type: {},
+    arbitrage_per_set: { legged: 0, complete: 2, skipped_by_gate: 0, skipped_by_rule: {}, log_only: 5, settled_sets: 2, set_wins: 2, distinct_sets_logged: 7 },
+    stop_start_log: { stops: 1, stop_failures: 0, starts: 2 },
+    return: { label: 'demo, indicative only', sample_settled_fills: 12, realized_pnl: 2.25, cost: 50.5, roi: 0.0446 },
+    notes: ['Order-error counters and maker cap bindings are not stored yet.'],
+  };
 }

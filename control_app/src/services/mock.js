@@ -8,7 +8,7 @@
 //   - reusing the previous 2FA code     -> 403 2fa_invalid (codes are single-use)
 //   - any other 6-digit code            -> accepted
 
-import { MOCK_CELLS, analyticsSummary, analyticsTrades, analyticsTradesCsv, mockMyTrades, mockTradeNote } from './mockAnalytics.js';
+import { MOCK_CELLS, mockLedger, mockScorecard, mockArbSummary, analyticsSummary, analyticsTrades, analyticsTradesCsv, mockMyTrades, mockTradeNote } from './mockAnalytics.js';
 import { decorateActivity, resetMockUx, uxRoute } from './mockUx.js';
 
 const SERIES = ['KXDEMOA', 'KXDEMOB', 'KXDEMOC', 'KXDEMOD', 'KXDEMOE', 'KXDEMOF'];
@@ -60,6 +60,7 @@ const CLOUD_SCHEMA = {
   keepalive_minutes: { type: 'integer', unit: 'minutes', min: 1, max: 14, help: 'Self-ping interval (service calls its own /healthz).' },
   pinger_minutes: { type: 'integer', unit: 'minutes', min: 1, max: 14, help: 'External cron-job.org job calling POST /api/tick.' },
   pinger_enabled: { type: 'bool', help: 'Enable the external cron-job.org pinger.' },
+  shadow_capital: { type: 'number', unit: 'USD', min: 50, max: 1000, help: 'Size of the simulated account. Dollar P&L and the ceiling scale with it; rates and ROI do not.' },
   shadow_enabled: { type: 'bool', label: 'Shadow Estimate', help: 'Simulate the strategy from public market data. No orders are placed.' },
   silent_alert_minutes: { type: 'integer', unit: 'minutes', min: 15, max: 240, help: 'Send an ntfy alert if no heartbeat for this long.' },
 };
@@ -156,8 +157,10 @@ function arbResponse() {
       live_allowed: S.live_allowed,
       scans: a.scans,
       found: a.opps.length,
+      since_restart_utc: iso(now() - 3 * 60 * MIN),
     },
     pnl: null,
+    arb_summary: mockArbSummary([], now()),
     expectation: 'Bracket arbitrage is rare and small at a small balance. Opportunities last seconds, so a 15-second scan catches only some of them. The maker strategy is the main earner.',
   };
 }
@@ -258,7 +261,7 @@ function initialState() {
     journal: seedJournal(),
     summary,
     report: reportText(summary),
-    cloud: { keepalive_minutes: 10, pinger_minutes: 5, pinger_enabled: true, silent_alert_minutes: 30, shadow_enabled: true },
+    cloud: { keepalive_minutes: 10, pinger_minutes: 5, pinger_enabled: true, silent_alert_minutes: 30, shadow_enabled: true, shadow_capital: 150 },
     periods: [],
     cashFlows: [],
     pinger: { configured: true, job_id: 5813377, synced: true, last_sync_utc: iso(now() - 2 * 60 * MIN), error: null },
@@ -448,6 +451,7 @@ function status() {
     arb: { state: arbState(), last_scan_utc: arbState() !== 'stopped' ? iso(now() - 9 * 1000) : null },
     // UX contract section 5 additions (read-only).
     pnl_today: { maker: 1.4, arb: 0.35, you: -0.8, bot: 1.75, total: 0.95 },
+    pnl_today_state: 'settled',
     pnl_today_tz: 'UTC',
     pnl_today_since: iso(new Date(new Date(now()).setUTCHours(0, 0, 0, 0))),
     recent_passes: recentPasses(),
@@ -726,6 +730,10 @@ async function route(method, url, headers, body) {
       config: publicConfig(),
       schema: CONFIG_SCHEMA,
       ceilings: { run_budget: 500, max_open_frac: 0.5, poll_minutes: 14 },
+      shadow_capital: {
+        value: S.cloud.shadow_capital, default: 150, min: 50, max: 1000, unit: 'USD', editable: true,
+        help: CLOUD_SCHEMA.shadow_capital.help, write_via: 'PUT /api/cloud', needs_fresh_2fa: true,
+      },
     });
   }
   if (method === 'PUT' && p === '/api/config') {
@@ -798,6 +806,8 @@ async function route(method, url, headers, body) {
     const [st, data] = analyticsSummary(q, { mode: S.mode });
     return reply(st, data);
   }
+  if (method === 'GET' && p === '/api/analytics/ledger') return reply(200, mockLedger(q, S.mode));
+  if (method === 'GET' && p === '/api/analytics/scorecard') return reply(200, mockScorecard(q, S.mode));
   if (method === 'GET' && p === '/api/analytics/trades.csv') {
     const [st, body, hdrs] = analyticsTradesCsv(q, { mode: S.mode });
     return st === 200 ? replyText(st, body, hdrs) : reply(st, body);
@@ -868,6 +878,8 @@ async function route(method, url, headers, body) {
       if (!sc) errs.push(`unknown field ${k}`);
       else if (sc.type === 'bool') {
         if (typeof v !== 'boolean') errs.push(`${k} must be true/false`);
+      } else if (k === 'shadow_capital') {
+        if (typeof v !== 'number' || !Number.isFinite(v) || v < sc.min || v > sc.max) errs.push(`${k} must be a number between ${sc.min} and ${sc.max}`);
       } else if (!Number.isInteger(v) || v < sc.min || v > sc.max) {
         errs.push(`${k} must be an integer between ${sc.min} and ${sc.max}`);
       }
@@ -908,12 +920,18 @@ async function route(method, url, headers, body) {
     if (bad) return bad;
     const b = body || {};
     if (!['deposit', 'withdrawal'].includes(b.kind) || !(b.amount > 0 && b.amount <= 100000)) {
-      return reply(400, { detail: ['kind must be deposit or withdrawal and amount between 0 and 100000'] });
+      return reply(422, { detail: ['kind must be deposit or withdrawal and amount between 0 and 100000'] });
+    }
+    if (!b.ts || Number.isNaN(Date.parse(b.ts))) return reply(422, { detail: ['ts (the date it happened) is required'] });
+    if (Date.parse(b.ts) > now() + MIN) return reply(422, { detail: ['ts must not be in the future'] });
+    const day = String(b.ts).slice(0, 10);
+    if (!b.confirm_duplicate && S.cashFlows.some((f) => f.kind === b.kind && f.amount === b.amount && String(f.ts).slice(0, 10) === day)) {
+      return reply(409, { detail: ['duplicate: same type, amount and date already recorded'] });
     }
     const id = `cf${S.cashFlows.length + 1}`;
-    S.cashFlows.push({ id, ts: iso(now()), kind: b.kind, amount: b.amount, note: b.note || null, created_by: 'owner' });
+    S.cashFlows.push({ id, ts: iso(Date.parse(b.ts)), kind: b.kind, amount: b.amount, note: b.note || null, created_by: 'owner' });
     audit('cash_flow.create', true, { kind: b.kind, amount: b.amount });
-    return reply(200, { ...periodsResponse(), created: id });
+    return reply(200, { ...periodsResponse(), created: id, warnings: [] });
   }
   if (method === 'DELETE' && p.startsWith('/api/cash-flows/')) {
     const bad = check2fa(headers);

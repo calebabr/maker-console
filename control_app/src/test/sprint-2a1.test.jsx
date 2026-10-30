@@ -93,7 +93,7 @@ describe('Periods on the Account page', () => {
     await user.click(screen.getByRole('button', { name: /add entry/i }));
     await enterCode(user, /add cash flow/i);
     await waitFor(() => expect(calls.some((c) => c.key === 'POST /api/cash-flows')).toBe(true));
-    expect(calls.find((c) => c.key === 'POST /api/cash-flows').body).toEqual({ kind: 'deposit', amount: 25 });
+    expect(calls.find((c) => c.key === 'POST /api/cash-flows').body).toMatchObject({ kind: 'deposit', amount: 25 });
 
     await user.click(await screen.findByRole('button', { name: /delete deposit/i }));
     await enterCode(user, /^delete$/i);

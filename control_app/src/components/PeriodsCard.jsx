@@ -77,7 +77,7 @@ export function PeriodSummary({ summary }) {
 }
 
 export default function PeriodsCard() {
-  const { twoFactor, notify } = useDialogs();
+  const { twoFactor, notify, confirm } = useDialogs();
   const periods = useResource(() => api.getPeriods(), '/api/periods');
   const [selected, setSelected] = useState('');
   const [summary, setSummary] = useState({ data: null, error: null, loading: false });
@@ -115,7 +115,7 @@ export default function PeriodsCard() {
     loadSummary();
   }, [loadSummary]);
 
-  async function run(label, title, message, action, okTitle) {
+  async function run(label, title, message, action, okTitle, { onConflict } = {}) {
     setBusy(label);
     setFormError(null);
     try {
@@ -124,9 +124,16 @@ export default function PeriodsCard() {
         notify({ kind: 'ok', title: okTitle });
         periods.setData(r);
         await loadSummary();
+        if (r.warnings && r.warnings.length) {
+          notify({ kind: 'info', title: 'Check this entry', text: r.warnings.map((w) => w.message).join(' ') });
+        }
         return r;
       }
     } catch (err) {
+      if (err && err.status === 409 && onConflict) {
+        await onConflict(err);
+        return null;
+      }
       setFormError(err);
       notify({ kind: 'error', title: `${label} failed`, text: err.message, details: err.details });
     } finally {
@@ -153,33 +160,66 @@ export default function PeriodsCard() {
     }
   }
 
-  // Only a time the owner changed is sent; otherwise the server stamps "now" as before.
-  const chosen = whenTouched && flowWhen ? new Date(flowWhen) : null;
-  const chosenValid = chosen && !Number.isNaN(chosen.getTime());
-  const futureTime = !!chosenValid && chosen.getTime() > Date.now();
+  // The date is required (the server refuses an entry without one): it defaults to now and can be changed.
+  const chosen = flowWhen ? new Date(flowWhen) : null;
+  const chosenValid = !!chosen && !Number.isNaN(chosen.getTime());
+  const futureTime = chosenValid && chosen.getTime() > Date.now();
   const curPeriod = list.find((p) => p.current);
-  const inCurrent = !!chosenValid && !futureTime && !!curPeriod && (!curPeriod.started_at || chosen.getTime() >= new Date(curPeriod.started_at).getTime());
+  const inCurrent = chosenValid && !futureTime && !!curPeriod && (!curPeriod.started_at || chosen.getTime() >= new Date(curPeriod.started_at).getTime());
+
+  function flowMessage(amt) {
+    return (
+      <p>
+        {kind === 'deposit' ? 'Money added to' : 'Money taken out of'} the account: <strong>{formatMoney(amt)}</strong> dated{' '}
+        <strong>{dateTime(chosen.toISOString())}</strong>. It is recorded for context and never changes P&amp;L.
+      </p>
+    );
+  }
+
+  async function submitFlow(body, amt) {
+    return run(
+      'Add Cash Flow',
+      `Record a ${kind}?`,
+      flowMessage(amt),
+      (code) => api.addCashFlow(body, code),
+      'Cash Flow Recorded',
+      {
+        // 409: an entry with the same kind, amount and day exists. Ask explicitly, then send confirm_duplicate with a fresh code.
+        onConflict: async (err) => {
+          const ok = await confirm({
+            title: 'Possible duplicate',
+            message: (
+              <>
+                <p>{err.details.join(' ') || 'An entry with the same type, amount and date already exists.'}</p>
+                <p>Add it anyway?</p>
+              </>
+            ),
+            confirmLabel: 'Add anyway',
+          });
+          if (ok) {
+            const again = await submitFlow({ ...body, confirm_duplicate: true }, amt);
+            if (again) resetFlow();
+          }
+        },
+      },
+    );
+  }
+
+  function resetFlow() {
+    setAmount('');
+    setFlowNote('');
+    setWhenTouched(false);
+    setFlowWhen(localInput(new Date()));
+  }
 
   async function addFlow(e) {
     e.preventDefault();
     const amt = Number(amount);
-    if (!(amt > 0) || busy || futureTime) return;
-    const body = { kind, amount: amt };
-    if (chosenValid) body.ts = chosen.toISOString();
+    if (!(amt > 0) || busy || futureTime || !chosenValid) return;
+    const body = { kind, amount: amt, ts: chosen.toISOString() };
     if (flowNote.trim()) body.note = flowNote.trim();
-    const r = await run(
-      'Add Cash Flow',
-      `Record a ${kind}?`,
-      <p>{kind === 'deposit' ? 'Money added to' : 'Money taken out of'} the account: <strong>{formatMoney(amt)}</strong>{chosenValid ? <> dated <strong>{dateTime(chosen.toISOString())}</strong></> : null}. It is recorded for context and never changes P&amp;L.</p>,
-      (code) => api.addCashFlow(body, code),
-      'Cash Flow Recorded',
-    );
-    if (r) {
-      setAmount('');
-      setFlowNote('');
-      setWhenTouched(false);
-      setFlowWhen(localInput(new Date()));
-    }
+    const r = await submitFlow(body, amt);
+    if (r) resetFlow();
   }
 
   async function removeFlow(f) {
@@ -276,6 +316,7 @@ export default function PeriodsCard() {
           <input
             id="flow-when"
             type="datetime-local"
+            required
             value={flowWhen}
             max={localInput(new Date())}
             onChange={(e) => {
@@ -284,11 +325,17 @@ export default function PeriodsCard() {
             }}
           />
           <p className="hint">Set the real date for past deposits</p>
+          {formError && formError.status === 422 && (
+            <div className="notice notice-error" role="alert" data-testid="flow-422">
+              <strong>Not recorded.</strong>
+              <ul className="detail-list">{formError.details.map((d, i) => <li key={i}>{d}</li>)}</ul>
+            </div>
+          )}
           {futureTime && <p className="notice notice-error" role="alert" data-testid="flow-when-future">That time is in the future. Pick now or an earlier time.</p>}
           {inCurrent && whenTouched && <p className="hint" data-testid="flow-when-current">This changes the capital base of the current period</p>}
           <label htmlFor="flow-note">Note (Optional)</label>
           <input id="flow-note" type="text" maxLength={200} value={flowNote} onChange={(e) => setFlowNote(e.target.value)} />
-          <button type="submit" className="btn block" disabled={!(Number(amount) > 0) || !!busy || futureTime}>
+          <button type="submit" className="btn block" disabled={!(Number(amount) > 0) || !!busy || futureTime || !chosenValid}>
             {busy === 'Add Cash Flow' ? 'Saving…' : <><IconLock /> Add Entry</>}
           </button>
         </form>
