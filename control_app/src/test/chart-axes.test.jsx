@@ -1,3 +1,4 @@
+import userEvent from '@testing-library/user-event';
 // Axis labels + units on every chart (TASKS backlog, owner request 2026-10-13).
 import { describe, expect, it } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
@@ -119,6 +120,7 @@ describe('Overview balance chart', () => {
     const snaps = DAYS.map((d, i) => ({ ts: `${d}T12:00:00Z`, cash: 200 + i, exposure: i === 30 ? 42.73 : 36.99 }));
     stubApi({ 'GET /api/status': STATUS, 'GET /api/history': { snapshots: snaps } });
     renderApp('/');
+    await userEvent.setup().click(await screen.findByRole('button', { name: /Balance, 30 Days/ }));
     const root = await screen.findByTestId('equity-chart');
     expect(title(root, 'y')).toBe('Balance + positions ($)');
     expect(title(root, 'x')).toBe('Date');

@@ -11,3 +11,11 @@
 .period-form { display: grid; gap: 8px; margin-top: 12px; }
 .period-form .row { display: flex; gap: 8px; }
 .period-form .row > * { flex: 1; min-width: 0; }
+
+/* Touch size: every control on the Periods screen meets --tap (the screen is now a primary route). */
+.period-select select, .period-form select, .period-form input, .flow-form select, .flow-form input,
+input[type='datetime-local'] {
+  min-height: var(--tap); padding: 0 var(--sp-3); font: inherit; font-size: max(16px, 1rem);
+  color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  box-sizing: border-box;
+}

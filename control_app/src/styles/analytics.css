@@ -10,7 +10,7 @@
 .segmented.seg-4 { grid-template-columns: repeat(4, 1fr); }
 .segmented button + button { border-left: 1px solid var(--border); }
 .segmented button:disabled { opacity: 0.4; cursor: not-allowed; }
-.segmented.compact button { min-height: 32px; font-size: 0.8125rem; }
+.segmented.compact button { min-height: var(--tap); font-size: 0.8125rem; }
 
 /* Totals: 2 x 3 grid, P&L largest. */
 .an-totals dd { font-size: 1.1875rem; font-weight: 600; letter-spacing: -0.01em; }
@@ -99,7 +99,7 @@
 /* ---------- extension: verdicts, calibration, fill rate, CSV ---------- */
 
 .card.edge-holding { padding: 14px 16px; margin: 4px 0 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); }
-.edge-headline { font-size: 1rem; font-weight: 600; margin: 0 0 10px; padding-left: 10px; border-left: 3px solid var(--off); }
+.edge-headline { font-size: 1rem; font-weight: 600; margin: 0 0 10px; }
 .edge-headline.pos { border-left-color: var(--ok); }
 .edge-headline.neg { border-left-color: var(--danger); }
 .verdict-counts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.8125rem; }
@@ -176,3 +176,33 @@
 .set-row .legs { padding: 4px 0 8px 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
 .set-row .legs div { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .dup-note { margin-top: 8px; }
+
+
+/* UI-1a stage 2: range control, scope chip, tab scroller (Analytics) */
+.an-controls .range-select { align-self: flex-start; }
+.an-controls .segmented.compact button { min-height: var(--tap); }
+.scope-chip {
+  display: flex; flex-wrap: wrap; gap: 2px var(--sp-3); align-items: baseline; margin: 0;
+  padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); border: 1px solid var(--border-strong); border-radius: var(--r-md);
+}
+.tab-scroller {
+  display: flex; gap: var(--sp-1); overflow-x: auto; margin: var(--sp-2) 0 var(--sp-3);
+  border-bottom: 1px solid var(--border); scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+.tab-scroller::-webkit-scrollbar { display: none; }
+.tab-scroller-tab {
+  flex-shrink: 0; min-height: var(--tap); padding: 0 var(--sp-3); font: inherit; font-size: var(--fs-md);
+  color: var(--muted); background: transparent; border: 0; border-bottom: 2px solid transparent; cursor: pointer;
+}
+.tab-scroller-tab:hover { color: var(--text); }
+.tab-scroller-tab[aria-selected='true'] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.tab-scroller-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* Activity filter chips: 40 px targets */
+.chips-lg .chip { min-height: var(--tap); padding: 0 var(--sp-3); font-size: var(--fs-sm); }
+
+/* Strategy pages (Maker / Arbitrage views): toolbar, headline figure, series rows with 44 px actions. */
+.strat-toolbar { display: flex; justify-content: flex-end; margin-bottom: var(--sp-2); }
+.strat-figure { font-size: var(--fs-2xl); font-weight: 500; line-height: var(--lh-tight); margin: var(--sp-1) 0; font-variant-numeric: tabular-nums; }
+.strat-series-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); min-height: 56px; }
+.strat-pause { min-height: var(--tap-lg); min-width: 96px; }

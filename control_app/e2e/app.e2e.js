@@ -13,7 +13,7 @@ test.describe('login + 2FA', () => {
     await expect(page.getByLabel('Username')).toBeVisible();
   });
 
-  test('a rejected code shows an error; a valid code signs in and lands on Overview', async ({ page }) => {
+  test('a rejected code shows an error; a valid code signs in and lands on Home', async ({ page }) => {
     await page.goto('/');
     await page.getByLabel('Username').fill('owner');
     await page.getByLabel('Password', { exact: true }).fill('correct-horse');
@@ -35,10 +35,10 @@ test.describe('login + 2FA', () => {
 });
 
 test.describe('Stop from several pages (no 2FA)', () => {
-  for (const label of ['Overview', 'Markets', 'Activity', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Arbitrage']) {
+  for (const label of ['Home', 'Strategies', 'Maker', 'Maker Controls', 'Performance', 'Activity', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Arbitrage']) {
     test(`Stop from ${label}`, async ({ page }) => {
       await login(page);
-      if (label !== 'Overview') await nav(page, label);
+      if (label !== 'Home') await nav(page, label);
       await stopFromHeader(page);
       await expect(page.getByText(/Stopped at /).first()).toBeVisible();
       await expect(page.getByLabel('6-digit code')).toHaveCount(0);
@@ -140,12 +140,12 @@ test.describe('Settings', () => {
 });
 
 test.describe('375px viewport', () => {
-  const PAGES = ['Overview', 'Markets', 'Activity', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Arbitrage'];
+  const PAGES = ['Home', 'Strategies', 'Maker', 'Maker Controls', 'Performance', 'Activity', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Arbitrage'];
 
   test('no horizontal scroll and a tappable Stop on every page', async ({ page }) => {
     await login(page);
     for (const label of PAGES) {
-      if (label !== 'Overview') await nav(page, label);
+      if (label !== 'Home') await nav(page, label);
       const stop = header(page).getByRole('button', { name: /stop the bot/i });
       await expect(stop).toBeVisible();
       const box = await stop.boundingBox();

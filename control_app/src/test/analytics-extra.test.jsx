@@ -439,7 +439,7 @@ describe('Analytics page edge states', () => {
     renderApp('/analytics');
     await screen.findByTestId('totals');
     expect(await screen.findByText(/settled in the last 30 days/)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '180 Days' }));
+    await user.click(screen.getByRole('radio', { name: '180 days' }));
     expect(screen.queryByText(/settled in the last 30 days/)).toBeNull();
     await waitFor(() => expect(typeof release).toBe('function'));
     expect(screen.queryByText(/settled in the last 180 days/)).toBeNull();

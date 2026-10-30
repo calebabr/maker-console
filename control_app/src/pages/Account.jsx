@@ -3,7 +3,7 @@ import Card from '../components/Card.jsx';
 import KalshiLink from '../components/KalshiLink.jsx';
 import SourceBadge from '../components/SourceBadge.jsx';
 import Chip from '../components/Chip.jsx';
-import PeriodsCard from '../components/PeriodsCard.jsx';
+import { Link } from 'react-router-dom';
 import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
 import { useResource } from '../hooks/useResource.js';
 import { api } from '../services/api.js';
@@ -111,7 +111,7 @@ export default function Account() {
         </Card>
       )}
 
-      <PeriodsCard />
+      <Link to="/performance/periods" className="btn" data-testid="periods-link">Periods and cash flows</Link>
     </div>
   );
 }

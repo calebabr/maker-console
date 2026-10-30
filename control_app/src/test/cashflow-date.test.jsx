@@ -40,7 +40,7 @@ describe('cash flow date', () => {
   it('always sends ts (the date is required), defaulting to now', async () => {
     const user = userEvent.setup();
     const calls = setup();
-    renderApp('/account');
+    renderApp('/performance/periods');
     await fill(user, '50');
     expect(screen.getByText('Set the real date for past deposits')).toBeInTheDocument();
     await submit(user);
@@ -53,7 +53,7 @@ describe('cash flow date', () => {
   it('sends an ISO ts for a past date and shows it in the confirm text', async () => {
     const user = userEvent.setup();
     const calls = setup();
-    renderApp('/account');
+    renderApp('/performance/periods');
     await fill(user, '50');
     fireEvent.change(screen.getByLabelText('When it happened'), { target: { value: '2026-02-10T09:30' } });
     expect(screen.queryByTestId('flow-when-current')).toBeNull();
@@ -69,7 +69,7 @@ describe('cash flow date', () => {
   it('blocks a future time with an inline message', async () => {
     const user = userEvent.setup();
     setup();
-    renderApp('/account');
+    renderApp('/performance/periods');
     await fill(user, '50');
     fireEvent.change(screen.getByLabelText('When it happened'), { target: { value: '2999-01-01T00:00' } });
     expect(screen.getByTestId('flow-when-future')).toBeInTheDocument();
@@ -79,7 +79,7 @@ describe('cash flow date', () => {
   it('warns when the time falls inside the current period', async () => {
     const user = userEvent.setup();
     setup();
-    renderApp('/account');
+    renderApp('/performance/periods');
     await fill(user, '50');
     await screen.findByText('Demo Period 2 (current)');
     fireEvent.change(screen.getByLabelText('When it happened'), { target: { value: '2026-03-05T12:00' } });

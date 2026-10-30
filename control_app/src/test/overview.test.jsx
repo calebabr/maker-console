@@ -28,10 +28,22 @@ const STRATS = [
   { id: 'you', source: 'you', name: 'You', color: 'var(--warn)' },
 ];
 
+const LEDGER = {
+  env: 'demo',
+  strategies: [
+    { strategy: 'maker', realized_pnl: 17.12, roi_on_settled: 0.046, open_cost: 8.2, fills: 9, settled_fills: 6, settled_cost: 372 },
+    { strategy: 'arb', realized_pnl: 2.4, roi_on_settled: 0.011, open_cost: 0, fills: 2, settled_fills: 2, settled_cost: 218 },
+    { strategy: 'you', realized_pnl: -0.8, roi_on_settled: null, open_cost: 4, fills: 1, settled_fills: 1, settled_cost: 10 },
+  ],
+};
+
 const base = (extra = {}) => ({
   'GET /api/status': RUNNING,
   'GET /api/history': { snapshots: [] },
   'GET /api/strategies': [200, STRATS],
+  'GET /api/analytics/ledger': LEDGER,
+  'GET /api/account/positions': [200, []],
+  'GET /api/markets': { markets: [] },
   ...extra,
 });
 
@@ -75,13 +87,13 @@ afterEach(() => {
   delete window.IntersectionObserver;
 });
 
-describe('Overview headline and status card', () => {
+describe('Home headline and status card', () => {
   it('running in demo: one headline line with the 30-day P&L', async () => {
     stubApi(base());
     renderApp('/');
     const hl = await screen.findByTestId('headline');
-    expect(hl).toHaveTextContent('Demo Running');
-    expect(hl).toHaveTextContent('+$17.12 Over 30 Days');
+    expect(hl).toHaveTextContent('Demo running.');
+    await waitFor(() => expect(hl).toHaveTextContent('+$19.52 over 30 days.'));
     expect(screen.getByTestId('state-label')).toHaveTextContent('Running');
     expect(screen.getByTestId('status-card')).toHaveAttribute('data-state', 'demo');
   });
@@ -89,12 +101,12 @@ describe('Overview headline and status card', () => {
   it('stopped and live states read correctly', async () => {
     stubApi(base({ 'GET /api/status': { ...STATUS, mode: 'live' } }));
     const { unmount } = renderApp('/');
-    expect(await screen.findByTestId('headline')).toHaveTextContent('Live Stopped');
+    expect(await screen.findByTestId('headline')).toHaveTextContent('Live stopped.');
     unmount();
     vi.unstubAllGlobals();
     stubApi(base({ 'GET /api/status': { ...RUNNING, mode: 'live' } }));
     renderApp('/');
-    await waitFor(() => expect(screen.getByTestId('headline')).toHaveTextContent('Live Running'));
+    await waitFor(() => expect(screen.getByTestId('headline')).toHaveTextContent('Live running.'));
     expect(screen.getByTestId('status-card')).toHaveAttribute('data-state', 'live');
   });
 
@@ -102,7 +114,7 @@ describe('Overview headline and status card', () => {
     stubApi(base({ 'GET /api/status': { ...RUNNING, last_error: 'kalshi 500 on order' } }));
     renderApp('/');
     const hl = await screen.findByTestId('headline');
-    await waitFor(() => expect(hl).toHaveTextContent('Needs Attention'));
+    await waitFor(() => expect(hl).toHaveTextContent('Needs attention.'));
     expect(hl.querySelector('.ov-hl-danger')).not.toBeNull();
     const bad = screen.getByTestId('abnormal');
     expect(within(bad).getByText(/kalshi 500 on order/)).toHaveClass('error-text');
@@ -124,32 +136,27 @@ describe('Overview headline and status card', () => {
     expect(screen.queryByTestId('abnormal')).toBeNull();
   });
 
-  it('three tiles, a timing line and the heartbeat strip replace the old Bot card', async () => {
+  it('the status card is compact: timing line, Stop, no tiles or heartbeat strip', async () => {
     stubApi(base());
     renderApp('/');
-    const tiles = await screen.findByTestId('status-tiles');
-    expect(within(tiles).getByText("Today's P&L")).toBeInTheDocument();
-    expect(within(tiles).getByText('+$0.95')).toBeInTheDocument();
-    expect(within(tiles).getByText('Maker P&L (30 days)')).toBeInTheDocument();
-    expect(within(tiles).getByText('+$17.12')).toBeInTheDocument();
-    expect(within(tiles).getByText('At Risk')).toBeInTheDocument();
-    expect(within(tiles).getByText('$37.60')).toBeInTheDocument();
-    const strip = screen.getByTestId('heartbeat-strip');
-    expect(strip.querySelectorAll('.hb-bar')).toHaveLength(12);
-    expect(strip.querySelectorAll('.hb-warn')).toHaveLength(1);
-    expect(screen.getByTestId('timing-line')).toHaveTextContent(/Last Run 4 min ago · Next in \d+ min/);
+    const card = await screen.findByTestId('status-card');
+    expect(screen.queryByTestId('status-tiles')).toBeNull();
+    expect(screen.queryByTestId('heartbeat-strip')).toBeNull();
+    expect(screen.queryByTestId('pnl-combined')).toBeNull();
+    expect(screen.getByTestId('timing-line')).toHaveTextContent(/Last run 4 min ago · Next in \d+ min/);
+    expect(within(card).getByRole('button', { name: /stop the bot/i })).toBeInTheDocument();
     const text = document.querySelector('main').textContent;
     for (const gone of ['Heartbeat', 'Kill switch', 'Live allowed', 'Pass running', 'Expected return', 'Run budget', 'headroom']) {
       expect(text).not.toContain(gone);
     }
   });
 
-  it('Run Once moves into the more-actions menu and still confirms first', async () => {
+  it('Run once moves into the more-actions menu and still confirms first', async () => {
     const user = userEvent.setup();
     const calls = stubApi(base({ 'POST /api/bot/run-once': { ran: true } }));
     renderApp('/');
     await user.click(await screen.findByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Run Once' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Run once' }));
     await user.click(await screen.findByRole('button', { name: 'Run once' }));
     await waitFor(() => expect(calls.some((c) => c.key === 'POST /api/bot/run-once')).toBe(true));
   });
@@ -171,24 +178,46 @@ describe('Overview headline and status card', () => {
     expect(document.querySelector('main').textContent).not.toMatch(/headroom|limit \(/);
   });
 
-  it('one demo banner in demo mode, none in live', async () => {
+  it('no demo banner: the mode is the chip on the status card', async () => {
     stubApi(base());
-    const { unmount } = renderApp('/');
-    await screen.findByTestId('headline');
-    expect(screen.getAllByTestId('demo-banner')).toHaveLength(1);
-    expect(document.querySelector('main').textContent.match(/not representative/g)).toHaveLength(1);
-    unmount();
-    vi.unstubAllGlobals();
-    stubApi(base({ 'GET /api/status': { ...RUNNING, mode: 'live' } }));
     renderApp('/');
     await screen.findByTestId('headline');
     expect(screen.queryByTestId('demo-banner')).toBeNull();
+    expect(within(screen.getByTestId('status-card')).getByText('Demo')).toBeInTheDocument();
+  });
+
+  it('Home total is Maker + Arbitrage only; the owner trades sit on their own line', async () => {
+    stubApi(base());
+    renderApp('/');
+    const fig = await screen.findByTestId('home-total-figure');
+    await waitFor(() => expect(fig).toHaveTextContent('+$19.52'));
+    expect(within(screen.getByTestId('home-row-maker')).getByText('+$17.12')).toBeInTheDocument();
+    expect(within(screen.getByTestId('home-row-arb')).getByText('+$2.40')).toBeInTheDocument();
+    const manual = screen.getByTestId('manual-row');
+    expect(manual).toHaveTextContent('manual, not in the total');
+    expect(manual).toHaveTextContent('−$0.80');
+    expect(screen.getByTestId('by-strategy').querySelectorAll('.home-rows > li')).toHaveLength(2);
+  });
+
+  it('a failed ledger shows dashes and a retry, never $0.00', async () => {
+    stubApi(base({ 'GET /api/analytics/ledger': [500, { detail: 'boom' }] }));
+    renderApp('/');
+    expect(await screen.findByTestId('home-ledger-error')).toHaveTextContent("Couldn't load P&L");
+    expect(screen.getByTestId('home-total-figure')).toHaveTextContent('—');
+    expect(within(screen.getByTestId('home-row-maker')).queryByText('$0.00')).toBeNull();
+  });
+
+  it('the page has one h1, Home', async () => {
+    stubApi(base());
+    renderApp('/');
+    await screen.findByTestId('headline');
+    expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent)).toEqual(['Home']);
   });
 
   it('edge verdict joins the headline when analytics has cells', async () => {
     stubApi(base({ 'GET /api/analytics/summary': { by_cell: [{ cell: 'a', verdict: 'on_track' }, { cell: 'b', verdict: 'too_early' }] } }));
     renderApp('/');
-    await waitFor(() => expect(screen.getByTestId('headline')).toHaveTextContent('Edge On Track'));
+    await waitFor(() => expect(screen.getByTestId('headline')).toHaveTextContent('Edge on track.'));
   });
 });
 
@@ -238,8 +267,8 @@ describe('Since You Last Checked', () => {
     const calls = stubApi(base({ 'GET /api/since': { fills: 3, settled: 2, pnl_change: 1.4 } }));
     renderApp('/');
     const card = await screen.findByTestId('since-card');
-    expect(card).toHaveTextContent('Since You Last Checked');
-    expect(card).toHaveTextContent(/3 New Fills · 2 Markets Settled · P&L \+\$1\.40 Since /);
+    expect(card).toHaveTextContent('Since you last checked:');
+    expect(card).toHaveTextContent(/3 new fills, 2 markets settled, P&L \+\$1\.40 since /);
     expect(calls.find((c) => c.key === 'GET /api/since').path).toMatch(/ts=/);
     await userEvent.setup().click(within(card).getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByTestId('since-card')).toBeNull();
@@ -257,64 +286,6 @@ describe('Since You Last Checked', () => {
     renderApp('/');
     await screen.findByTestId('headline');
     expect(screen.queryByTestId('since-card')).toBeNull();
-  });
-});
-
-describe('P&L by source', () => {
-  it('lists strategies by registry name with today P&L, and splits $ at risk into Bot and You', async () => {
-    stubApi(
-      base({
-        'GET /api/account/positions': [
-          200,
-          [
-            { ticker: 'A', value: 30, source: 'bot', strategy: 'maker' },
-            { ticker: 'B', value: 10, source: 'you', strategy: null },
-          ],
-        ],
-      }),
-    );
-    renderApp('/');
-    const box = await screen.findByTestId('source-pnl');
-    expect(within(box).getByText('Bot · Maker').closest('li')).toHaveTextContent('+$1.40');
-    expect(within(box).getByText('Bot · Arb').closest('li')).toHaveTextContent('+$0.35');
-    expect(within(box).getByText('You').closest('li')).toHaveTextContent('−$0.80');
-    expect(within(box).getByText('Total Today').closest('li')).toHaveTextContent('+$0.95');
-    const split = await screen.findByTestId('risk-split');
-    expect(split).toHaveTextContent('Bot $30.00');
-    expect(split).toHaveTextContent('You $10.00');
-  });
-
-  it('resting order rows (kind: order) do not change the Bot/You at-risk split', async () => {
-    stubApi(
-      base({
-        'GET /api/account/positions': [
-          200,
-          [
-            { ticker: 'A', kind: 'position', value: 30, source: 'bot', strategy: 'maker' },
-            { ticker: 'B', value: 10, source: 'you', strategy: null },
-            { ticker: 'C', kind: 'order', value: 8.1, source: 'bot', strategy: 'maker' },
-          ],
-        ],
-      }),
-    );
-    renderApp('/');
-    const split = await screen.findByTestId('risk-split');
-    expect(split).toHaveTextContent('Bot $30.00');
-    expect(split).toHaveTextContent('You $10.00');
-    expect(split).toHaveTextContent('$40.00');
-  });
-
-  it('a new strategy in the registry shows up with no code change; no positions hides the bar', async () => {
-    stubApi(
-      base({
-        'GET /api/strategies': [200, [...STRATS, { id: 'news', source: 'bot', name: 'Bot · News', color: 'red' }]],
-        'GET /api/status': { ...RUNNING, pnl_today: { maker: 1, arb: 0, you: 0, news: 2.5, total: 3.5 } },
-      }),
-    );
-    renderApp('/');
-    const box = await screen.findByTestId('source-pnl');
-    await waitFor(() => expect(within(box).getByText('Bot · News').closest('li')).toHaveTextContent('+$2.50'));
-    expect(screen.queryByTestId('risk-split')).toBeNull();
   });
 });
 

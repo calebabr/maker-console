@@ -225,9 +225,10 @@ describe('offline cache', () => {
       }),
     );
     renderApp('/markets');
+    // Maker Controls loads two resources (markets, config), each with its own Retry.
     const retry = await screen.findAllByRole('button', { name: 'Retry' });
     up = true;
-    await user.click(retry[retry.length - 1]);
+    for (const b of retry) await user.click(b);
     expect(await screen.findByText('KXDEMOA')).toBeInTheDocument();
     expect(screen.queryByText(/Offline copy from/)).toBeNull();
   });

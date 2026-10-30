@@ -41,17 +41,17 @@ afterEach(() => {
 });
 
 describe('bottom tabs (phones)', () => {
-  it('are Overview, Analytics, Activity, Markets, More in that order; Health is not a tab', async () => {
+  it('are Home, Strategies, Performance, Activity, More in that order; Health is not a tab', async () => {
     setViewport({ wide: false });
     base();
     renderApp('/');
     const main = screen.getByRole('navigation', { name: 'Main' });
     expect(main).toHaveClass('tabbar');
     const links = within(main).getAllByRole('link');
-    expect(links.map((l) => l.textContent)).toEqual(['Overview', 'Analytics', 'Activity', 'Markets', 'More']);
-    expect(links.map((l) => l.getAttribute('href'))).toEqual(['/', '/analytics', '/activity', '/markets', '/more']);
+    expect(links.map((l) => l.textContent)).toEqual(['Home', 'Strategies', 'Performance', 'Activity', 'More']);
+    expect(links.map((l) => l.getAttribute('href'))).toEqual(['/', '/strategies', '/performance', '/activity', '/more']);
     expect(within(main).queryByText('Health')).toBeNull();
-    expect(TAB_ROUTES.map((t) => t.label)).toEqual(['Overview', 'Analytics', 'Activity', 'Markets', 'More']);
+    expect(TAB_ROUTES.map((t) => t.label)).toEqual(['Home', 'Strategies', 'Performance', 'Activity', 'More']);
   });
 
   it('marks the current tab, and More while on a page that lives under More', async () => {
@@ -60,7 +60,7 @@ describe('bottom tabs (phones)', () => {
     renderApp('/health');
     const main = screen.getByRole('navigation', { name: 'Main' });
     expect(within(main).getByRole('link', { name: 'More' })).toHaveClass('active');
-    expect(within(main).getByRole('link', { name: 'Overview' })).not.toHaveClass('active');
+    expect(within(main).getByRole('link', { name: 'Home' })).not.toHaveClass('active');
   });
 
   it('has no sidebar below 1024 px', () => {
@@ -72,15 +72,16 @@ describe('bottom tabs (phones)', () => {
 });
 
 describe('More page', () => {
-  it('lists every page that is not a tab, in the contract order, plus Sign Out', async () => {
+  it('lists every page that is not a tab, grouped System, You, Help, plus Sign Out', async () => {
     setViewport({ wide: false });
     base();
     renderApp('/more');
     const nav = await screen.findByRole('navigation', { name: 'More pages' });
     const links = within(nav).getAllByRole('link');
     expect(links.map((l) => l.getAttribute('href'))).toEqual([
-      '/health', '/settings', '/account', '/alerts', '/mode', '/server', '/logs', '/arb', '/shadow', '/terminology',
+      '/health', '/server', '/mode', '/logs', '/account', '/settings', '/alerts', '/terminology',
     ]);
+    expect(within(nav).getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(['System', 'You', 'Help']);
     expect(links.map((l) => within(l).getByText(/./, { selector: '.menu-label' }).textContent)).toEqual(
       MORE_ROUTES.map((r) => r.label),
     );
@@ -116,10 +117,10 @@ describe('sidebar (>= 1024 px)', () => {
     expect(document.querySelector('.tabbar')).toBeNull();
     const links = within(side).getAllByRole('link');
     expect(links.map((l) => l.textContent)).toEqual([
-      'Overview', 'Analytics', 'Activity', 'Markets',
-      'Health', 'Settings', 'Account', 'Alerts', 'Mode', 'Server', 'Logs', 'Arbitrage', 'Shadow Estimate', 'Terminology',
+      'Home', 'Strategies', 'Maker', 'Arbitrage', 'Performance', 'All Strategies', 'Analytics', 'Shadow Estimate', 'Periods',
+      'Activity', 'Health', 'Server', 'Mode', 'Logs', 'Account', 'Settings', 'Alerts', 'Terminology',
     ]);
-    expect(within(side).getByRole('link', { name: 'Overview' })).toHaveClass('active');
+    expect(within(side).getByRole('link', { name: 'Home' })).toHaveClass('active');
     expect(within(side).getByRole('button', { name: /sign out/i })).toBeInTheDocument();
   });
 
@@ -129,13 +130,12 @@ describe('sidebar (>= 1024 px)', () => {
       'GET /api/status': STATUS,
       'GET /api/history': { snapshots: [] },
       'GET /api/changelog': [200, []],
-      'GET /api/markets': { markets: [] },
       'POST /api/bot/stop': { desired: 'stopped', kill_switch: true, cancelled: 2, errors: [] },
     });
     const user = userEvent.setup();
     renderApp('/');
-    await user.click(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'Markets' }));
-    expect(await screen.findByRole('heading', { level: 1, name: 'Markets' })).toBeInTheDocument();
+    await user.click(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'Strategies' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Strategies' })).toBeInTheDocument();
     const header = document.querySelector('header.appbar');
     await user.click(within(header).getByRole('button', { name: /stop the bot/i }));
     await user.click(await screen.findByRole('button', { name: 'Stop now' }));
@@ -158,7 +158,7 @@ describe('header', () => {
   it('page title bar carries the matching nav icon', async () => {
     setViewport({ wide: false });
     base();
-    renderApp('/markets');
+    renderApp('/strategies');
     const bar = screen.getByTestId('page-title');
     expect(bar.querySelector('.page-title-icon svg')).not.toBeNull();
     expect(bar.querySelector('.page-title-accent')).not.toBeNull();

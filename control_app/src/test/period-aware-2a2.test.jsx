@@ -21,37 +21,17 @@ const PERIODS = {
 const R = (a, b, c) => ({ lo: a, mid: b, hi: c });
 const N = (n) => Array.from({ length: n }, (_, i) => i + 1);
 
-describe('Overview rolling P&L period selector', () => {
-  it('defaults to the current period, shows the API window labels and re-queries on change', async () => {
+describe('Home page-wide range', () => {
+  it('queries the ledger for the chosen range and keeps the choice for the session', async () => {
     const user = userEvent.setup();
-    const calls = stubApi({
-      'GET /api/status': (call) => {
-        const p = new URLSearchParams(call.path.split('?')[1] || '').get('period');
-        if (p === 'p2') {
-          return {
-            ...STATUS,
-            pnl: {
-              d7: 1.5,
-              d30: 1.5,
-              settled_fills: 3,
-              basis: 'fill_date',
-              window: { d7: { label: 'Demo Period 2 so far (since 2026-10-21, under 7 days)' }, d30: { label: 'Demo Period 2 so far (since 2026-10-21, under 30 days)' } },
-            },
-          };
-        }
-        if (p === 'all') {
-          return { ...STATUS, pnl: { d7: 9, d30: 20, settled_fills: 9, basis: 'fill_date', window: { d7: { label: 'Last 7 days (all periods)' }, d30: { label: 'Last 30 days (all periods)' } } } };
-        }
-        return STATUS;
-      },
-      'GET /api/periods': PERIODS,
-    });
+    window.sessionStorage.clear();
+    const calls = stubApi({ 'GET /api/status': STATUS, 'GET /api/analytics/ledger': { env: 'demo', strategies: [] } });
     renderApp('/');
-    expect(await screen.findByText(/Demo Period 2 so far \(since 2026-10-21, under 7 days\)/)).toBeInTheDocument();
-    expect(calls.some((c) => c.path.includes('/api/status?period=p2'))).toBe(true);
-    expect(screen.getByTestId('pnl-basis')).toBeInTheDocument();
-    await user.selectOptions(document.getElementById('pnl-period-select'), 'all');
-    expect(await screen.findByText('Last 7 days (all periods)')).toBeInTheDocument();
+    await screen.findByTestId('home-total');
+    await waitFor(() => expect(calls.some((c) => c.path.includes('/api/analytics/ledger') && c.path.includes('days=30'))).toBe(true));
+    await user.click(screen.getByRole('radio', { name: 'This period' }));
+    await waitFor(() => expect(calls.some((c) => c.path.includes('/api/analytics/ledger') && c.path.includes('period=current'))).toBe(true));
+    expect(window.sessionStorage.getItem('prior.range')).toBe('current');
   });
 });
 
@@ -71,7 +51,7 @@ describe('Period summary basis caveat', () => {
         cash_flows: { equity_change_ex_flows: 4, equity_change_label: 'Also counts settlements of earlier-period positions.' },
       },
     });
-    renderApp('/account');
+    renderApp('/performance/periods');
     expect(await screen.findByTestId('ps-basis')).toHaveTextContent(/fill date/i);
     expect(screen.getByTestId('ps-equity-change')).toHaveTextContent(/earlier-period positions/);
   });

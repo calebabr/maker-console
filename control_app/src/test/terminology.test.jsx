@@ -102,7 +102,7 @@ describe('glossary', () => {
   });
 
   it('every existing page has at least one help icon', () => {
-    const pages = ['Overview', 'Markets', 'Activity', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'Arbitrage'];
+    const pages = ['Overview', 'Markets', 'Activity', 'Health', 'Settings', 'Mode', 'Server', 'Logs', 'strategy/ArbitrageViews'];
     for (const p of pages) {
       const text = fs.readFileSync(path.join(SRC, 'pages', `${p}.jsx`), 'utf8');
       expect(text, p).toMatch(/<HelpIcon\b/);

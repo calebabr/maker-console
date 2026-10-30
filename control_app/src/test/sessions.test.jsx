@@ -57,7 +57,7 @@ describe('503 store_unavailable', () => {
     renderApp('/');
     expect(await screen.findByText(/can.t reach the database/i)).toBeInTheDocument();
     down = false;
-    await user.click(screen.getByRole('link', { name: /markets/i }));
+    await user.click(screen.getAllByRole('link', { name: /strategies/i })[0]);
     await waitFor(() => expect(screen.queryByText(/can.t reach the database/i)).toBeNull());
   });
 
@@ -139,11 +139,16 @@ describe('fill quality', () => {
       'GET /api/status': STATUS,
       'GET /api/markets': { markets: [{ series: 'KXDEMOA', enabled: true, fill_quality: { ...FQ, trade_through_share: 0.3, avg_move_60m_c: 0 } }], fill_quality: FQ },
     });
-    renderApp('/markets');
+    // The all-series block is on Maker Overview; the per-row blocks are on Results (folded until opened).
+    const overview = renderApp('/strategies/maker');
     expect(await screen.findByText('Fill Quality, All Series')).toBeInTheDocument();
-    expect(screen.getAllByTestId('fill-quality').length).toBe(1); // market rows are folded
+    expect(screen.getAllByTestId('fill-quality').length).toBe(1);
+    overview.unmount();
+    renderApp('/strategies/maker/results');
+    expect(await screen.findByRole('button', { name: /KXDEMOA/ })).toBeInTheDocument();
+    expect(screen.queryAllByTestId('fill-quality').length).toBe(0); // market rows are folded
     await userEvent.setup().click(screen.getByRole('button', { name: /KXDEMOA/ }));
-    expect(screen.getAllByTestId('fill-quality').length).toBe(2);
+    expect(screen.getAllByTestId('fill-quality').length).toBe(1);
     expect(screen.getByText(/In line with the tape/)).toBeInTheDocument();
   });
 });

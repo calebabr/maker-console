@@ -1,0 +1,104 @@
+/* Navigation and shared state components for UI-1a stage 2: SubNav, StrategyCard, RangeSelect, Empty,
+   Skeleton, the grouped More page and the sidebar groups. Tokens (--fs-*, --sp-*, --tap, --border-strong)
+   are defined in index.css. */
+
+/* Warning vs accent: Graphite's warn and accent are close in hue, so warn chips and notices also change edge
+   style there (state is never colour-only: chips carry an icon and a word too). */
+:root[data-theme='graphite'] { --warn-edge: dashed; }
+.tag-warn, .notice-warn { border-style: var(--warn-edge, solid); }
+
+/* Non-text "off" colour is for dots and meter tracks only; words like "Stopped" use --muted. */
+.text-off { color: var(--muted); }
+
+/* ---------- More page groups ---------- */
+.menu-group { margin-top: var(--sp-5); }
+.menu-group:first-child { margin-top: var(--sp-2); }
+.menu-group-title {
+  margin: 0 0 var(--sp-1); color: var(--muted); font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.04em;
+}
+.menu-group .menu { margin-top: 0; }
+
+/* ---------- sidebar groups (>= 1024 px) ---------- */
+.side-heading { font-size: var(--fs-xs); }
+.side-children { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 var(--sp-2) 22px; padding-left: var(--sp-2); border-left: 1px solid var(--border); }
+.side-link.side-child { min-height: var(--tap); font-size: var(--fs-sm); }
+.side-link.is-current:not(.active) { color: var(--text); }
+
+/* ---------- SubNav (strategy pages: Overview | Results | Controls) ---------- */
+.subnav {
+  position: sticky; top: var(--sticky-top, 0px); z-index: 14;
+  margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter);
+  background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.subnav-list {
+  display: flex; gap: var(--sp-1); overflow-x: auto; overscroll-behavior-x: contain;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+.subnav-list::-webkit-scrollbar { display: none; }
+.subnav-tab {
+  position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  min-height: var(--tap); min-width: var(--tap); padding: 0 var(--sp-3);
+  font: inherit; font-size: var(--fs-md); font-weight: 500; color: var(--muted); white-space: nowrap;
+  text-decoration: none; background: transparent; border: 0; cursor: pointer;
+  transition: color var(--ease);
+}
+.subnav-tab:hover { color: var(--text); text-decoration: none; }
+.subnav-tab[aria-selected='true'] { color: var(--text); }
+.subnav-tab[aria-selected='true']::after {
+  content: ''; position: absolute; left: var(--sp-3); right: var(--sp-3); bottom: -1px; height: 2px; border-radius: 2px; background: var(--accent);
+}
+
+/* ---------- StrategyCard ---------- */
+.strategy-card {
+  display: block; padding: var(--sp-4) 0; color: var(--text); text-decoration: none;
+  border-top: 1px solid var(--border);
+}
+.strategy-card:first-child { border-top: 0; }
+.strategy-card:hover { text-decoration: none; background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.strategy-card-head { display: flex; align-items: center; gap: var(--sp-2); min-height: var(--tap); }
+.strategy-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--strategy-color, var(--muted)); }
+.strategy-name { flex: 1; min-width: 0; font-size: var(--fs-lg); font-weight: 600; letter-spacing: -0.01em; }
+.strategy-chevron { display: flex; color: var(--muted); }
+.strategy-figures { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3) var(--sp-4); margin: var(--sp-2) 0 0; }
+.strategy-figure dt { margin: 0 0 var(--sp-1); color: var(--muted); font-size: var(--fs-xs); }
+.strategy-figure dd { margin: 0; font-size: var(--fs-lg); font-weight: 500; line-height: var(--lh-tight); }
+.strategy-last { margin: var(--sp-2) 0 0; color: var(--muted); font-size: var(--fs-sm); }
+.strategy-card .num { white-space: nowrap; }
+.strategy-state { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ---------- RangeSelect (shared period control) ---------- */
+.range-select {
+  display: inline-flex; max-width: 100%; border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  overflow-x: auto; scrollbar-width: none; background: var(--surface);
+}
+.range-opt {
+  flex: 1 1 auto; min-height: var(--tap); min-width: 0; padding: 0 var(--sp-2);
+  font: inherit; font-size: var(--fs-sm); font-weight: 500; color: var(--muted); white-space: nowrap;
+  background: transparent; border: 0; border-left: 1px solid var(--border-strong); cursor: pointer;
+}
+.range-opt:first-child { border-left: 0; }
+.range-opt:hover:not(:disabled) { color: var(--text); }
+.range-opt[aria-checked='true'] { color: var(--accent-text); background: var(--accent); }
+.range-opt:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ---------- Empty ---------- */
+.empty { padding: var(--sp-5) 0; }
+.empty-what { margin: 0 0 var(--sp-1); font-size: var(--fs-md); font-weight: 500; }
+.empty-why { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
+.empty-next { display: inline-flex; align-items: center; min-height: var(--tap); margin-top: var(--sp-2); font-size: var(--fs-md); }
+.empty.is-compact { padding: var(--sp-3) 0; }
+
+/* ---------- Skeleton ---------- */
+.skeleton { display: flex; flex-direction: column; gap: var(--sp-2); }
+.skeleton[data-pending='true'] { visibility: hidden; } /* reserves the final height during the delay */
+.skeleton-row, .skeleton-figure {
+  border-radius: var(--r-md);
+  background: linear-gradient(90deg, var(--surface) 0%, var(--surface2) 50%, var(--surface) 100%);
+  background-size: 200% 100%; animation: skeleton-sweep 1.4s ease-in-out infinite;
+}
+.skeleton-row { height: 56px; }
+.skeleton-figure { height: 32px; width: 55%; }
+@keyframes skeleton-sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-row, .skeleton-figure { animation: none; background: var(--surface); }
+}

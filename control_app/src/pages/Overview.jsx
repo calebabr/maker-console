@@ -1,29 +1,33 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import Card from '../components/Card.jsx';
 import FoldCard from '../components/FoldCard.jsx';
 import StatusCard from '../components/StatusCard.jsx';
 import StatusWidget from '../components/StatusWidget.jsx';
 import SinceCard from '../components/SinceCard.jsx';
-import SourcePnl from '../components/SourcePnl.jsx';
-import PnlScope from '../components/PnlScope.jsx';
-import PeriodSelect from '../components/PeriodSelect.jsx';
+import RangeSelect from '../components/RangeSelect.jsx';
+import Skeleton from '../components/Skeleton.jsx';
 import Sparkline from '../components/Sparkline.jsx';
-import PnlStats from '../components/PnlStats.jsx';
 import FillQuality from '../components/FillQuality.jsx';
 import HelpIcon from '../components/HelpIcon.jsx';
-import { ArbStateText } from './Arbitrage.jsx';
+import { IconChevron } from '../components/Icons.jsx';
 import { ErrorNotice, Loading } from '../components/Notices.jsx';
 import { useStatus } from '../context/StatusContext.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
 import { useResource } from '../hooks/useResource.js';
+import useRange from '../hooks/useRange.js';
+import useStrategySummary from '../hooks/useStrategySummary.js';
 import { api } from '../services/api.js';
-import { getPositions } from '../services/overviewApi.js';
 import { riskLimit } from '../utils/status.js';
 import { edgeSummary, headlineParts } from '../utils/overview.js';
-import { formatAgo, formatMoney, dateTime, money } from '../utils/format.js';
+import { rangeLabel } from '../utils/range.js';
+import { TODAY_EMPTY, TODAY_UNAVAILABLE, todayKind } from '../utils/pnlScopes.js';
+import { DASH, NA_TITLE, dateTime, formatMoney, money, sentenceCase } from '../utils/format.js';
 import { shortDate } from '../utils/analytics.js';
 import { moneyDigits } from '../utils/chart.js';
+import '../styles/overview.css';
+
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const tone = (v) => (isNum(v) ? (v < 0 ? 'neg' : v > 0 ? 'pos' : '') : '');
 
 // POST /api/bot/start 409 details (Start/Stop race guard, runner off).
 const START_409 = {
@@ -32,97 +36,98 @@ const START_409 = {
   runner_disabled: 'The runner is disabled on this server (RUNNER_ENABLED=false).',
 };
 
-// One bar: "$37.60 at risk of $125" (item 5).
+// One line and one bar: "$37.60 at risk of $125". Exposure is plain text, never green or red.
 function RiskBar({ exposure, limit }) {
-  if (typeof exposure !== 'number' || typeof limit !== 'number' || limit <= 0) return null;
+  if (!isNum(exposure) || !isNum(limit) || limit <= 0) return null;
   const frac = Math.min(1, exposure / limit);
   const level = frac > 0.9 ? 'danger' : frac > 0.7 ? 'warn' : 'ok';
   return (
     <>
-      <div className="meter" role="img" aria-label={`At risk ${Math.round(frac * 100)}% of limit`}>
-        <div className={`meter-fill meter-${level}`} style={{ width: `${(frac * 100).toFixed(1)}%` }} />
-      </div>
       <p className={`ov-risk-line ${level === 'danger' ? 'error-text' : ''}`} data-testid="risk-line">
         {formatMoney(exposure)} at risk of {formatMoney(limit, { digits: Number.isInteger(limit) ? 0 : 2 })}
         <HelpIcon term="exposure" />
       </p>
+      <div className="meter" role="img" aria-label={`At risk ${Math.round(frac * 100)}% of limit`}>
+        <div className={`meter-fill meter-${level}`} style={{ width: `${(frac * 100).toFixed(1)}%` }} />
+      </div>
     </>
   );
 }
 
-// Item 1: "Demo Running · +$17.12 Over 30 Days · Edge On Track". Problems are red, good news green.
-function Headline({ parts }) {
+/** A figure, or the dash with the "Not available yet" tooltip. Only P&L (signed) is coloured. */
+function Fig({ value, signed = false }) {
+  if (!isNum(value)) {
+    return (
+      <span className="num" title={NA_TITLE}>
+        {DASH}
+      </span>
+    );
+  }
+  return <span className={`num ${signed ? tone(value) : ''}`.trim()}>{formatMoney(value, signed ? { sign: true } : undefined)}</span>;
+}
+
+// One sentence-case line: "Demo running. +$17.12 over 30 days. Edge below expected."
+// Text colour; only the figure is coloured, and a problem state is red.
+function Headline({ state, pnl, range, edge }) {
   return (
     <p className="ov-headline" data-testid="headline">
-      {parts.map((p, i) => (
-        <span key={p.text} className={`ov-hl ov-hl-${p.tone}`}>
-          {i > 0 && <span className="ov-hl-sep" aria-hidden="true"> · </span>}
-          {p.text}
-        </span>
-      ))}
+      <span className={`ov-hl ov-hl-${state.tone === 'danger' ? 'danger' : 'muted'}`}>{sentenceCase(state.text.toLowerCase())}.</span>
+      {isNum(pnl) && (
+        <>
+          {' '}
+          <span className="ov-hl">
+            <span className={tone(pnl)}>{formatMoney(pnl, { sign: true })}</span> over {rangeLabel(range).toLowerCase()}.
+          </span>
+        </>
+      )}
+      {edge && (
+        <>
+          {' '}
+          <span className="ov-hl">{sentenceCase(edge.text.toLowerCase())}.</span>
+        </>
+      )}
     </p>
+  );
+}
+
+function StrategyRow({ s }) {
+  return (
+    <li>
+      <Link to={s.to} className="home-row" data-testid={`home-row-${s.id}`} style={{ '--strategy-color': s.color }}>
+        <span className="home-dot" aria-hidden="true" />
+        <span className="home-row-name">{s.shortName}</span>
+        <span className="home-row-fig">
+          <Fig value={s.pnl} signed />
+          <span className="home-row-sub">
+            Open <Fig value={s.openCost} />
+          </span>
+        </span>
+        <span className="home-row-chev" aria-hidden="true">
+          <IconChevron />
+        </span>
+      </Link>
+    </li>
   );
 }
 
 export default function Overview() {
   const { status, error, loading, updatedAt, stale, refresh } = useStatus();
   const { confirm, twoFactor, notify } = useDialogs();
+  const [range, setRange] = useRange();
+  const summary = useStrategySummary({ range, status });
   const history = useResource(() => api.getHistory(30), '/api/history?days=30');
-  const strategies = useResource(() => api.getStrategies(), '/api/strategies');
-  const positions = useResource(() => getPositions(), '/api/account/positions');
   const edge = useResource(() => api.analyticsSummary({ days: 30 }), '/api/analytics/summary?days=30');
-  const periods = useResource(() => api.getPeriods(), '/api/periods');
-  const [period, setPeriod] = useState('all');
-  const [pnlPeriodSel, setPnlPeriodSel] = useState(null); // null = the current period
-  const [periodPnl, setPeriodPnl] = useState(null);
-  const [bySource, setBySource] = useState(null);
   const [busy, setBusy] = useState(null);
   const cardRef = useRef(null);
-
-  // The At Risk numbers come from /api/status (polled), the Bot/You split from the positions list: refetch the
-  // positions on every status refresh so the two never disagree for up to a whole session.
-  const reloadPositions = positions.reload;
-  useEffect(() => {
-    if (updatedAt && !stale) reloadPositions();
-  }, [updatedAt, stale, reloadPositions]);
-
-  // A chosen period swaps "today" for that period's realised P&L by source (attributed by fill date).
-  useEffect(() => {
-    if (period === 'all') {
-      setBySource(null);
-      return undefined;
-    }
-    let alive = true;
-    api
-      .getPnlBySource({ period })
-      .then((r) => alive && setBySource((r && r.by_source) || null))
-      .catch(() => alive && setBySource(null));
-    return () => {
-      alive = false;
-    };
-  }, [period]);
-  const periodList = (periods.data && periods.data.periods) || [];
-  const currentPeriod = periodList.find((p) => p.current);
-  const pnlPeriod = pnlPeriodSel || (currentPeriod && currentPeriod.id) || 'current';
-
-  // Rolling 7- and 30-day P&L for the chosen period (default: the current one), refreshed with each status poll.
-  useEffect(() => {
-    let alive = true;
-    api
-      .status({ period: pnlPeriod })
-      .then((r) => alive && setPeriodPnl((r && r.pnl) || null))
-      .catch(() => alive && setPeriodPnl(null));
-    return () => {
-      alive = false;
-    };
-  }, [pnlPeriod, updatedAt]);
 
   const a = status && status.account;
   const limit = riskLimit(status);
   const snaps = (history.data && history.data.snapshots) || [];
   const equity = snaps.map((s) => (s.cash || 0) + (s.exposure || 0));
   const equityDates = snaps.map((s) => shortDate(s.ts));
-  const demo = !!status && status.mode !== 'live';
+  const { strategies, total, manual, errors } = summary;
+  const todayTotal = status && status.pnl_today && status.pnl_today.total;
+  const totalLoading = summary.loading && !isNum(total.pnl);
 
   async function onStart() {
     const mode = (status && status.mode) || 'demo';
@@ -177,14 +182,9 @@ export default function Overview() {
   return (
     <div className="page overview-page">
       {/* Visual title is the sticky PageTitle bar (aria-hidden); this is the page's one accessible heading. */}
-      <h1>Overview</h1>
+      <h1>Home</h1>
       <SinceCard />
-      {status && <Headline parts={headlineParts(status, edgeSummary(edge.data))} />}
-      {demo && (
-        <p className="notice notice-info ov-demo" data-testid="demo-banner">
-          Demo Mode: These numbers are not representative of live trading.
-        </p>
-      )}
+      {status && <Headline state={headlineParts(status)[0]} pnl={total.pnl} range={range} edge={edgeSummary(edge.data)} />}
       <StatusCard ref={cardRef} status={status} busy={busy} onStart={onStart} onRunOnce={onRunOnce} />
       <StatusWidget status={status} cardRef={cardRef} />
       {loading && !status && <Loading text="Loading status…" />}
@@ -192,62 +192,81 @@ export default function Overview() {
       {stale && updatedAt && <p className="hint">Last update {dateTime(updatedAt)} (could not refresh).</p>}
 
       {status && (
-        <>
-          {status.arb && (
-            <Card title="Arbitrage" actions={<Link to="/arb">Open</Link>}>
-              <p className="arb-line">
-                <ArbStateText state={status.arb.state} />
-                {status.arb.last_scan_utc ? <span className="muted"> last scan {formatAgo(status.arb.last_scan_utc)}</span> : null}
-              </p>
-            </Card>
-          )}
+        <div className="home-grid">
+          <div className="home-main">
+            <section className="home-total" aria-labelledby="home-total-h" data-testid="home-total">
+              <h2 className="home-label" id="home-total-h">
+                Total P&amp;L<HelpIcon term="realised-pnl" />
+              </h2>
+              {totalLoading ? (
+                <Skeleton rows={0} figure label="Loading total P&L" />
+              ) : (
+                <p className={`home-figure ${tone(total.pnl)}`} data-testid="home-total-figure" title={isNum(total.pnl) ? undefined : NA_TITLE}>
+                  {isNum(total.pnl) ? formatMoney(total.pnl, { sign: true }) : DASH}
+                </p>
+              )}
+              <RangeSelect value={range} onChange={setRange} label="P&L range" />
+              <p className="home-scope">Settled P&amp;L, by settlement date, your time zone. Maker and arbitrage.</p>
+              {todayKind(status) === 'unavailable' ? (
+                <p className="home-today muted" data-testid="today-unavailable">Today: {TODAY_UNAVAILABLE}</p>
+              ) : todayKind(status) === 'none' || !isNum(todayTotal) ? (
+                <p className="home-today muted" data-testid="today-empty">{TODAY_EMPTY}</p>
+              ) : (
+                <p className="home-today" data-testid="home-today">
+                  Today <span className={tone(todayTotal)}>{formatMoney(todayTotal, { sign: true })}</span>
+                </p>
+              )}
+              {errors.ledger && (
+                <p className="hint error-text" data-testid="home-ledger-error">
+                  Couldn't load P&amp;L.{' '}
+                  <button type="button" className="btn small" onClick={summary.reload}>
+                    Retry
+                  </button>
+                </p>
+              )}
+            </section>
 
-          <Card title="Money">
-            {a ? (
-              <>
-                <dl className="stats">
-                  <div>
-                    <dt>Cash<HelpIcon term="balance" /></dt>
-                    <dd className="big">{formatMoney(a.cash)}</dd>
+            <section className="home-section" aria-labelledby="home-by-h" data-testid="by-strategy">
+              <h2 className="home-label" id="home-by-h">By Strategy</h2>
+              <ul className="home-rows">
+                {strategies.map((s) => (
+                  <StrategyRow key={s.id} s={s} />
+                ))}
+              </ul>
+              {manual && (
+                <div className="home-manual" data-testid="manual-row">
+                  <div className="home-row">
+                    <span className="home-dot" aria-hidden="true" style={{ background: 'transparent', border: '1px solid currentColor' }} />
+                    <span className="home-row-name">
+                      You <span className="home-row-sub">manual, not in the total</span>
+                    </span>
+                    <span className="home-row-fig">
+                      <Fig value={manual.pnl} signed />
+                    </span>
                   </div>
-                  <div>
-                    <dt>At Risk</dt>
-                    <dd className="big">{formatMoney(a.exposure)}</dd>
-                  </div>
-                </dl>
-                <RiskBar exposure={a.exposure} limit={limit} />
-              </>
-            ) : (
-              <p className="muted">No account snapshot yet.</p>
-            )}
-          </Card>
+                </div>
+              )}
+            </section>
+          </div>
 
-          <Card title={<>Profit &amp; Loss<HelpIcon term="realised-pnl" /></>}>
-            {periodList.length > 0 && (
-              <PeriodSelect periods={periodList} value={pnlPeriod} onChange={setPnlPeriodSel} label="P&L period" id="pnl-period-select" />
-            )}
-            <PnlStats
-              pnl={periodPnl || status.pnl}
-              scope={periodPnl && periodPnl.basis === 'fill_date' ? 'makerByFill' : 'maker'}
-              emptyText="No settled fills yet. P&L appears once fills settle."
-            />
-            {periodPnl && periodPnl.basis === 'fill_date' && (
-              <p className="hint" data-testid="pnl-basis">Counted by fill date: a position belongs to the period it was filled in.</p>
-            )}
-            {status.fills_sync && status.fills_sync.error && (
-              <p className="hint error-text">Fill sync failed {formatAgo(status.fills_sync.last_utc)}: {String(status.fills_sync.error)}</p>
-            )}
-            <h3 className="subhead">By Source</h3>
-            {periodList.length > 1 && <PeriodSelect periods={periodList} value={period} onChange={setPeriod} />}
-            <SourcePnl
-              pnlToday={period === 'all' ? status.pnl_today : bySource}
-              strategies={strategies.data}
-              positions={positions.data}
-              totalLabel={period === 'all' ? 'Total Today' : 'Total'}
-            />
-            <PnlScope id={period === 'all' ? 'bySource' : 'bySourcePeriod'} ctx={{ tz: status.pnl_today_tz }} />
+          <div className="home-side">
+            <section className="home-section" aria-labelledby="home-risk-h">
+              <h2 className="home-label" id="home-risk-h">Risk</h2>
+              {a ? (
+                <>
+                  <RiskBar exposure={a.exposure} limit={limit} />
+                  <p className="home-cash" data-testid="home-cash">
+                    Cash<HelpIcon term="balance" /> {formatMoney(a.cash)}
+                  </p>
+                </>
+              ) : (
+                <p className="muted">No account snapshot yet.</p>
+              )}
+              {status.fills_sync && status.fills_sync.error && <p className="hint error-text">Fill sync failed: {String(status.fills_sync.error)}</p>}
+            </section>
+
             {equity.length > 1 && (
-              <>
+              <FoldCard title="Balance, 30 Days" id="balance-fold" summary={<span className="num">{money(equity[equity.length - 1])}</span>}>
                 <Sparkline
                   values={equity}
                   labels={equityDates}
@@ -258,16 +277,15 @@ export default function Overview() {
                   label={`Balance + positions in dollars, last 30 days, ${equityDates[0]} to ${equityDates[equityDates.length - 1]}: ${money(equity[0])} to ${money(equity[equity.length - 1])}; low ${money(Math.min(...equity))}, high ${money(Math.max(...equity))}`}
                 />
                 <p className="hint">Balance + positions, 30 days: {money(equity[0])} → {money(equity[equity.length - 1])}</p>
-              </>
+              </FoldCard>
             )}
-          </Card>
-
-          {'fill_quality' in status && (
-            <FoldCard title={<>Fill Quality<HelpIcon term="fill-quality" /></>} id="fill-quality-fold">
-              <FillQuality fq={status.fill_quality} />
-            </FoldCard>
-          )}
-        </>
+            {'fill_quality' in status && (
+              <FoldCard title={<>Fill Quality<HelpIcon term="fill-quality" /></>} id="fill-quality-fold">
+                <FillQuality fq={status.fill_quality} />
+              </FoldCard>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

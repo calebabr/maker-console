@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderApp, stubApi, STATUS } from './helpers.jsx';
 import { gateReason } from '../pages/Arbitrage.jsx';
 import { plainText } from '../components/ChangeDiff.jsx';
 import { isComplex } from '../pages/Settings.jsx';
+import SourcePnl from '../components/SourcePnl.jsx';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -25,7 +26,7 @@ async function enterCode(user, label) {
   await user.click(btns[btns.length - 1]);
 }
 
-describe('Periods on the Account page', () => {
+describe('Periods page (moved from Account)', () => {
   const routes = (extra = {}) => ({
     'GET /api/status': STATUS,
     'GET /api/account/positions': [],
@@ -37,7 +38,7 @@ describe('Periods on the Account page', () => {
 
   it('shows the timeline, the current period summary and both return-on-money-spent lines', async () => {
     stubApi(routes());
-    renderApp('/account');
+    renderApp('/performance/periods');
     const sum = await screen.findByTestId('period-summary');
     expect(within(sum).getByTestId('ps-spent')).toHaveTextContent('$96.00');
     expect(within(sum).getByTestId('ps-ret-settled')).toHaveTextContent('+8.89%');
@@ -52,7 +53,7 @@ describe('Periods on the Account page', () => {
   it('changing the period selector loads that period summary', async () => {
     const user = userEvent.setup();
     const calls = stubApi(routes({ 'GET /api/periods/p1/summary': { ...SUMMARY, fills: 7 } }));
-    renderApp('/account');
+    renderApp('/performance/periods');
     await screen.findByTestId('period-summary');
     await user.selectOptions(screen.getByLabelText('Period'), 'p1');
     await waitFor(() => expect(calls.some((c) => c.key === 'GET /api/periods/p1/summary')).toBe(true));
@@ -66,7 +67,7 @@ describe('Periods on the Account page', () => {
         'GET /api/periods/new9/summary': SUMMARY,
       }),
     );
-    renderApp('/account');
+    renderApp('/performance/periods');
     await screen.findByTestId('period-summary');
     await user.type(screen.getByLabelText('New Period Name'), 'Demo Period 3');
     await user.click(screen.getByRole('button', { name: /mark new period/i }));
@@ -87,7 +88,7 @@ describe('Periods on the Account page', () => {
         'DELETE /api/cash-flows/cf1': () => ({ periods: PERIODS.periods, cash_flows: [], deleted: 'cf1' }),
       }),
     );
-    renderApp('/account');
+    renderApp('/performance/periods');
     await screen.findByTestId('period-summary');
     await user.type(screen.getByLabelText('Amount ($)'), '25');
     await user.click(screen.getByRole('button', { name: /add entry/i }));
@@ -102,24 +103,14 @@ describe('Periods on the Account page', () => {
   });
 });
 
-describe('Overview By Source period selector', () => {
-  it('hides the selector with one period and uses /api/pnl/by-source for a chosen period', async () => {
-    const user = userEvent.setup();
-    const calls = stubApi({
-      'GET /api/status': { ...STATUS, account: { cash: 100, exposure: 10 }, pnl_today: { maker: 1, arb: 0, you: 0, total: 1 } },
-      'GET /api/history': { snapshots: [] },
-      'GET /api/strategies': [],
-      'GET /api/account/positions': [],
-      'GET /api/periods': PERIODS,
-      'GET /api/pnl/by-source': { period: P1, env: 'demo', by_source: { maker: 3.25, arb: 0, you: 0, total: 3.25 } },
-    });
-    renderApp('/');
-    const sel = await screen.findByLabelText('Period');
-    expect(screen.getByText('Total Today')).toBeInTheDocument();
-    await user.selectOptions(sel, 'p1');
-    await waitFor(() => expect(calls.some((c) => c.key === 'GET /api/pnl/by-source' && c.path.includes('period=p1'))).toBe(true));
+// Stage 2: Home no longer hosts the By Source card or its period select (Home has one RangeSelect and the
+// ledger total). The By Source component is kept and tested directly; the range behaviour is in home-hubs and
+// period-aware-2a2.
+describe('By Source card (component)', () => {
+  it('shows each strategy P&L and the total for the period it is given', () => {
+    render(<SourcePnl pnlToday={{ maker: 3.25, arb: 0, you: 0, total: 3.25 }} strategies={[]} positions={null} totalLabel="Total" />);
     const box = screen.getByTestId('source-pnl');
-    await waitFor(() => expect(within(box).getByText('Total').closest('li')).toHaveTextContent('+$3.25'));
+    expect(within(box).getByText('Total').closest('li')).toHaveTextContent('+$3.25');
   });
 });
 
@@ -152,23 +143,13 @@ describe('Settings [object Object] fix', () => {
   });
 });
 
-describe('At Risk You label refreshes with the status poll', () => {
-  it('re-reads the positions whenever the status refreshes', async () => {
-    let n = 0;
-    const calls = stubApi({
-      'GET /api/status': { ...STATUS, account: { cash: 100, exposure: 40 } },
-      'GET /api/history': { snapshots: [] },
-      'GET /api/strategies': [],
-      'GET /api/periods': { periods: [P1], cash_flows: [] },
-      'GET /api/account/positions': () => {
-        n += 1;
-        return [200, [{ ticker: 'A', value: 30, source: 'bot' }, { ticker: 'B', value: n === 1 ? 10 : 25, source: 'you' }]];
-      },
-    });
-    renderApp('/');
-    const split = await screen.findByTestId('risk-split');
-    await waitFor(() => expect(split).toHaveTextContent('You $25.00'));
-    expect(calls.filter((c) => c.key === 'GET /api/account/positions').length).toBeGreaterThanOrEqual(2);
+describe('At Risk You label (component)', () => {
+  it('splits at-risk money into Bot and You from the positions it is given, and follows new positions', () => {
+    const pos = (youValue) => [{ ticker: 'A', value: 30, source: 'bot' }, { ticker: 'B', value: youValue, source: 'you' }];
+    const { rerender } = render(<SourcePnl pnlToday={null} strategies={[]} positions={pos(10)} />);
+    expect(screen.getByTestId('risk-split')).toHaveTextContent('You $10.00');
+    rerender(<SourcePnl pnlToday={null} strategies={[]} positions={pos(25)} />);
+    expect(screen.getByTestId('risk-split')).toHaveTextContent('You $25.00');
   });
 });
 
@@ -202,14 +183,19 @@ describe('Arbitrage demo-execute, caps and gate reasons', () => {
       'GET /api/arb/opportunities': OPPS,
       'PUT /api/arb': () => ({ ...ARB, settings: { ...ARB.settings, arb_demo_execute: true } }),
     });
-    renderApp('/arb');
+    // Rows and demo P&L are on Results, the scanner state on Overview, the settings on Controls.
+    const results = renderApp('/strategies/arb/results');
     await screen.findByText('EV1');
     expect(screen.getAllByTestId('demo-exec-badge')).toHaveLength(2);
     expect(screen.getByTestId('gate-reason')).toHaveTextContent('Not placed: total exposure over the ceiling');
     expect(screen.getByText('Skipped by risk limit')).toBeInTheDocument();
-    expect(screen.getByTestId('demo-exec-state')).toHaveTextContent('on');
     expect(screen.getByTestId('demo-pnl')).toHaveTextContent('4 demo sets');
-    expect(screen.getByLabelText(/Scan Cap/i)).toHaveValue(10);
+    results.unmount();
+    const overview = renderApp('/strategies/arb');
+    expect(await screen.findByTestId('demo-exec-state')).toHaveTextContent('on');
+    overview.unmount();
+    renderApp('/strategies/arb/controls');
+    expect(await screen.findByLabelText(/Scan Cap/i)).toHaveValue(10);
     expect(screen.getByLabelText(/Day Cap/i)).toHaveValue(30);
     expect(screen.getByLabelText(/Series Cap Frac/i)).toHaveValue(0.35);
 

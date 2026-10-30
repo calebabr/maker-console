@@ -39,7 +39,7 @@ function usePrefersReducedMotion() {
 export default function PageTitle() {
   const { pathname } = useLocation();
   const title = titleForPath(pathname);
-  const Icon = iconForPath(String(pathname || '/').replace(/\/+$/, '') || '/');
+  const Icon = iconForPath(pathname);
   const { atTop, idle } = useScrollIdle({ resetKey: pathname });
   const reduce = usePrefersReducedMotion();
   const shown = atTop || !idle;

@@ -4,7 +4,7 @@ import { readLastVisit, sinceLabel, sinceParts, writeLastVisit } from '../utils/
 import '../styles/overview.css';
 
 /**
- * "Since You Last Checked" (item 30): new fills, markets settled and the P&L change since this device's
+ * "Since you last checked" strip (item 30; one line, dismissible, never pushes money figures down): new fills, markets settled and the P&L change since this device's
  * last visit (localStorage prior.lastVisit). Read-only. The last-visit time is written when the page is left
  * or hidden, and when the card is dismissed. First visit: writes now, shows nothing. Hidden when nothing
  * changed or the request fails.
@@ -39,25 +39,26 @@ export default function SinceCard() {
   }, []);
 
   if (gone || !since || !from) return null;
-  const parts = sinceParts(since, sinceLabel(from));
+  const parts = sinceParts(since, sinceLabel(from)).map((t) =>
+    (/^\d/.test(t) ? t.toLowerCase() : t).replace(/ Since /, ' since '),
+  );
   if (!parts.length) return null;
   return (
     <section className="since-card" data-testid="since-card" aria-label="Since you last checked">
-      <div className="since-head">
-        <h2 className="since-title">Since You Last Checked</h2>
-        <button
-          type="button"
-          className="since-dismiss"
-          aria-label="Dismiss"
-          onClick={() => {
-            writeLastVisit();
-            setGone(true);
-          }}
-        >
-          ×
-        </button>
-      </div>
-      <p className="since-line">{parts.join(' · ')}</p>
+      <p className="since-line">
+        <span className="since-title">Since you last checked:</span> {parts.join(', ')}
+      </p>
+      <button
+        type="button"
+        className="since-dismiss"
+        aria-label="Dismiss"
+        onClick={() => {
+          writeLastVisit();
+          setGone(true);
+        }}
+      >
+        ×
+      </button>
     </section>
   );
 }

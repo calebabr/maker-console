@@ -15,14 +15,33 @@ export async function login(page) {
   await expect(page.locator('header.appbar').getByRole('button', { name: /stop the bot/i })).toBeVisible();
 }
 
-const MAIN = ['Overview', 'Analytics', 'Activity', 'Markets'];
+// The five phone tabs (UI-1a stage 2). 'Overview' is kept as an alias of Home for older specs.
+const TABS = ['Home', 'Strategies', 'Performance', 'Activity', 'More'];
+// Pages reached through a hub: Strategies -> card, Strategies -> card -> view, Performance -> link.
+const STRATEGY_CARD = { Maker: 'maker', Markets: 'maker', Arbitrage: 'arb' };
+const STRATEGY_VIEW = { 'Maker Results': ['maker', 'Results'], 'Maker Controls': ['maker', 'Controls'], 'Markets Controls': ['maker', 'Controls'], 'Arbitrage Results': ['arb', 'Results'], 'Arbitrage Controls': ['arb', 'Controls'] };
+const PERFORMANCE_LINK = { Analytics: /^Analytics/, 'Shadow Estimate': /^Shadow/, Periods: /^Periods/ };
+
+const tab = (page, label) => page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: label, exact: true });
 
 /** Click through the real nav (a full page.goto would reset the in-memory mock and the session). */
 export async function nav(page, label) {
-  if (MAIN.includes(label)) {
-    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: label }).click();
+  if (label === 'Overview') label = 'Home';
+  if (TABS.includes(label)) {
+    await tab(page, label).click();
+  } else if (STRATEGY_CARD[label]) {
+    await tab(page, 'Strategies').click();
+    await page.getByTestId(`strategy-card-${STRATEGY_CARD[label]}`).click(); // two taps from the tab bar
+  } else if (STRATEGY_VIEW[label]) {
+    const [id, view] = STRATEGY_VIEW[label];
+    await tab(page, 'Strategies').click();
+    await page.getByTestId(`strategy-card-${id}`).click();
+    await page.getByTestId('subnav').getByText(view, { exact: true }).click();
+  } else if (PERFORMANCE_LINK[label]) {
+    await tab(page, 'Performance').click();
+    await page.getByRole('main').getByRole('link', { name: PERFORMANCE_LINK[label] }).first().click();
   } else {
-    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'More' }).click();
+    await tab(page, 'More').click();
     await page.getByRole('navigation', { name: 'More pages' }).getByRole('link', { name: label }).click();
   }
 }

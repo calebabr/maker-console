@@ -1,71 +1,180 @@
-// The one route -> page title map for signed-in pages, plus the navigation layout. Used by the sticky page
-// title bar (components/PageTitle.jsx), document.title, the bottom tabs, the wide-screen sidebar and the
-// More page. Keep it in step with the <Route>s in App.jsx (src/test/page-title.test.jsx checks every entry
-// renders).
+// The one route map for signed-in pages: titles, bottom tabs, the wide-screen sidebar groups, the More page
+// groups and the legacy redirects. Used by the sticky page title (components/PageTitle.jsx), document.title,
+// NavBar, More and App.jsx (src/test/route-map.test.jsx and page-title.test.jsx check every entry renders).
+// Information architecture: UI-1a stage 2, section 3 (five phone tabs: Home | Strategies | Performance |
+// Activity | More). Paths of pages that already existed are unchanged.
 export const APP_NAME = 'Prior';
 export const TAGLINE_LEAD = 'Your strategies.';
 export const TAGLINE_ACCENT = 'One tap away.';
 export const TAGLINE = `${TAGLINE_LEAD} ${TAGLINE_ACCENT}`;
 
+// ---------------------------------------------------------------- strategies
+
+/** Strategy ids that have a page, with the short name used in chrome (no "Bot · " prefix). */
+export const STRATEGY_PAGES = { maker: 'Maker', arb: 'Arbitrage' };
+export const STRATEGY_IDS = Object.keys(STRATEGY_PAGES);
+/** The three views of a strategy page (one path segment each, so Back works). */
+export const STRATEGY_VIEWS = [
+  { id: 'overview', label: 'Overview', segment: '' },
+  { id: 'results', label: 'Results', segment: 'results' },
+  { id: 'controls', label: 'Controls', segment: 'controls' },
+];
+
+/** "/strategies/maker", "/strategies/maker/results", ... (`view` is 'overview' | 'results' | 'controls'). */
+export function strategyPath(id, view = 'overview') {
+  const v = STRATEGY_VIEWS.find((x) => x.id === view) || STRATEGY_VIEWS[0];
+  return `/strategies/${id}${v.segment ? `/${v.segment}` : ''}`;
+}
+
+// Reserved, hidden slot: the Analysis page does not exist yet (no tab, no link). The path is claimed so a later
+// build can mount it without a route change; for now it falls back to the Performance hub.
+export const PERFORMANCE_ANALYSIS_PATH = '/performance/analysis';
+
+// ---------------------------------------------------------------- titles
+
+const strategyTitles = STRATEGY_IDS.flatMap((id) =>
+  STRATEGY_VIEWS.map((v) => ({ path: strategyPath(id, v.id), title: STRATEGY_PAGES[id] })),
+);
+
+// Page names are Title Case. Strategy sub-pages title as "Maker" / "Arbitrage" (the view name is in the tablist).
 export const ROUTE_TITLES = [
-  { path: '/', title: 'Overview' },
+  { path: '/', title: 'Home' },
+  { path: '/strategies', title: 'Strategies' },
+  ...strategyTitles,
+  { path: '/performance', title: 'Performance' },
+  { path: '/performance/periods', title: 'Periods' },
   { path: '/analytics', title: 'Analytics' },
+  { path: '/shadow', title: 'Shadow Estimate' },
   { path: '/activity', title: 'Activity' },
-  { path: '/markets', title: 'Markets' },
   { path: '/more', title: 'More' },
   { path: '/health', title: 'Health' },
-  { path: '/settings', title: 'Settings' },
-  { path: '/account', title: 'Account' },
-  { path: '/alerts', title: 'Alerts' },
-  { path: '/mode', title: 'Mode' },
   { path: '/server', title: 'Server' },
+  { path: '/mode', title: 'Mode' },
   { path: '/logs', title: 'Logs' },
-  { path: '/arb', title: 'Arbitrage' },
-  { path: '/shadow', title: 'Shadow Estimate' },
+  { path: '/account', title: 'Account' },
+  { path: '/settings', title: 'Settings' },
+  { path: '/alerts', title: 'Alerts' },
   { path: '/terminology', title: 'Terminology' },
 ];
 
-// Bottom tabs on phones, in the owner's order. (UX contract section 4.)
-export const TAB_ROUTES = [
-  { path: '/', label: 'Overview' },
-  { path: '/analytics', label: 'Analytics' },
-  { path: '/activity', label: 'Activity' },
-  { path: '/markets', label: 'Markets' },
-  { path: '/more', label: 'More' },
-];
+// ---------------------------------------------------------------- legacy redirects
 
-// What the More page lists (and the sidebar shows under its main entries).
-export const MORE_ROUTES = [
-  { path: '/health', label: 'Health', blurb: 'Monitor summary and health check' },
-  { path: '/settings', label: 'Settings', blurb: 'Limits, polling, display and text size' },
-  { path: '/account', label: 'Account', blurb: 'Your Kalshi balance and open positions' },
-  { path: '/alerts', label: 'Alerts', blurb: 'Past alerts and notification choices' },
-  { path: '/mode', label: 'Mode', blurb: 'Switch between demo and live' },
-  { path: '/server', label: 'Server', blurb: 'Keep-awake pings and the external pinger' },
-  { path: '/logs', label: 'Logs', blurb: 'Server log and audit trail' },
-  { path: '/arb', label: 'Arbitrage', blurb: 'The bracket arbitrage scanner' },
-  { path: '/shadow', label: 'Shadow Estimate', blurb: 'Simulated results of the strategy, no orders' },
-  { path: '/terminology', label: 'Terminology', blurb: 'Plain-language glossary' },
+/** Old path -> new path. Query string and hash are kept (notification links, bookmarks). */
+export const LEGACY_REDIRECTS = [
+  { from: '/markets', to: '/strategies/maker/controls' },
+  { from: '/arb', to: '/strategies/arb' },
 ];
 
 function normalise(pathname) {
   return String(pathname || '/').replace(/\/+$/, '') || '/';
 }
 
-/** Page title for a pathname ("/markets/" and "/markets" both match), or null if unknown. */
+/** The new path for an old one ("/markets/" matches too), or null when `pathname` is not a legacy path. */
+export function redirectTarget(pathname) {
+  const p = normalise(pathname);
+  const hit = LEGACY_REDIRECTS.find((r) => r.from === p);
+  return hit ? hit.to : null;
+}
+
+/** Page title for a pathname ("/health/" and "/health" both match), or null if unknown. */
 export function titleForPath(pathname) {
   const p = normalise(pathname);
   const hit = ROUTE_TITLES.find((r) => r.path === p);
   return hit ? hit.title : null;
 }
 
-/** document.title for a page: "Markets · Prior"; just "Prior" when unknown. */
+/** document.title for a page: "Health · Prior"; just "Prior" when unknown. */
 export function documentTitle(title) {
   return title ? `${title} · ${APP_NAME}` : APP_NAME;
 }
 
-/** True when `pathname` is one of the pages listed under More (the More tab then shows as active). */
-export function isMorePath(pathname) {
+// ---------------------------------------------------------------- bottom tabs
+
+// Phone bottom tabs, in the owner's order (fixed). `key` is what tabForPath() returns.
+export const TAB_ROUTES = [
+  { key: 'home', path: '/', label: 'Home' },
+  { key: 'strategies', path: '/strategies', label: 'Strategies' },
+  { key: 'performance', path: '/performance', label: 'Performance' },
+  { key: 'activity', path: '/activity', label: 'Activity' },
+  { key: 'more', path: '/more', label: 'More' },
+];
+
+const under = (p, base) => p === base || p.startsWith(`${base}/`);
+
+/**
+ * Which tab key lights up for a pathname: 'home' | 'strategies' | 'performance' | 'activity' | 'more'.
+ * Old paths (/markets, /arb) light Strategies so the tab never flashes More while they redirect;
+ * /analytics and /shadow light Performance. Unknown paths return null.
+ */
+export function tabForPath(pathname) {
   const p = normalise(pathname);
-  return p === '/more' || MORE_ROUTES.some((r) => p === r.path || p.startsWith(`${r.path}/`));
+  if (p === '/') return 'home';
+  if (under(p, '/strategies') || p === '/markets' || p === '/arb') return 'strategies';
+  if (under(p, '/performance') || p === '/analytics' || p === '/shadow') return 'performance';
+  if (under(p, '/activity')) return 'activity';
+  if (p === '/more' || MORE_ROUTES.some((r) => under(p, r.path))) return 'more';
+  return null;
 }
+
+// ---------------------------------------------------------------- More page and sidebar groups
+
+// What the More page lists, grouped (System, You, Help). The same groups head the wide-screen sidebar.
+export const MORE_GROUPS = [
+  {
+    id: 'system',
+    label: 'System',
+    items: [
+      { path: '/health', label: 'Health', blurb: 'Monitor summary and health check' },
+      { path: '/server', label: 'Server', blurb: 'Keep-awake pings and the external pinger' },
+      { path: '/mode', label: 'Mode', blurb: 'Switch between demo and live' },
+      { path: '/logs', label: 'Logs', blurb: 'Server log and audit trail' },
+    ],
+  },
+  {
+    id: 'you',
+    label: 'You',
+    items: [
+      { path: '/account', label: 'Account', blurb: 'Your Kalshi balance and open positions' },
+      { path: '/settings', label: 'Settings', blurb: 'Limits, polling, display and text size' },
+      { path: '/alerts', label: 'Alerts', blurb: 'Past alerts and notification choices' },
+    ],
+  },
+  {
+    id: 'help',
+    label: 'Help',
+    items: [{ path: '/terminology', label: 'Terminology', blurb: 'Plain-language glossary' }],
+  },
+];
+
+/** Flat list of every page under More, in group order. */
+export const MORE_ROUTES = MORE_GROUPS.flatMap((g) => g.items);
+
+// Wide-screen (>= 1024 px) sidebar: same destinations as the tabs, with children under Strategies and
+// Performance, then the More groups. `children` are indented links; Strategies is expanded by default.
+export const SIDEBAR_MAIN = [
+  { path: '/', label: 'Home', tab: 'home' },
+  {
+    path: '/strategies',
+    label: 'Strategies',
+    tab: 'strategies',
+    end: true,
+    children: [
+      { path: '/strategies/maker', label: 'Maker', match: '/strategies/maker' },
+      { path: '/strategies/arb', label: 'Arbitrage', match: '/strategies/arb' },
+    ],
+  },
+  {
+    path: '/performance',
+    label: 'Performance',
+    tab: 'performance',
+    end: true,
+    selfActive: false,
+    children: [
+      { path: '/performance', label: 'All Strategies', end: true },
+      { path: '/analytics', label: 'Analytics' },
+      { path: '/shadow', label: 'Shadow Estimate' },
+      { path: '/performance/periods', label: 'Periods' },
+    ],
+  },
+  { path: '/activity', label: 'Activity', tab: 'activity' },
+];

@@ -2,15 +2,10 @@ import { forwardRef, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Chip from './Chip.jsx';
 import HelpIcon from './HelpIcon.jsx';
-import HeartbeatStrip from './HeartbeatStrip.jsx';
 import StopButton from './StopButton.jsx';
-import PnlScope from './PnlScope.jsx';
-import PnlCombined from './PnlCombined.jsx';
-import { TODAY_EMPTY, TODAY_UNAVAILABLE, todayKind } from '../utils/pnlScopes.js';
 import { IconLock } from './Icons.jsx';
-import { formatAgo, formatMoney, formatUntil } from '../utils/format.js';
+import { formatAgo, formatUntil } from '../utils/format.js';
 import { abnormalities, isRunning, overallState, ringProgress, runTimes } from '../utils/overview.js';
-import { riskLimit } from '../utils/status.js';
 import '../styles/overview.css';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -89,10 +84,10 @@ function ActionsMenu({ onRunOnce, disabled }) {
               onRunOnce();
             }}
           >
-            Run Once
+            Run once
           </button>
           <Link role="menuitem" to="/mode" onClick={() => setOpen(false)}>
-            Mode and Live Access
+            Mode and live access
           </Link>
         </div>
       )}
@@ -101,9 +96,9 @@ function ActionsMenu({ onRunOnce, disabled }) {
 }
 
 /**
- * The status and control card (item 25): state ring + label + mode chip, a context button
- * (Stop while running, Start otherwise; Stop is ALWAYS present and identical to the header one),
- * three tiles, the heartbeat strip and one timing line. Abnormal facts show in red on their own.
+ * The compact status and control card (stage 2): state ring + label + mode chip, one timing line and a
+ * context button (Stop while running, Start otherwise; Stop is ALWAYS present and identical to the header one).
+ * Money figures live in the Total P&L section of Home; the heartbeat strip moved to the Maker page. Abnormal facts show in red on their own.
  */
 const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRunOnce }, ref) {
   const now = useNow();
@@ -111,10 +106,6 @@ const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRun
   const st = overallState(status, now);
   const bad = abnormalities(status, now);
   const { last, next } = runTimes(status);
-  const a = status && status.account;
-  const limit = riskLimit(status);
-  const today = status && status.pnl_today && status.pnl_today.total;
-  const d30 = status && status.pnl && status.pnl.d30;
   const overdue = bad.some((b) => b.key === 'overdue');
   const mode = status && status.mode === 'live' ? 'live' : 'demo';
 
@@ -140,34 +131,8 @@ const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRun
         </ul>
       )}
 
-      <dl className="ov-tiles" data-testid="status-tiles">
-        <div>
-          <dt>Today's P&amp;L</dt>
-          {status && todayKind(status) === 'unavailable' ? (
-            <dd className="ov-empty" data-testid="today-unavailable">{TODAY_UNAVAILABLE}</dd>
-          ) : status && (todayKind(status) === 'none' || !isNum(today)) ? (
-            <dd className="ov-empty" data-testid="today-empty">{TODAY_EMPTY}</dd>
-          ) : (
-            <dd className={pnlClass(today)}>{formatMoney(today, { sign: true })}</dd>
-          )}
-          <PnlScope id="todayShort" ctx={{ tz: status && status.pnl_today_tz }} as="dd" />
-        </div>
-        <div>
-          <dt>Maker P&amp;L (30 days)</dt>
-          <dd className={pnlClass(d30)}>{formatMoney(d30, { sign: true })}</dd>
-          <PnlScope id="maker" as="dd" />
-        </div>
-        <div>
-          <dt>At Risk</dt>
-          <dd>{formatMoney(a && a.exposure)}{isNum(limit) && isNum(a && a.exposure) && a.exposure > limit ? <span className="error-text"> !</span> : null}</dd>
-        </div>
-      </dl>
-      <PnlCombined status={status} />
-
-      <HeartbeatStrip passes={status && status.recent_passes} />
-
       <p className="ov-timing" data-testid="timing-line">
-        <span>Last Run {last ? formatAgo(last) : '—'}</span>
+        <span>Last run {last ? formatAgo(last) : '—'}</span>
         {running && next && (
           <>
             {' · '}

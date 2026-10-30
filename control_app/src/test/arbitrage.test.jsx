@@ -40,13 +40,19 @@ function base(extra = {}) {
 }
 
 describe('Arbitrage page', () => {
-  it('shows state, opportunities and a Stop button; P&L null renders a dash', async () => {
+  it('Results: P&L null renders the empty text', async () => {
+    base();
+    renderApp('/strategies/arb/results');
+    expect(await screen.findByText('No executed sets yet.')).toBeInTheDocument();
+    expect(await screen.findByText('KXDEMOA-26OCT13')).toBeInTheDocument();
+  });
+
+  it('shows state, opportunities and a Stop button', async () => {
     base();
     renderApp('/arb');
     expect(await screen.findByRole('img', { name: /arbitrage is log only/i })).toBeInTheDocument();
     expect(await screen.findByText('KXDEMOA-26OCT13')).toBeInTheDocument();
     expect(screen.getByText('Partial fill')).toBeInTheDocument();
-    expect(screen.getByText('No executed sets yet.')).toBeInTheDocument();
     const main = document.querySelector('main');
     expect(within(main).getByRole('button', { name: /stop the bot/i })).toBeInTheDocument();
   });
@@ -89,7 +95,7 @@ describe('Arbitrage page', () => {
   it('settings save shows the server 400 detail list', async () => {
     const user = userEvent.setup();
     const calls = base({ 'PUT /api/arb': [400, { detail: ['arb_poll_seconds too fast', 'other'] }] });
-    renderApp('/arb');
+    renderApp('/strategies/arb/controls');
     const field = await screen.findByLabelText(/poll seconds/i);
     await user.clear(field);
     await user.type(field, '4');
@@ -135,20 +141,21 @@ describe('Arbitrage page', () => {
 });
 
 describe('P&L display', () => {
-  it('Overview renders status.pnl when present', async () => {
-    stubApi({ 'GET /api/status': { ...STATUS, pnl: { d7: 4.5, d30: -2.25 } }, 'GET /api/history': { snapshots: [] } });
-    renderApp('/');
+  // Stage 2: Home shows the ledger total; the 7/30-day status.pnl strip lives on Activity.
+  it('the P&L strip renders status.pnl when present', async () => {
+    stubApi({ 'GET /api/status': { ...STATUS, pnl: { d7: 4.5, d30: -2.25 } }, 'GET /api/activity': { items: [] } });
+    renderApp('/activity');
     const pnl = await screen.findByTestId('pnl');
     expect(within(pnl).getByText('+$4.50')).toBeInTheDocument();
     expect(within(pnl).getByText('-$2.25')).toBeInTheDocument();
   });
 
-  it('Overview shows dashes and a hint when pnl is null', async () => {
-    stubApi({ 'GET /api/status': STATUS, 'GET /api/history': { snapshots: [] } });
-    renderApp('/');
+  it('the P&L strip shows dashes and a hint when pnl is null', async () => {
+    stubApi({ 'GET /api/status': STATUS, 'GET /api/activity': { items: [] } });
+    renderApp('/activity');
     const pnl = await screen.findByTestId('pnl');
     expect(within(pnl).getAllByText('—').length).toBe(2);
-    expect(screen.getByText(/No settled fills yet/)).toBeInTheDocument();
+    expect(screen.getByText(/P&L appears once fills settle/)).toBeInTheDocument();
   });
 
   it('Activity shows the P&L strip', async () => {
@@ -168,7 +175,7 @@ describe('contract shapes', () => {
         report_utc: null,
       },
     });
-    renderApp('/markets');
+    renderApp('/strategies/maker/results');
     expect(await screen.findByText('Keep (80 More Fills to Judge)')).toBeInTheDocument();
   });
 

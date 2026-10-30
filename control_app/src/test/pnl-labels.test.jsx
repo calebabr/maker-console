@@ -62,7 +62,7 @@ describe('viewer time zone', () => {
     expect(viewerTimeZone()).toMatch(/^[A-Za-z0-9_+\-/]+$/);
     const calls = stubApi(ovr(RUNNING));
     renderApp('/');
-    await screen.findByTestId('status-tiles');
+    await screen.findByTestId('home-total');
     const plain = calls.filter((c) => c.key === 'GET /api/status' && !c.path.includes('period='));
     expect(plain.length).toBeGreaterThan(0);
     expect(plain[0].path).toBe(`/api/status?tz=${encodeURIComponent(viewerTimeZone())}`);
@@ -74,52 +74,37 @@ describe('viewer time zone', () => {
     const spy = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(() => ({ resolvedOptions: () => ({}) }));
     const calls = stubApi(ovr(RUNNING));
     renderApp('/');
-    await screen.findByTestId('status-tiles');
+    await screen.findByTestId('home-total');
     spy.mockRestore();
     expect(calls.find((c) => c.key === 'GET /api/status' && !c.path.includes('period=')).path).toBe('/api/status');
   });
 });
 
-describe('Overview tiles', () => {
-  it('names the 30-day tile Maker P&L, labels every tile and shows the combined total with the split', async () => {
+describe('Home total', () => {
+  it('names the scope in one line (settlement date, your time zone) and drops the old tiles and combined line', async () => {
     stubApi(ovr(RUNNING));
     renderApp('/');
-    const tiles = await screen.findByTestId('status-tiles');
-    expect(within(tiles).getByText('Maker P&L (30 days)')).toBeInTheDocument();
-    expect(within(tiles).queryByText('30-Day P&L')).toBeNull();
-    expect(within(tiles).getByText('+$5.50')).toBeInTheDocument();
-    expect(within(tiles).getByTestId('scope-maker')).toHaveTextContent('Realized, maker fills only, by settlement date (UTC)');
-    expect(within(tiles).getByTestId('scope-todayShort')).toHaveTextContent('Settled since midnight America/Chicago');
-    const combined = await screen.findByTestId('pnl-combined');
-    expect(within(combined).getByTestId('pnl-combined-total')).toHaveTextContent('+$10.00');
-    expect(within(combined).getByTestId('pnl-split')).toHaveTextContent('Maker +$5.50 / Arbitrage +$4.50');
-    expect(within(combined).getByTestId('scope-makerArb')).toHaveTextContent('maker + arbitrage, by settlement date (UTC)');
+    const total = await screen.findByTestId('home-total');
+    expect(total).toHaveTextContent('Settled P&L, by settlement date, your time zone');
+    expect(screen.queryByTestId('status-tiles')).toBeNull();
+    expect(screen.queryByTestId('pnl-combined')).toBeNull();
   });
 
   it('says "No settlements yet today" instead of a dash or $0.00 when nothing settled', async () => {
     stubApi(ovr(NOTHING_TODAY));
     renderApp('/');
-    const tiles = await screen.findByTestId('status-tiles');
-    expect(within(tiles).getByTestId('today-empty')).toHaveTextContent(TODAY_EMPTY);
+    const total = await screen.findByTestId('home-total');
+    expect(within(total).getByTestId('today-empty')).toHaveTextContent(TODAY_EMPTY);
     expect(TODAY_EMPTY).toBe('No settlements yet today');
-    expect(within(tiles).queryByText('$0.00')).toBeNull();
+    expect(within(total).queryByText('$0.00')).toBeNull();
   });
 
   it('shows $0.00 only when something settled and netted to zero', async () => {
     stubApi(ovr(ZERO_TODAY));
     renderApp('/');
-    const tiles = await screen.findByTestId('status-tiles');
-    expect(within(tiles).getByText('$0.00')).toBeInTheDocument();
-    expect(within(tiles).queryByTestId('today-empty')).toBeNull();
-  });
-
-  it('omits the combined line when the API sends no total, and labels the P&L card by its date rule', async () => {
-    stubApi(ovr({ ...RUNNING, pnl_total: null, pnl_arb: null }));
-    renderApp('/');
-    await screen.findByTestId('status-tiles');
-    expect(screen.queryByTestId('pnl-combined')).toBeNull();
-    expect((await screen.findAllByTestId('scope-maker')).length).toBeGreaterThanOrEqual(2);   // tile + Profit & Loss card
-    expect(await screen.findByTestId('scope-bySource')).toHaveTextContent('settled since midnight America/Chicago');
+    const total = await screen.findByTestId('home-total');
+    expect(within(total).getByText('$0.00')).toBeInTheDocument();
+    expect(within(total).queryByTestId('today-empty')).toBeNull();
   });
 });
 
@@ -154,7 +139,7 @@ describe('Analytics, Account, Arbitrage', () => {
 
   it('Arbitrage shows guaranteed profit beside realized profit from the status figures, each with its scope', async () => {
     stubApi({ 'GET /api/status': RUNNING, 'GET /api/arb': ARB, 'GET /api/arb/opportunities': { items: [] } });
-    renderApp('/arb');
+    renderApp('/strategies/arb/results');
     const realized = await screen.findByTestId('arb-realized');
     expect(screen.getByTestId('scope-arbGuaranteed')).toHaveTextContent('Guaranteed at execution, not yet realized');
     expect(within(realized).getByTestId('scope-arbRealized')).toHaveTextContent('Realized, arbitrage fills only, by settlement date (UTC)');
@@ -166,7 +151,7 @@ describe('Analytics, Account, Arbitrage', () => {
 
   it('Arbitrage says nothing has settled yet (not $0.00) when there is no realized figure, and flags demo play money', async () => {
     stubApi({ 'GET /api/status': { ...RUNNING, mode: 'demo', pnl_arb: null }, 'GET /api/arb': ARB, 'GET /api/arb/opportunities': { items: [] } });
-    renderApp('/arb');
+    renderApp('/strategies/arb/results');
     const realized = await screen.findByTestId('arb-realized');
     expect(within(realized).getByText('No arbitrage fills have settled yet.')).toBeInTheDocument();
     expect(within(realized).getByText(/demo mode, so this is play money/)).toBeInTheDocument();

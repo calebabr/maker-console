@@ -43,7 +43,7 @@ describe('Markets cards', () => {
   it('open folded: name, fills, P&L and verdict; no chart, axis or key until a card is opened', async () => {
     const user = userEvent.setup();
     stubApi(routes());
-    renderApp('/markets');
+    renderApp('/strategies/maker/results');
     const toggle = await screen.findByRole('button', { name: /^Demo Series A/ });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
     expect(toggle).toHaveTextContent('40 Fills');

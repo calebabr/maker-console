@@ -8,11 +8,12 @@
 .ov-hl-sep { color: var(--muted); font-weight: 400; }
 .ov-demo { margin: 0 0 8px; }
 
-/* Status card: left accent edge + ring colour show the state. */
-.status-card { position: relative; border-left: 3px solid var(--off); }
-.status-card.state-live { border-left-color: var(--ok); }
-.status-card.state-demo { border-left-color: var(--warn); }
-.status-card.state-error { border-left-color: var(--danger); }
+/* Status card: a faint state tint and a small dot show the state (text carries the meaning too). */
+.status-card { --state-c: var(--off); position: relative; background: color-mix(in srgb, var(--state-c) 8%, var(--surface)); }
+.status-card::before { content: ""; position: absolute; top: 10px; left: 10px; width: 8px; height: 8px; border-radius: 50%; background: var(--state-c); }
+.status-card.state-live { --state-c: var(--ok); }
+.status-card.state-demo { --state-c: var(--warn); }
+.status-card.state-error { --state-c: var(--danger); }
 .ov-top { display: flex; align-items: center; gap: 12px; }
 .ov-state { flex: 1; min-width: 0; }
 .ov-state-label { font-size: 1.375rem; font-weight: 600; letter-spacing: -0.01em; line-height: 1.2; }
@@ -68,12 +69,54 @@
 .ov-actions .btn { width: 100%; }
 .ov-risk-line { margin: 6px 0 0; font-size: 0.875rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 
-/* Since You Last Checked */
-.since-card { margin: 4px 0 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--r-md); }
-.since-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.since-title { font-size: 0.8125rem; font-weight: 600; color: var(--muted); }
-.since-line { margin: 4px 0 0; font-size: 0.9375rem; font-variant-numeric: tabular-nums; }
-.since-dismiss { font: inherit; font-size: 1.25rem; line-height: 1; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 4px 8px; margin: -4px -8px -4px 0; }
+/* Since you last checked: one dismissible strip (stage 2). */
+.since-card { display: flex; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-2); padding: 0 0 0 var(--sp-3); min-height: var(--tap); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); border: 1px solid var(--border); border-radius: var(--r-md); }
+.since-line { flex: 1; min-width: 0; margin: 0; font-size: var(--fs-sm, 0.875rem); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.since-title { color: var(--muted); }
+.since-dismiss { flex-shrink: 0; width: var(--tap); min-height: var(--tap); font: inherit; font-size: 1.25rem; line-height: 1; color: var(--muted); background: none; border: 0; cursor: pointer; }
+
+/* Home (stage 2): total, by strategy, risk. */
+.home-total { padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
+.home-label { margin: 0 0 var(--sp-1); font-size: var(--fs-sm, 0.875rem); font-weight: 600; color: var(--muted); }
+.home-figure { margin: 0; font-size: 2rem; font-weight: 600; line-height: 1.1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.home-total .range-select { margin: var(--sp-2) 0; }
+.home-scope { margin: var(--sp-1) 0 0; font-size: var(--fs-sm, 0.875rem); color: var(--muted); }
+.home-today { margin: var(--sp-1) 0 0; font-size: var(--fs-md, 1rem); font-variant-numeric: tabular-nums; }
+.home-section { padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
+.home-rows { list-style: none; margin: 0; padding: 0; }
+.home-row { display: flex; align-items: center; gap: var(--sp-2); min-height: 56px; padding: 0 var(--sp-1); color: var(--text); text-decoration: none; border-top: 1px solid var(--border); }
+.home-rows > li:first-child .home-row { border-top: 0; }
+a.home-row:hover { text-decoration: none; background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.home-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--strategy-color, var(--muted)); }
+.home-row-name { flex: 1; min-width: 0; font-weight: 600; }
+.home-row-sub { display: block; font-size: var(--fs-sm, 0.875rem); font-weight: 400; color: var(--muted); }
+.home-row-fig { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.home-row-chev { color: var(--muted); display: inline-flex; }
+.home-manual { border-top: 1px dashed var(--border-strong, var(--border)); margin-top: var(--sp-2); }
+.home-manual .home-row { min-height: 48px; color: var(--muted); }
+.home-manual .home-row-name { font-weight: 400; }
+.home-cash { margin: var(--sp-1) 0 0; font-size: var(--fs-md, 1rem); font-variant-numeric: tabular-nums; }
+.home-grid { display: block; }
+@media (min-width: 1024px) {
+  .home-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 var(--sp-5, 24px); align-items: start; }
+}
+
+/* Hubs (Strategies, Performance) */
+.hub-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); flex-wrap: wrap; }
+.hub-cards { margin-top: var(--sp-2); }
+@media (min-width: 768px) { .hub-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--sp-4, 16px); } }
+.perf-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.perf-table th, .perf-table td { padding: var(--sp-2) var(--sp-1); text-align: right; border-top: 1px solid var(--border); white-space: nowrap; }
+.perf-table th:first-child, .perf-table td:first-child { text-align: left; white-space: normal; }
+.perf-table thead th { border-top: 0; font-size: var(--fs-sm, 0.875rem); font-weight: 600; color: var(--muted); }
+.perf-table tr.perf-manual td { border-top: 1px dashed var(--border-strong, var(--border)); color: var(--muted); }
+.perf-table tfoot td { font-weight: 600; }
+.perf-scroll { overflow-x: auto; }
+.perf-links { list-style: none; margin: 0; padding: 0; }
+.perf-links a { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-height: 56px; color: var(--text); text-decoration: none; border-top: 1px solid var(--border); }
+.perf-links li:first-child a { border-top: 0; }
+.perf-links a:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.perf-link-blurb { display: block; font-size: var(--fs-sm, 0.875rem); color: var(--muted); }
 
 /* P&L by source */
 .src-rows { list-style: none; margin: 0; padding: 0; }
@@ -96,7 +139,7 @@
   .status-widget {
     display: flex; flex-direction: column; gap: 8px; position: fixed; z-index: 25; width: 128px; padding: 10px;
     right: 12px; top: calc(var(--appbar-h, 53px) + var(--page-title-h, 44px) + 12px);
-    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--off); border-radius: var(--r-md);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
     animation: fade var(--ease);
   }
   .status-widget.state-live { border-left-color: var(--ok); }
