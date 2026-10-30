@@ -95,10 +95,12 @@ def validate_marker(body: Any, markers: list[dict], now: datetime) -> dict:
 
 
 def validate_cash_flow(body: Any, now: datetime) -> dict:
-    """{kind, amount, ts, note}. ValueError(list[str]) on bad input."""
-    allowed = {"kind", "amount", "ts", "note"}
+    """{kind, amount, ts, note, confirm_duplicate}. The date (`ts`) is REQUIRED: a deposit or withdrawal has to carry
+    the day it really happened, because a default of "now" put two earlier deposits into the wrong period (found
+    2026-10-23). A future date is refused. ValueError(list[str]) on bad input."""
+    allowed = {"kind", "amount", "ts", "note", "confirm_duplicate"}
     if not isinstance(body, dict) or set(body) - allowed:
-        raise ValueError(["body: must be {\"kind\", \"amount\", \"ts\"?, \"note\"?}"])
+        raise ValueError(["body: must be {\"kind\", \"amount\", \"ts\", \"note\"?, \"confirm_duplicate\"?}"])
     errs: list[str] = []
     out: dict = {}
     kind = body.get("kind")
@@ -112,22 +114,67 @@ def validate_cash_flow(body: Any, now: datetime) -> dict:
         out["amount"] = round(float(amt), 2)
         if out["amount"] <= 0:
             errs.append("amount: must be at least 0.01")
-    ts = now
-    if body.get("ts") is not None:
+    ts = None
+    if body.get("ts") is None or body.get("ts") == "":
+        errs.append("ts: required (the date the money moved, e.g. 2026-10-17)")
+    else:
         ts = utc(body["ts"]) if isinstance(body["ts"], str) else None
         if ts is None:
-            errs.append("ts: must be an ISO date-time")
+            errs.append("ts: must be an ISO date or date-time")
         elif ts > now + FUTURE_SLACK:
             errs.append("ts: cannot be in the future")
         elif ts < EARLIEST_FLOW_TS:
             errs.append("ts: too far in the past")
     out["ts"] = ts
+    cd = body.get("confirm_duplicate", False)
+    if not isinstance(cd, bool):
+        errs.append("confirm_duplicate: must be true or false")
+    out["confirm_duplicate"] = cd is True
     try:
         out["note"] = clean_text(body.get("note"), "note", maxlen=NOTE_MAX)
     except ValueError as e:
         errs.append(str(e))
     if errs:
         raise ValueError(errs)
+    return out
+
+
+def find_duplicate(doc: dict, flows: Iterable[dict]) -> dict | None:
+    """An existing flow of the same kind, the same amount (to the cent) and the same UTC calendar date as `doc`."""
+    ts = utc(doc.get("ts"))
+    for f in flows:
+        t = utc(f.get("ts"))
+        if (t is not None and ts is not None and f.get("kind") == doc.get("kind") and t.date() == ts.date()
+                and round(float(f.get("amount") or 0), 2) == doc.get("amount")):
+            return f
+    return None
+
+
+def flow_warnings(doc: dict, current_start: datetime | None, snapshots: Iterable[dict]) -> list[dict]:
+    """Non-blocking notes shown after a cash flow is saved: [{code, message}].
+    * date_in_current_period: the date falls inside the current period, so returns are no longer like-for-like;
+    * no_balance_jump: account snapshots exist on both sides of the date but cash moved by less than half the amount
+      in the matching direction (the money may not have arrived, or the date is wrong)."""
+    out: list[dict] = []
+    ts = utc(doc.get("ts"))
+    if ts is None:
+        return out
+    if current_start is not None and ts >= current_start:
+        out.append({"code": "date_in_current_period",
+                    "message": "This date is inside the current period: returns are no longer like-for-like."})
+    cash = []
+    for s in snapshots:
+        t, c = utc(s.get("ts")), pnlsvc._f(s.get("cash"))
+        if t is not None and c is not None and ts - timedelta(days=1) <= t <= ts + timedelta(days=2):
+            cash.append((t, c))
+    cash.sort()
+    if len(cash) >= 2:
+        sign = 1.0 if doc.get("kind") == "deposit" else -1.0
+        best = max(sign * (b[1] - a[1]) for a, b in zip(cash, cash[1:]))
+        if best < 0.5 * float(doc.get("amount") or 0):
+            out.append({"code": "no_balance_jump",
+                        "message": "No matching jump in the account cash balance around this date; check the date "
+                                   "and amount."})
     return out
 
 

@@ -72,8 +72,8 @@ def test_marker_validation_and_typo_guard():
 
 
 def test_cash_flow_validation():
-    ok = P.validate_cash_flow({"kind": "deposit", "amount": 12.345}, NOW)
-    assert ok["amount"] == 12.35 and ok["ts"] == NOW and ok["note"] is None
+    ok = P.validate_cash_flow({"kind": "deposit", "amount": 12.345, "ts": NOW.isoformat()}, NOW)
+    assert ok["amount"] == 12.35 and ok["ts"] == NOW and ok["note"] is None and ok["confirm_duplicate"] is False
     ok = P.validate_cash_flow({"kind": "withdrawal", "amount": 5, "ts": (NOW - timedelta(days=2)).isoformat(),
                                "note": "rent"}, NOW)
     assert ok["ts"] == NOW - timedelta(days=2) and ok["note"] == "rent"
@@ -81,6 +81,8 @@ def test_cash_flow_validation():
                 {"kind": "deposit", "amount": True}, {"kind": "deposit", "amount": "5"},
                 {"kind": "deposit", "amount": 100001}, {"kind": "deposit", "amount": float("nan")},
                 {"kind": "deposit", "amount": 0.001}, {"kind": "deposit", "amount": 5, "ts": "garbage"},
+                {"kind": "deposit", "amount": 5}, {"kind": "deposit", "amount": 5, "ts": ""},
+                {"kind": "deposit", "amount": 5, "ts": NOW.isoformat(), "confirm_duplicate": "yes"},
                 {"kind": "deposit", "amount": 5, "ts": (NOW + timedelta(hours=1)).isoformat()},
                 {"kind": "deposit", "amount": 5, "ts": "2001-01-01T00:00:00+00:00"},
                 {"kind": "deposit", "amount": 5, "note": "z" * 201}, {"kind": "deposit", "amount": 5, "x": 1}, []):
@@ -227,7 +229,7 @@ async def test_cash_flow_add_list_delete_and_audit(env):
                               headers=await env.h2fa())
     assert r.status_code == 200, r.text
     fid = r.json()["created"]
-    r2 = await env.client.post("/api/cash-flows", json={"kind": "withdrawal", "amount": 25.5},
+    r2 = await env.client.post("/api/cash-flows", json={"kind": "withdrawal", "amount": 25.5, "ts": NOW.isoformat()},
                                headers=await env.h2fa())
     assert [f["kind"] for f in r2.json()["cash_flows"]] == ["deposit", "withdrawal"]      # oldest first
     f0 = r2.json()["cash_flows"][0]
@@ -245,11 +247,12 @@ async def test_cash_flow_add_list_delete_and_audit(env):
 
 
 @pytest.mark.asyncio
-async def test_cash_flow_bad_input_is_400_and_audited(env):
+async def test_cash_flow_bad_input_is_422_and_audited(env):
     for bad in ({}, {"kind": "deposit"}, {"kind": "deposit", "amount": 0}, {"kind": "deposit", "amount": 1e9},
-                {"kind": "x", "amount": 5}, {"kind": "deposit", "amount": 5, "ts": "nope"}):
+                {"kind": "x", "amount": 5}, {"kind": "deposit", "amount": 5, "ts": "nope"},
+                {"kind": "deposit", "amount": 5}):
         r = await env.client.post("/api/cash-flows", json=bad, headers=await env.h2fa())
-        assert r.status_code == 400 and isinstance(r.json()["detail"], list), bad
+        assert r.status_code == 422 and isinstance(r.json()["detail"], list), bad
     assert await env.store.list_cash_flows() == []
     assert (await env.client.delete("/api/cash-flows/bad%20id", headers=await env.h2fa())).status_code in (400, 404)
     assert all(not a["ok"] for a in await env.store.list_audit(limit=50) if a["action"].startswith("cash_flow"))
