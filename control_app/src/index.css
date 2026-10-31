@@ -99,7 +99,11 @@ a:hover { text-decoration: underline; }
 .appbar {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: calc(env(safe-area-inset-top) + 8px) var(--gutter) 8px;
+  /* iOS standalone with status-bar-style "black" (index.html): the page starts BELOW the solid status bar and
+     env(safe-area-inset-top) is 0, so this is one even 10px gap; if a device ever reports an inset (> 0) it is
+     added once here. Nothing else adds the inset on top: the pull-to-refresh offset reads this bar's measured height. */
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) var(--gutter) 10px;
+  min-height: calc(var(--tap-lg) + 20px);
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
@@ -133,7 +137,7 @@ a:hover { text-decoration: underline; }
   overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
 }
 .content .page-head { justify-content: flex-end; }
-.page-title + .page > .page-head:first-child {
+.page-title ~ .page > .page-head:first-child {
   min-height: var(--page-title-h); margin-top: calc(-1 * var(--page-title-h)); margin-bottom: 0;
 }
 
@@ -157,6 +161,27 @@ a:hover { text-decoration: underline; }
   border-bottom-color: color-mix(in srgb, var(--accent) 30%, var(--border));
   box-shadow: 0 6px 12px -8px rgba(0, 0, 0, 0.6);
 }
+/* Back controls: a group overlaying the bar's left end (same sticky offset, fades with the bar): "‹" history
+   back + "Parent ›" up link, each 44 px tall. The bar reserves room (has-back, --back-ch = parent name length)
+   and drops its accent stripe so the page name keeps the rest of the line and truncates with an ellipsis. */
+.page-title.has-back { padding-left: calc(var(--back-ch, 4) * 1ch + 4.25rem); }
+.page-title.has-back .page-title-accent { display: none; }
+.page-back {
+  position: sticky; top: var(--appbar-h, 53px); z-index: 16; width: fit-content;
+  display: flex; align-items: center; height: var(--page-title-h); margin-top: calc(-1 * var(--page-title-h));
+  font-size: var(--fs-md); font-weight: 500; white-space: nowrap;
+  transition: opacity 220ms cubic-bezier(0.2, 0, 0, 1), visibility 0s;
+}
+.back-btn, .back-up {
+  display: inline-flex; align-items: center; gap: 4px; height: var(--page-title-h); min-width: var(--tap);
+  color: var(--accent); text-decoration: none;
+}
+.back-btn { justify-content: center; font-size: 1.6em; line-height: 1; margin-left: -10px; }
+.back-up { color: var(--muted); }
+.back-btn:hover, .back-up:hover { text-decoration: none; color: var(--text); }
+.back-sep { color: var(--muted); }
+.page-back.is-hidden { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 320ms ease, visibility 0s linear 320ms; }
+@media (prefers-reduced-motion: reduce) { .page-back { transition: none; } }
 .page-title-accent { flex-shrink: 0; width: 3px; height: 1.25rem; border-radius: 2px; background: var(--accent); }
 .page-title-icon { display: flex; flex-shrink: 0; color: var(--accent); }
 .page-title-text {
