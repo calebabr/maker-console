@@ -7,7 +7,7 @@ const norm = (p) => String(p || '/').replace(/\/+$/, '') || '/';
 /**
  * Route-based tab strip under the page title (strategy pages: Overview | Results | Controls).
  *   <SubNav label="Maker views" items={[{ to: '/strategies/maker', label: 'Overview' }, ...]} />
- * Each item is a link, so Back works and the view survives a reload. Semantics: a tablist whose tabs are
+ * Each item is a link that REPLACES the history entry (Back leaves the page instead of stepping through tabs), so Back works and the view survives a reload. Semantics: a tablist whose tabs are
  * links (aria-selected on the current one). An item matches its exact path only (items are siblings).
  * Keyboard: Left / Right move focus (wrapping), Home / End jump to the first / last; Enter and Space
  * activate (Space is added to the link's native Enter). Roving tabindex: only the current tab is in the
@@ -53,6 +53,7 @@ export default function SubNav({ items, label = 'Views', className = '' }) {
             key={it.to}
             to={it.to}
             end
+            replace
             role="tab"
             aria-selected={i === currentIdx}
             tabIndex={i === currentIdx ? 0 : -1}

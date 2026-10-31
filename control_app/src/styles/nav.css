@@ -30,8 +30,9 @@
   margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter);
   background: var(--bg); border-bottom: 1px solid var(--border);
 }
+.subnav { display: flex; align-items: center; }
 .subnav-list {
-  display: flex; gap: var(--sp-1); overflow-x: auto; overscroll-behavior-x: contain;
+  flex: 1 1 auto; min-width: 0; display: flex; gap: var(--sp-1); overflow-x: auto; overscroll-behavior-x: contain;
   scrollbar-width: none; -webkit-overflow-scrolling: touch;
 }
 .subnav-list::-webkit-scrollbar { display: none; }

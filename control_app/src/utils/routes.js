@@ -33,7 +33,8 @@ export const PERFORMANCE_ANALYSIS_PATH = '/performance/analysis';
 // ---------------------------------------------------------------- titles
 
 const strategyTitles = STRATEGY_IDS.flatMap((id) =>
-  STRATEGY_VIEWS.map((v) => ({ path: strategyPath(id, v.id), title: STRATEGY_PAGES[id] })),
+  // parent: where the back control goes.
+  STRATEGY_VIEWS.map((v) => ({ path: strategyPath(id, v.id), title: STRATEGY_PAGES[id], parent: '/strategies' })),
 );
 
 // Page names are Title Case. Strategy sub-pages title as "Maker" / "Arbitrage" (the view name is in the tablist).
@@ -42,19 +43,19 @@ export const ROUTE_TITLES = [
   { path: '/strategies', title: 'Strategies' },
   ...strategyTitles,
   { path: '/performance', title: 'Performance' },
-  { path: '/performance/periods', title: 'Periods' },
-  { path: '/analytics', title: 'Analytics' },
-  { path: '/shadow', title: 'Shadow Estimate' },
+  { path: '/performance/periods', title: 'Periods', parent: '/performance' },
+  { path: '/analytics', title: 'Analytics', parent: '/performance' },
+  { path: '/shadow', title: 'Shadow Estimate', parent: '/performance' },
   { path: '/activity', title: 'Activity' },
   { path: '/more', title: 'More' },
-  { path: '/health', title: 'Health' },
-  { path: '/server', title: 'Server' },
-  { path: '/mode', title: 'Mode' },
-  { path: '/logs', title: 'Logs' },
-  { path: '/account', title: 'Account' },
-  { path: '/settings', title: 'Settings' },
-  { path: '/alerts', title: 'Alerts' },
-  { path: '/terminology', title: 'Terminology' },
+  { path: '/health', title: 'Health', parent: '/more' },
+  { path: '/server', title: 'Server', parent: '/more' },
+  { path: '/mode', title: 'Mode', parent: '/more' },
+  { path: '/logs', title: 'Logs', parent: '/more' },
+  { path: '/account', title: 'Account', parent: '/more' },
+  { path: '/settings', title: 'Settings', parent: '/more' },
+  { path: '/alerts', title: 'Alerts', parent: '/more' },
+  { path: '/terminology', title: 'Terminology', parent: '/more' },
 ];
 
 // ---------------------------------------------------------------- legacy redirects
@@ -81,6 +82,13 @@ export function titleForPath(pathname) {
   const p = normalise(pathname);
   const hit = ROUTE_TITLES.find((r) => r.path === p);
   return hit ? hit.title : null;
+}
+
+/** Parent of a route (the back arrow's target), or null for the five tabs and unknown paths. */
+export function parentForPath(pathname) {
+  const p = normalise(pathname);
+  const hit = ROUTE_TITLES.find((r) => r.path === p);
+  return hit && hit.parent ? hit.parent : null;
 }
 
 /** document.title for a page: "Health · Prior"; just "Prior" when unknown. */
