@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import useScrollIdle from '../hooks/useScrollIdle.js';
-import { documentTitle, titleForPath } from '../utils/routes.js';
+import BackLink from './BackLink.jsx';
+import { useNavTrailRecorder } from '../hooks/useNavTrail.js';
+import { documentTitle, parentForPath, titleForPath } from '../utils/routes.js';
 import { iconForPath } from './navIcons.jsx';
 
 const REDUCE_QUERY = '(prefers-reduced-motion: reduce)';
@@ -39,6 +41,9 @@ function usePrefersReducedMotion() {
 export default function PageTitle() {
   const { pathname } = useLocation();
   const title = titleForPath(pathname);
+  useNavTrailRecorder();
+  const parent = parentForPath(pathname);
+  const back = parent ? { label: titleForPath(parent) } : null;
   const Icon = iconForPath(pathname);
   const { atTop, idle } = useScrollIdle({ resetKey: pathname });
   const reduce = usePrefersReducedMotion();
@@ -82,16 +87,17 @@ export default function PageTitle() {
   }, []);
 
   if (!title) return null;
-  const cls = ['page-title', shown ? 'is-shown' : 'is-hidden', atTop ? 'at-top' : 'is-stuck', reduce ? 'no-motion' : '']
+  const cls = ['page-title', back ? 'has-back' : '', shown ? 'is-shown' : 'is-hidden', atTop ? 'at-top' : 'is-stuck', reduce ? 'no-motion' : '']
     .filter(Boolean)
     .join(' ');
-  return (
+  const bar = (
     <div
       ref={ref}
       className={cls}
       aria-hidden="true"
       data-testid="page-title"
       data-state={shown ? 'shown' : 'hidden'}
+      style={back ? { '--back-ch': back.label.length } : undefined}
     >
       <span className="page-title-accent" />
       {Icon && (
@@ -101,5 +107,14 @@ export default function PageTitle() {
       )}
       <span className="page-title-text">{title}</span>
     </div>
+  );
+  if (!back) return bar;
+  // The back link is a sibling, not a child: the bar is aria-hidden (decorative) and a link must stay reachable.
+  // It overlays the bar's left end (the bar reserves room with `has-back`) and fades with it.
+  return (
+    <>
+      {bar}
+      <BackLink className={`page-back ${shown ? 'is-shown' : 'is-hidden'}`} />
+    </>
   );
 }

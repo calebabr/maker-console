@@ -6,7 +6,10 @@
     <meta name="theme-color" content="#0f141b" />
     <meta name="description" content="Prior: your strategies. One tap away." />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- "black" = solid status bar; the page starts below it (black-translucent drew the app under the clock).
+         iOS caches this at "Add to Home Screen" time: delete the home-screen icon and re-add it after a release
+         that changes it. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="Prior" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
